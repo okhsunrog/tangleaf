@@ -48,7 +48,7 @@ adb shell cat /system/lib64/libonyx_pen_touch_reader.so > native/libonyx_pen_tou
 Find the apk behind a package with `adb shell pm path <pkg>` (or `pm list packages -f`).
 
 **Not readable without root:** `/system/bin/surfaceflinger`. This is the one file that matters
-and the one we cannot have — Onyx patches the handwriting layer (ink regions, exclusions,
+and the one adb cannot give us — Onyx patches the handwriting layer (ink regions, exclusions,
 update modes, live ink) directly into SurfaceFlinger. `libSurfaceFlingerProp.so` is stock
 configstore and contains nothing of interest. Nothing in `/vendor` carries the EPD logic
 either. That is the reason for section 4.
@@ -176,7 +176,19 @@ python extract_android_ota_payload.py update-4.2.zip out/    # github.com/cyxx/e
 lpunpack super.img super_out/                                # dynamic partitions -> system.img
 ```
 
-`system.img` then yields `/system/bin/surfaceflinger`, the piece adb cannot reach.
+`system.img` is a plain ext image, so the file comes out without mounting anything:
+
+```bash
+debugfs -R "dump /bin/surfaceflinger system_extract/surfaceflinger" system.img
+```
+
+Done on 2026-09-07: the package matched the device build exactly (md5 as advertised), and
+`payload.bin` yielded `system.img` directly — no `super.img`/`lpunpack` step was needed on this
+device. The binary is 11.7 MB, ARM64, PIE, stripped, but keeps C++ RTTI and a generous set of log
+strings (`HandwritingSchema`, `startHandwriting`, `Set exclude region: (%d %d) - (%d %d)`,
+`pen control state: %s, penTriggered: %d, current epdc schema: %d, androidDrawing: %d`,
+`processOnyxRequests %x`, `EpdcSchemaManager`, `onyx_epdc_screenRefresh`), which anchor the
+analysis. `radare2` from string cross-references is the practical way in.
 
 ## 5. Findings this made possible
 
@@ -201,6 +213,10 @@ Short pointers only; the detail is in the four reports.
   WebView manager). The service enforces no permission at all — but opting in costs us ownership
   of pen state, region limit and stroke parameters, and adds a full-panel repaint on every finger
   touch, so we stay with our own implementation.
+- The system EAC service is `android.onyx.optimization.OECService`, registered from
+  `com.android.server.SystemServer`; its implementation lives in `framework.jar`, not in
+  `services.jar` and not in any separate apk. Searching `services.jar` for a package path
+  containing "onyx" finds nothing and is misleading.
 - The five EinkWise profiles are a myth on this device: `noteair4c_systemui.json` defines three
   (`refresh_mode_1` REGAL_PLUS, `refresh_mode_2` "New Speed" = A2 with turbo 5, `refresh_mode_4` HD),
   and `eac_noteair4c.json` already sets `refresh_mode_2` as the default for every third-party app —
