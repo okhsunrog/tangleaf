@@ -8,6 +8,12 @@ import { requestFullRefresh } from "@/lib/api";
  * clears it, and a full refresh flashes the whole display — so it is asked for once things have
  * settled, never per frame.
  *
+ * Counting navigations and cleaning up after a few of them used to happen here too. It does not
+ * any more: the firmware counts every finger lift and refreshes on the interval the user picked in
+ * Settings -> Display -> Full Refresh Frequency, and it only does that for the quality update modes
+ * (0, 3 and 5 in `DEBOUNCER_UPDATE_MODE_MAP`) — which is what this app now asks for. Doing it here
+ * as well meant two counters flashing the panel for the same reason, and ours ignored the setting.
+ *
  * Deliberately free of React: navigation dispatches and the shared overlay wrappers are the places
  * a screen actually changes, and none of them is a component this could hang off. The resolved
  * display is pushed in from the appearance provider instead of being read from the DOM, so the
@@ -15,16 +21,8 @@ import { requestFullRefresh } from "@/lib/api";
  */
 const SETTLE_MS = 300;
 
-/**
- * A full flash on every page change is more distracting than the ghosting it removes, so
- * navigations are counted and the panel is cleaned once enough of them have accumulated.
- * Overlays still refresh on close: their rectangle leaves the sharpest ghost of all.
- */
-export const NAVIGATIONS_PER_REFRESH = 6;
-
 let eink = false;
 let pending: ReturnType<typeof setTimeout> | null = null;
-let navigationsSinceRefresh = 0;
 
 /** Called by the appearance provider whenever the resolved display changes. */
 export function setEinkRefreshEnabled(enabled: boolean): void {
@@ -39,18 +37,10 @@ export function setEinkRefreshEnabled(enabled: boolean): void {
 export function requestFullRefreshSoon(): void {
   if (!eink) return;
   cancel();
-  navigationsSinceRefresh = 0;
   pending = setTimeout(() => {
     pending = null;
     void requestFullRefresh().catch(() => undefined);
   }, SETTLE_MS);
-}
-
-/** A page change happened; refreshes only every `NAVIGATIONS_PER_REFRESH`-th one. */
-export function noteNavigation(): void {
-  if (!eink) return;
-  navigationsSinceRefresh += 1;
-  if (navigationsSinceRefresh >= NAVIGATIONS_PER_REFRESH) requestFullRefreshSoon();
 }
 
 /**
@@ -78,6 +68,5 @@ function cancel(): void {
 /** Test seam: drops the gate and any refresh still waiting. */
 export function resetEinkRefresh(): void {
   eink = false;
-  navigationsSinceRefresh = 0;
   cancel();
 }
