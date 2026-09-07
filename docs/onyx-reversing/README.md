@@ -65,8 +65,9 @@ state by state through our git history.
 
 ## What is still open
 
-- The SurfaceFlinger side of all of the above. The four documents below were written before the
-  binary was extracted, so their "not readable without root" caveats are now addressable; a sixth
-  document covering the binary is in progress.
+- The SurfaceFlinger side of all of the above. Documents 02-05 were written before the binary was
+  extracted, so their "not readable without root" caveats are now addressable; a document covering
+  the binary itself is in progress. The device is now rooted ([06](06-rooting.md)), so the
+  remaining questions can be settled by observing the live process rather than by static reading.
 - Which single sequence an app should send to clear a dead rectangle, verified on hardware rather
   than derived. Each document ends with experiments phrased as one testable action each.
