@@ -264,6 +264,62 @@ Onyx branch.
 - Recovery, if a boot image ever fails: `adb reboot edl` (or power on into EDL) and
   `edl.py w boot_b backup/boot_b_stock.img`. The other slot is still stock as a second line.
 
+## Updating the firmware once rooted
+
+Not yet done on this device — the steps below are derived from how the pieces work, and every one
+that has not been executed says so. Read it before accepting an update, not after.
+
+**Incremental packages will refuse to install.** They patch the existing partitions and verify them
+first, and boot no longer matches. Only a full package will go on. Sizes tell them apart at a
+glance (see the table in [01](01-sources-and-firmware.md)): 4.0 and 4.2 are full at ~2 GB, 4.0.1 and
+4.1 are incremental at a few hundred MB. If the device offers an incremental update, the way
+forward is to fetch the newest **full** package from the API instead, using the query in
+[01](01-sources-and-firmware.md) with an older fingerprint.
+
+**A full package removes root** — it rewrites boot along with everything else. That is not a
+problem, it is the expected outcome: re-root afterwards exactly as in section 5, but patch the
+**new** `boot.img`, taken from the new package, not the old file.
+
+Order that keeps a working device at every step:
+
+1. Read both boot partitions off the device again and keep them (section 4). They are the only way
+   back if the update itself fails.
+2. Fetch the new full package, decrypt it, and extract `boot.img` and `services.jar` from it —
+   `payload.bin` gives the first, `system.img` plus `debugfs` the second.
+3. Apply the update. Either through Settings, or by pushing the decrypted `update.zip` and starting
+   the installer directly, which is what the vendor's own wiki documents:
+   `adb push update.zip /sdcard/ && adb shell am start -n com.onyx.android.onyxotaservice/.OtaInfoActivity`.
+   **Untested here.**
+4. The device reboots unrooted. Verify it boots and that the build is what you expected before
+   touching anything else.
+5. Patch the new `boot.img` with the Magisk app and write it to the now-active slot over EDL, as in
+   section 5. Note the active slot may have swapped — check `ro.boot.slot_suffix` and write to the
+   slot the device is actually using.
+6. Rebuild the `services.jar` module from the **new** file (section 8). The old module will not do:
+   ART rejects a jar that does not match the build, and the device will not boot with it. Verify the
+   Onyx defect is still there first — if a future firmware fixes `addPackageDependency`, the module
+   becomes unnecessary and should simply be dropped.
+7. Re-check anything the update may have reset: the EAC config store is rebuilt when an OTA bumps
+   `jsonVersion`, so the app's refresh profile may need to be written again.
+
+**Do not** try to restore the stock boot image to make an incremental update apply. The route is
+untested here, and the guide this work followed reports soft-bricking a device that way.
+
+## What root turned out to be worth
+
+Two techniques, both used in anger, worth remembering because neither needs a rebuild of the app:
+
+- **A thread dump of a live, wedged process**, without changing it:
+  `adb shell su -c "debuggerd -b <pid>"`. This is what identified a stall as a long transaction on
+  the database worker rather than a deadlock — every runtime thread parked, the SQLite thread alive
+  inside a specific function, spilling a write-ahead log. Sampling it three times showed it
+  advancing, which ruled out a lock.
+- **Reading the EAC config store the firmware actually obeys**:
+  `adb shell su -c "strings /onyxconfig/mmkv/onyx_config"`, then grepping for the package. The
+  service's read path answers from a different key than its write path, so this is the only way to
+  confirm what a configuration write really did — and it is how `supportEAC: false` was found on the
+  stock Notes app and `true` on ours.
+
 ## Artefacts from this run
 
 Kept outside the repo, under `~/tmp_zfs/boox_fw/`:

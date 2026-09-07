@@ -140,8 +140,21 @@ Older NoteAir4C packages, from
 | `2025-01-09_20-02_4.0_43a9adea0` (2009)            | `91defa9bf4fb9d94d7d85398c7b4b354` | 1 932 759 570 |
 | `2025-06-13_22-34_4.0.1-rel_0613_17903883e` (3746) | `1e8e256ad1613982cbd4440055132160` | 138 608 668   |
 | `2025-07-26_19-00_4.1-rel_0726_509651412` (4593)   | `3f4de14a058b8263e1bdaf47f351ca0c` | 353 069 994   |
+| `2026-04-28_17-50_4.2-rel_04282_555977efe` (8548)  | `0cd82055053aa6787b5375757889e36e` | 1 983 772 531 |
 
-Note the sizes: only the first is a full image; the others are incremental.
+Note the sizes: 4.0 and 4.2 are full images, 4.0.1 and 4.1 are incremental.
+
+The query needs a whole Onyx-format fingerprint, so here they are in full:
+
+```
+Onyx/NoteAir4C/NoteAir4C:11/2025-01-09_20-02_4.0_43a9adea0/2009:user/release-keys
+Onyx/NoteAir4C/NoteAir4C:11/2025-06-13_22-34_4.0.1-rel_0613_17903883e/3746:user/release-keys
+Onyx/NoteAir4C/NoteAir4C:11/2025-07-26_19-00_4.1-rel_0726_509651412/4593:user/release-keys
+Onyx/NoteAir4C/NoteAir4C:11/2026-04-28_17-50_4.2-rel_04282_555977efe/8548:user/release-keys
+```
+
+Ask with any fingerprint but the newest and the server answers with whatever comes after it, so
+the 4.1 line is the one to send to be offered 4.2.
 
 ### Capturing the device's own request instead
 
