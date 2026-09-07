@@ -188,14 +188,17 @@ internal class OnyxInk(
          * caller dies. A rect pushed by an earlier run of this app therefore outlives it and keeps
          * swallowing pen input until the device reboots.
          *
-         * It cannot be withdrawn the obvious ways: `RawInputReader.setExcludeRect` returns early on
-         * an empty list, and a zero-area rectangle does not clear anything either, because the
-         * native test inflates every exclusion by half the stroke width and so still excludes a box
-         * at the origin. The firmware's own reset, in `EACScreenNoteUtils`, passes a **null view**
-         * with a single `{0,0,0,0}` rect: the null skips the coordinate translation and the
-         * receiving side reads it as "drop the table".
+         * The receiving side clears the table only when the payload is empty
+         * (`PenManager::setExcludeRegion`, which takes its `n <= 0` branch); a zero-area rectangle
+         * is *stored*, not treated as a reset, and then still excludes a box at the origin because
+         * the hit test inflates every exclusion by half the stroke width. So the reset is an empty
+         * array, and the null view keeps the coordinate translation from running over it.
+         *
+         * `RawInputReader.setExcludeRect` cannot express this — it returns early on an empty list —
+         * but the app-side reader has no such guard, so `setLimitRect(limit, NO_EXCLUDES)` already
+         * wipes its half of the state on every resume.
          */
-        private val EXCLUDE_RESET = arrayOf(Rect(0, 0, 0, 0))
+        private val EXCLUDE_RESET = emptyArray<Rect>()
         private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
@@ -310,7 +313,7 @@ internal class OnyxInk(
             region.invalidateAll()
             return status()
         }
-        pause(releaseDisplay = false)
+        pause(releaseDisplay = false, tearDown = false)
         config = args
         // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
         val scale = webView.width / args.viewportWidth
@@ -348,7 +351,6 @@ internal class OnyxInk(
                 helper!!.setSingleRegionMode()
                 helper!!.setLimitRect(limit, NO_EXCLUDES).openRawDrawing()
                 helper!!.setEraserRawDrawingEnabled(false, 0)
-                helper!!.enableSideBtnErase(true)
             }
             if (args.fastLasso) {
                 // The firmware draws the selection trace as a dashed line only when the dash
@@ -581,7 +583,14 @@ internal class OnyxInk(
         }) }
     }
 
-    private fun pause(releaseDisplay: Boolean = true) {
+    /**
+     * @param tearDown whether to rebuild the SurfaceFlinger ink session as well. A real pause — a
+     * dialog, the keyboard, losing focus — is the moment to do it. A reconfigure is not: the pen is
+     * only being re-armed over new geometry, the firmware's own geometry path likewise skips its
+     * repaint, and `configure` runs on every scroll frame, so tearing the session down there would
+     * put a schema rebuild on a hot path.
+     */
+    private fun pause(releaseDisplay: Boolean = true, tearDown: Boolean = true) {
         if (releaseDisplay || gesture.drawing) releaseDisplayMode()
         webView.removeCallbacks(refresh)
         webView.removeCallbacks(penUpWait)
@@ -589,7 +598,7 @@ internal class OnyxInk(
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
         gate.pause()
-        cycleScribbleSession()
+        if (tearDown) cycleScribbleSession()
         // Whatever pauses the pen — a dialog, a menu, the keyboard, a tool or page change — also
         // draws over the panel. Stock clears `isEnabledPenDirtyRect` for exactly that, so the
         // first reconcile afterwards covers the whole writing region instead of a stroke union.
@@ -695,6 +704,12 @@ internal class OnyxInk(
         pause()
         generation++
         helper?.closeRawDrawing()
+        // SurfaceFlinger holds the ink session and the exclusion table with no owner and no death
+        // recipient, so whatever we leave behind outlives this process. Put both back by hand.
+        if (hadSession) {
+            cycleScribbleSession()
+            clearLatchedExcludes()
+        }
         helper = null
         config = null
         overlays = emptyList()

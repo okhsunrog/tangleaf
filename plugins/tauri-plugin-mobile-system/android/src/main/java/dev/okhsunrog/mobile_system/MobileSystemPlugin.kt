@@ -13,6 +13,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.pen.EpdPenManager
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.api.device.epd.UpdateOption
 import com.onyx.android.sdk.api.device.eac.EACReflectUtils
@@ -68,6 +69,7 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
 
     override fun load(webView: WebView) {
         inkWebView = webView
+        clearStaleInkState(webView)
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
         // One insets listener per view: the keyboard pauses the pen and switches the panel to
         // a text-friendly update mode, whether or not an ink session exists at the time.
@@ -76,6 +78,21 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             insets
         }
         ViewCompat.requestApplyInsets(webView)
+    }
+
+    /**
+     * SurfaceFlinger owns the ink session and the handwriting exclusion table, keyed by nothing and
+     * reaped by nothing: the transaction that would tear a dead client's session down exists but is
+     * never sent, so a crash or a force-stop mid-stroke leaves this process's state behind for the
+     * next one to inherit — a band where the pen will not ink and our own layers are not
+     * composited. Clearing both at startup costs two transactions and is silent.
+     */
+    private fun clearStaleInkState(webView: WebView) {
+        if (!OnyxInk.supported() || !VendorAccess.ensure()) return
+        runCatching {
+            EpdController.setScreenHandWritingPenState(webView, EpdPenManager.PEN_PAUSE)
+            EpdController.setScreenHandWritingRegionExclude(null, emptyArray())
+        }.onFailure { Log.w("OnyxInk", "stale ink state: ${it.message}") }
     }
 
     private var imeVisible = false
@@ -242,29 +259,48 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 .put("accepted", true)
                 .put("effectiveMode", view.readMode()?.name)
         }
-        view.set(DisplayModeStack.Layer.BASE, UpdateMode.REGAL)
-        val verifiable = view.effective == UpdateMode.REGAL
-        val accepted = !verifiable || view.readMode() == UpdateMode.REGAL
-        if (!accepted) view.set(DisplayModeStack.Layer.BASE, UpdateMode.GU)
-        return result.put("requested", UpdateMode.REGAL.name)
-            .put("accepted", accepted)
+        // REGAL is not a mode this panel runs: `supportRegal()` is false, and the readback cannot
+        // tell "the view holds GU" from "the reflective read failed", so asking for it and
+        // believing the answer was never sound. GU is what the panel actually does.
+        view.set(DisplayModeStack.Layer.BASE, UpdateMode.GU)
+        return result.put("requested", UpdateMode.GU.name)
+            .put("accepted", true)
             .put("effectiveMode", view.readMode()?.name)
-            .put("appRefreshMode", applyAppRefreshProfile())
-            .also { ensureSpeedRefreshProfile() }
+            .also { ensureRefreshProfile() }
     }
 
     /**
-     * Writes the Speed refresh profile into this app's EinkWise (EAC) configuration, the same
-     * way the EinkWise panel does: fetch the app's config JSON from the optimisation service,
-     * change the refresh block, hand it back. The runtime `setAppScopeRefreshMode` had no effect
-     * on this firmware; the stored profile is what the panel actually obeys for the caret,
-     * touches and scrolling. Idempotent, off the UI thread, and a no-op when the service or the
-     * reflection hooks are missing.
+     * Writes this app's refresh profile into its EinkWise (EAC) configuration, the same way the
+     * EinkWise panel does: fetch the app's config JSON from the optimisation service, change the
+     * refresh block, hand it back.
+     *
+     * The profile is the only lever that changes what the *firmware* does for us — the caret,
+     * finger touches, scrolling — and the index is what resolves it; `updateMode` alone is
+     * decorative for the waveform, but the dither and the counted full refresh read that raw
+     * field, so both are written.
+     *
+     * We used to write "Speed", which is this device's factory default for third-party apps, so
+     * the call did nothing. Worse, Speed is A2, and A2 sits outside the firmware's debouncer map:
+     * it turns off the counted auto-GC, the debounced quality repaint after input, the dither and
+     * the scroll helper. Those four are exactly the mechanisms that keep a page from accumulating
+     * ghosting, so the profile we asked for was the one that guaranteed we would not get them.
+     *
+     * Idempotent, off the UI thread, and a no-op when the service or the reflection hooks are
+     * missing. It has to stay idempotent: any successful write broadcasts a config change that
+     * comes back into this process as a full redraw.
      */
-    private fun ensureSpeedRefreshProfile() {
+    private fun ensureRefreshProfile() {
         val get = EACReflectUtils.sMethodGetAppConfigFromService ?: return
         val apply = EACReflectUtils.sMethodApplyAppConfigToService ?: return
         val pkg = activity.packageName
+        // The read and the write do not meet: `getAppConfigFromService` answers from the active
+        // theme, `applyAppConfigToService` stores into the per-package map, and the two are
+        // reconciled only when the optimisation service starts. So the config we read back still
+        // says Speed however many times we have written HD, and without a marker of our own this
+        // would rewrite on every launch — and every successful write broadcasts a config change
+        // that lands back in this process as a full redraw.
+        val marker = activity.getSharedPreferences("mobile_system", android.content.Context.MODE_PRIVATE)
+        if (marker.getString(PROFILE_MARKER, null) == QUALITY_MODE_INDEX) return
         Thread {
             runCatching {
                 val configs = ReflectUtil.invokeMethodSafely(get, null, listOf(pkg)) as? List<*>
@@ -276,56 +312,23 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
                 val root = org.json.JSONObject(json)
                 val refresh = root.getJSONObject("globalActivityConfig").getJSONObject("refreshConfig")
                 val current = refresh.optString("refreshModeIndex")
-                if (current == SPEED_MODE_INDEX && refresh.optInt("updateMode") == SPEED_UPDATE_MODE) {
-                    Log.d("OnyxInk", "eac: refresh profile already Speed")
+                if (current == QUALITY_MODE_INDEX && refresh.optInt("updateMode") == QUALITY_UPDATE_MODE) {
+                    Log.d("OnyxInk", "eac: refresh profile already $QUALITY_MODE_INDEX")
+                    marker.edit().putString(PROFILE_MARKER, QUALITY_MODE_INDEX).apply()
                     return@runCatching
                 }
-                refresh.put("refreshModeIndex", SPEED_MODE_INDEX)
-                refresh.put("updateMode", SPEED_UPDATE_MODE)
-                refresh.put("turbo", SPEED_TURBO)
+                refresh.put("refreshModeIndex", QUALITY_MODE_INDEX)
+                refresh.put("updateMode", QUALITY_UPDATE_MODE)
+                refresh.put("turbo", QUALITY_TURBO)
+                refresh.put("enable", true)
                 refresh.remove("refreshModeAlias")
                 val bundle = android.os.Bundle().apply { putInt("args_operation_flag", 0) }
                 val result = ReflectUtil.invokeMethodSafely(apply, null, listOf(root.toString()), bundle)
-                Log.d("OnyxInk", "eac: refresh profile $current -> $SPEED_MODE_INDEX result=$result")
+                marker.edit().putString(PROFILE_MARKER, QUALITY_MODE_INDEX).apply()
+                Log.d("OnyxInk", "eac: refresh profile $current -> $QUALITY_MODE_INDEX result=$result")
             }.onFailure { Log.w("OnyxInk", "eac: refresh profile: ${it.message}") }
         }.start()
     }
-
-    /**
-     * The firmware refreshes the caret, touches and scrolling by the app's refresh profile — the
-     * one EinkWise shows as HD / Balanced / Regal / Speed. Regal turns each of those into a full
-     * flash; Speed keeps them partial, which is what a note app wants. The SDK exposes the
-     * profile at runtime through `setAppScopeRefreshMode`, but if the firmware lacks the app-scope
-     * method the SDK silently falls back to the *system* profile, so the method is probed first.
-     * Runtime only: EinkWise's stored profile stays whatever the user chose.
-     */
-    private fun applyAppRefreshProfile(): String? {
-        val supported = runCatching {
-            Class.forName("android.onyx.optimization.EInkHelper")
-                .getMethod("setAppScopeRefreshMode", Int::class.javaPrimitiveType)
-        }.isSuccess
-        if (!supported) {
-            Log.w("OnyxInk", "app-scope refresh mode unsupported by this firmware; leaving EinkWise's profile")
-            return null
-        }
-        // The SDK reports NORMAL for any reflection failure, so the firmware calls are made and
-        // logged directly here as well; the raw integers are what the panel actually holds.
-        val helper = runCatching { Class.forName("android.onyx.optimization.EInkHelper") }.getOrNull()
-        val rawBefore = helper?.let { readAppScopeRaw(it) }
-        return runCatching {
-            EpdController.setAppScopeRefreshMode(UpdateOption.FAST)
-            val applied = EpdController.getAppScopeRefreshMode()
-            val rawAfter = helper?.let { readAppScopeRaw(it) }
-            Log.d("OnyxInk", "app-scope refresh mode requested=FAST applied=$applied raw before=$rawBefore after=$rawAfter")
-            applied?.name
-        }.onFailure { Log.w("OnyxInk", "app-scope refresh mode: ${it.message}") }.getOrNull()
-    }
-
-    private fun readAppScopeRaw(helper: Class<*>): String = runCatching {
-        val method = helper.getMethod("getAppScopeRefreshMode")
-        method.invoke(null).toString()
-    }.getOrElse { "error: ${it.javaClass.simpleName}: ${it.message ?: it.cause?.message}" }
-
     @Command
     fun debugInkRepaint(invoke: Invoke) {
         val kind = invoke.parseArgs(InkSuppressArgs::class.java).reason
@@ -458,9 +461,20 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
 
     private companion object {
         const val FULL_REFRESH_DELAY_MS = 300L
-        /** EinkWise "Speed": partial GU updates with turbo, as the stock browser profile has it. */
-        const val SPEED_MODE_INDEX = "refresh_mode_2"
-        const val SPEED_UPDATE_MODE = 2
-        const val SPEED_TURBO = 5
+
+        /**
+         * EinkWise "HD" on this device: `{mode 0 = AUTO, turbo 0}`. It is the only one of the
+         * three profiles this panel defines that keeps the firmware's own upkeep running — the
+         * counted full refresh, the quality repaint after input, the dither and the scroll helper
+         * are all gated on the update mode being one of `{0, 3, 5}`.
+         *
+         * Not `refresh_mode_1`: it resolves to waveform 9, which this colour panel rejects
+         * outright and falls back to waveform 0 for.
+         */
+        /** Which profile we last wrote; see [ensureRefreshProfile] for why we cannot read it back. */
+        const val PROFILE_MARKER = "eac_refresh_profile"
+        const val QUALITY_MODE_INDEX = "refresh_mode_4"
+        const val QUALITY_UPDATE_MODE = 0
+        const val QUALITY_TURBO = 0
     }
 }
