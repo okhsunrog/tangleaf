@@ -327,6 +327,14 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     }.getOrElse { "error: ${it.javaClass.simpleName}: ${it.message ?: it.cause?.message}" }
 
     @Command
+    fun debugInkRepaint(invoke: Invoke) {
+        val kind = invoke.parseArgs(InkSuppressArgs::class.java).reason
+        activity.runOnUiThread {
+            invoke.resolve(JSObject().put("result", onyxInk?.debugRepaint(kind) ?: "no session"))
+        }
+    }
+
+    @Command
     fun requestFullRefresh(invoke: Invoke) {
         activity.runOnUiThread {
             val webView = inkWebView

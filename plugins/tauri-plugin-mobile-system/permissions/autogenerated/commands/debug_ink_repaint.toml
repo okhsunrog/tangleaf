@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-debug-ink-repaint"
+description = "Enables the debug_ink_repaint command without any pre-configured scope."
+commands.allow = ["debug_ink_repaint"]
+
+[[permission]]
+identifier = "deny-debug-ink-repaint"
+description = "Denies the debug_ink_repaint command without any pre-configured scope."
+commands.deny = ["debug_ink_repaint"]

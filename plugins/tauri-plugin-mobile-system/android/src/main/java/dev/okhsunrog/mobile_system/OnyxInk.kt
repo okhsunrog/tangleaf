@@ -15,6 +15,7 @@ import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.device.Device
 import com.onyx.android.sdk.data.note.TouchPoint
+import com.onyx.android.sdk.pen.EpdPenManager
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
@@ -118,6 +119,7 @@ internal class OnyxInk(
             // is torn down.
             helper?.setSingleRegionMode()
             helper?.setPenUpRefreshTimeMs(PEN_UP_REFRESH_MS.toInt())
+            clearLatchedExcludes()
             helper?.setLimitRect(limit, NO_EXCLUDES)
         }
         override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
@@ -181,12 +183,19 @@ internal class OnyxInk(
         private val NO_EXCLUDES = emptyList<Rect>()
 
         /**
-         * `RawInputReader.setExcludeRect` returns early on an empty list, so an exclusion once
-         * pushed can never be withdrawn that way — it stays latched in the reader and in the
-         * firmware, and the pen simply stops inking there. A zero-area rectangle passes the guard
-         * and excludes nothing, which is how the exclusion is actually cleared.
+         * The exclusion table lives in the SurfaceFlinger process, keyed by nothing at all — the
+         * transaction carries no pid, no window and no surface, and nothing reaps it when the
+         * caller dies. A rect pushed by an earlier run of this app therefore outlives it and keeps
+         * swallowing pen input until the device reboots.
+         *
+         * It cannot be withdrawn the obvious ways: `RawInputReader.setExcludeRect` returns early on
+         * an empty list, and a zero-area rectangle does not clear anything either, because the
+         * native test inflates every exclusion by half the stroke width and so still excludes a box
+         * at the origin. The firmware's own reset, in `EACScreenNoteUtils`, passes a **null view**
+         * with a single `{0,0,0,0}` rect: the null skips the coordinate translation and the
+         * receiving side reads it as "drop the table".
          */
-        private val EMPTY_EXCLUDE = listOf(Rect(0, 0, 0, 0))
+        private val EXCLUDE_RESET = arrayOf(Rect(0, 0, 0, 0))
         private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
@@ -396,11 +405,8 @@ internal class OnyxInk(
                     helper?.setLimitRect(limit, NO_EXCLUDES)
                     "excludes cleared, limit=$limit"
                 }
-                "clearExcludesHard" -> {
-                    helper?.setExcludeRect(EMPTY_EXCLUDE)
-                    helper?.setLimitRect(limit, EMPTY_EXCLUDE)
-                    "degenerate exclude pushed"
-                }
+                "excludeReset" -> { clearLatchedExcludes(); "vendor exclude reset" }
+                "sessionCycle" -> { cycleScribbleSession(); "scribble session cycled" }
                 "regionMode" -> { helper?.setSingleRegionMode(); "single region mode" }
                 "leaveScribble" -> { EpdController.leaveScribbleMode(webView); "leaveScribbleMode" }
                 else -> "unknown"
@@ -553,7 +559,11 @@ internal class OnyxInk(
     fun onPause() { resumed = false; pause() }
     fun onResume() { resumed = true; resume() }
     override fun onWindowFocusChanged(hasFocus: Boolean) {
-        if (hasFocus) resume() else pause()
+        webView.removeCallbacks(resumeGate)
+        // Regaining focus is the same situation as a dialog closing: whatever covered the panel is
+        // still being torn down, and resuming into that leaves ghost ink. Every other resume path
+        // waits DELAY_ENABLE_RAW_DRAWING_MILLS; this one used to be the exception.
+        if (hasFocus) webView.postDelayed(resumeGate, RESUME_DELAY_MS) else pause()
     }
 
     private fun resume() {
@@ -579,6 +589,7 @@ internal class OnyxInk(
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
         gate.pause()
+        cycleScribbleSession()
         // Whatever pauses the pen — a dialog, a menu, the keyboard, a tool or page change — also
         // draws over the panel. Stock clears `isEnabledPenDirtyRect` for exactly that, so the
         // first reconcile afterwards covers the whole writing region instead of a stroke union.
@@ -602,6 +613,39 @@ internal class OnyxInk(
 
     private fun setRender(enabled: Boolean) {
         helper?.setRawDrawingRenderEnabled(enabled)
+    }
+
+    /**
+     * Drop whatever exclusion is latched in SurfaceFlinger. See [EXCLUDE_RESET]: this is the
+     * firmware's own reset, and the null view is the part that makes it one.
+     */
+    private fun clearLatchedExcludes() {
+        runCatching { EpdController.setScreenHandWritingRegionExclude(null, EXCLUDE_RESET) }
+            .onFailure { Log.w("OnyxInk", "exclude reset failed: ${it.message}") }
+    }
+
+    /**
+     * Tear down and rebuild the ink session on the SurfaceFlinger side.
+     *
+     * Two things get stuck independently. An exclusion stops the pen from inking, and
+     * [clearLatchedExcludes] is what clears that. Separately SurfaceFlinger can stay in the
+     * handwriting schema with the app marked as not drawing, and there it composites only ink and
+     * ignores our layers — that is the half where our own content stops appearing. Switching the
+     * schema while in handwriting mode is refused outright; the only way out is the pen state
+     * going through PAUSE, which is also what `leaveScribbleMode` and the pen-state pair below
+     * emit. Nothing else reaches it: a repaint request is issued *inside* the wedged session, and
+     * an ordinary invalidate produces exactly the kind of frame that session declines to post.
+     *
+     * Called through [EpdController] rather than [TouchHelper] on purpose. `setRawDrawingRenderEnabled`
+     * skips the call when the flag already holds the requested value, and with the eraser or a
+     * lasso active it is already false — so the cycle that is supposed to heal the panel would
+     * emit nothing at all.
+     */
+    private fun cycleScribbleSession() {
+        runCatching {
+            EpdController.leaveScribbleMode(webView)
+            EpdController.setScreenHandWritingPenState(webView, EpdPenManager.PEN_PAUSE)
+        }.onFailure { Log.w("OnyxInk", "scribble teardown failed: ${it.message}") }
     }
 
     private fun releaseDisplayMode() {

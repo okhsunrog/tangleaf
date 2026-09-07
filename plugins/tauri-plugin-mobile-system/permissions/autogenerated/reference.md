@@ -8,6 +8,7 @@ Default permissions for non-sensitive mobile system integration
 - `allow-configure-onyx-ink`
 - `allow-commit-onyx-frame`
 - `allow-suppress-onyx-ink`
+- `allow-debug-ink-repaint`
 - `allow-get-safe-area-insets`
 - `allow-get-device-name`
 - `allow-set-system-bars-style`
@@ -70,6 +71,32 @@ Enables the configure_onyx_ink command without any pre-configured scope.
 <td>
 
 Denies the configure_onyx_ink command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:allow-debug-ink-repaint`
+
+</td>
+<td>
+
+Enables the debug_ink_repaint command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:deny-debug-ink-repaint`
+
+</td>
+<td>
+
+Denies the debug_ink_repaint command without any pre-configured scope.
 
 </td>
 </tr>
