@@ -18,9 +18,20 @@ describe("RecentJournals", () => {
       <RecentJournals pages={[journal]} activeUuid={null} busy onOpen={() => undefined} />,
     );
 
+    // Journal titles follow the reader's own locale, so the exact wording belongs to the runtime,
+    // not to this test: pinning "Friday, July 17, 2026" only passed where the default locale
+    // happened to be American. What is worth asserting is that the component asks for the long
+    // spelled-out form rather than a numeric one.
+    const expectedTitle = new Intl.DateTimeFormat(undefined, {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }).format(new Date(2026, 6, 17));
+
     expect(html).toContain('disabled=""');
     expect(html).toContain(">17</span>");
-    expect(html).toContain('title="Friday, July 17, 2026"');
+    expect(html).toContain(`title="${expectedTitle}"`);
     expect(html).not.toContain("17.07");
   });
 
