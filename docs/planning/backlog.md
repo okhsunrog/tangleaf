@@ -76,6 +76,25 @@ deliberately left out of it.
 - **Scribble-to-erase.** A back-and-forth scribble over ink deletes the strokes under it (Notate `ScribbleDetector`). Works on the points we already capture. _Trigger: after the core lasso/eraser UX settles; user demand._
 - **Shape recognition on dwell.** Holding at stroke end snaps a rough shape to a clean line/rect/ellipse (Notate `ShapeRecognizer`, Douglas-Peucker + scoring). _Trigger: user asks for straight lines/boxes; pairs with the dwell detector._
 
+## Journal dates and locale (2026-09-07)
+
+- **A `[[` link to a journal day is stored as a locale-formatted title and resolves to nothing.**
+  `pageToItem` labels a page with `pageDisplayTitle`, which for a journal is
+  `Intl.DateTimeFormat` output, and `block-node.tsx:417` inserts that label verbatim as
+  `[[…]]`. Journal pages carry no title at all — they are found through aliases, which are the
+  machine forms (`2026-01-07`, and `2022_12_29` from the Logseq import) — so the inserted
+  `[[Friday, July 17, 2026]]` matches no alias and `replace_block_refs` stores a null
+  `target_page_uuid`. The link is dangling on every device regardless of locale, and its text
+  additionally differs between devices. _Trigger: the first `[[` link to a journal day; fix =
+  insert the ISO date (which is already an alias) while keeping the formatted label on screen,
+  and consider registering the formatted form as an alias too so links typed by hand resolve._
+- **Journal titles follow each device's locale, so one journal reads differently on each.**
+  Nothing formatted is persisted (all uses of `pageDisplayTitle` are render-time labels,
+  sorting and notification text), so this is presentation only — but a workspace-level date
+  format, chosen once and synced with the other settings, would make a journal look the same
+  everywhere. _Trigger: user request; the setting belongs next to the display profile, and
+  `formatJournalDate` already takes a `locales` argument for exactly this._
+
 ## Recently resolved elsewhere (for context, keep list short)
 
 - 2026-07-19 frontend review findings → fixed in `f1c7dc3`.
