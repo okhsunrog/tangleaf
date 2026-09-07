@@ -88,9 +88,13 @@ internal class OnyxInk(
     private var generation = 0L
     private val frames = InkFrameFence()
     private var repaintCount = 0L
-    private val damage = InkDamage()
+    /** Where the next reconcile has to cover, in view pixels: stock's dirty rect. */
+    private val region = InkReconcileRegion()
+    private val reconcile = InkReconcileGate()
+    private var penUpRefreshCount = 0L
     private val qualityDamage = InkDamage()
     private var lastRepaint = Rect()
+    private var lastRepaintWholeRegion = false
     private var repaintedPixels = 0L
     private var pendingFrame: Runnable? = null
     private var pendingObserver: ViewTreeObserver? = null
@@ -101,10 +105,21 @@ internal class OnyxInk(
     private var imeVisible = false
     private var imeSource: String? = null
     private val refresh = Runnable { refreshFrame() }
+    /** The pen-up refresh never came for this gesture; reconcile without it. */
+    private val penUpWait = Runnable { if (reconcile.timedOut() != InkReconcileGate.Next.WAIT) refreshFrame() }
     private val gate = RawDrawingGate(object : RawDrawingSwitches {
         override fun render(enabled: Boolean) { setRender(enabled) }
         override fun input(enabled: Boolean) { helper?.setRawInputReaderEnable(enabled) }
-        override fun pushRects() { helper?.setLimitRect(limit, NO_EXCLUDES) }
+        override fun pushRects() {
+            // Single-region mode and the pen-up refresh interval, re-applied on every resume
+            // exactly as stock Notes does in ResumeRawDrawingRequest (:108-114). Without the
+            // region mode the firmware keeps one transient region per stroke; once that table
+            // fills, whole rectangles of the panel stop taking new ink until the scribble state
+            // is torn down.
+            helper?.setSingleRegionMode()
+            helper?.setPenUpRefreshTimeMs(PEN_UP_REFRESH_MS.toInt())
+            helper?.setLimitRect(limit, NO_EXCLUDES)
+        }
         override fun resetDefaults() { helper?.resetPenDefaultRawDrawing() }
     })
     // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
@@ -164,11 +179,51 @@ internal class OnyxInk(
          * selection popup registers no exclude rect either.
          */
         private val NO_EXCLUDES = emptyList<Rect>()
+
+        /**
+         * `RawInputReader.setExcludeRect` returns early on an empty list, so an exclusion once
+         * pushed can never be withdrawn that way — it stays latched in the reader and in the
+         * firmware, and the pen simply stops inking there. A zero-area rectangle passes the guard
+         * and excludes nothing, which is how the exclusion is actually cleared.
+         */
+        private val EMPTY_EXCLUDE = listOf(Rect(0, 0, 0, 0))
         private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
-        /** Stock Notes' `DELAY_ENABLE_RAW_DRAWING_MILLS` for a monochrome panel. */
-        const val RESUME_DELAY_MS = 150L
+        /**
+         * `RawInputReader`'s default pen-up refresh interval, re-applied on every resume the way
+         * `ResumeRawDrawingRequest` does. The SDK starts this timer at the last point of a
+         * non-erasing stroke and then reports the stroke union through `onPenUpRefresh`.
+         */
+        const val PEN_UP_REFRESH_MS = 500L
+
+        /**
+         * How long the reconcile waits for that callback once the canvas frame is ready. Only a
+         * firmware that does not deliver it at all should ever hit this.
+         */
+        const val PEN_UP_WAIT_MS = PEN_UP_REFRESH_MS + 250
+
+        /** The compositor acknowledgement is a readiness signal, not a submitted frame. */
+        private const val FRAME_DELAY_MS = 120L
+
+        /**
+         * Stock Notes' `DELAY_ENABLE_RAW_DRAWING_MILLS`
+         * (`RawPenArgs.java:69`: `isColorDevice() ? 500 : 150`). Resuming into the tail of whatever
+         * covered the panel leaves ghost ink, and a colour panel needs the longer wait.
+         */
+        val RESUME_DELAY_MS: Long
+            get() = if (colorPanel()) 500L else 150L
+
+        /**
+         * `DeviceInfoUtil.isColorDevice()` is `Device.currentDevice().getColorType() > 0`. A probe
+         * that fails answers "colour", which only ever means the slower, safer resume delay.
+         */
+        private var colorPanelProbe: Boolean? = null
+
+        private fun colorPanel(): Boolean = colorPanelProbe ?: runCatching { Device.currentDevice().colorType > 0 }
+            .onFailure { Log.d("OnyxInk", "no colour type reported: ${it.message}") }
+            .getOrDefault(true).also { colorPanelProbe = it }
+
         const val IME_REASON = "ime"
     }
 
@@ -198,8 +253,10 @@ internal class OnyxInk(
     }
 
     /**
-     * A reason was added or dropped. Pausing is immediate — the keyboard is already coming up —
-     * and resuming waits for the panel to settle, cancelled if something pauses again meanwhile.
+     * A reason was added or dropped. This is stock's `InvalidateScreenAction`: pause render and
+     * input, invalidate the view so the app's own content covers whatever the firmware left, and
+     * resume after `DELAY_ENABLE_RAW_DRAWING_MILLS`. Pausing is immediate — the keyboard is
+     * already coming up — and the resume is cancelled if something pauses again meanwhile.
      */
     fun pauseStateChanged() {
         webView.removeCallbacks(resumeGate)
@@ -239,6 +296,9 @@ internal class OnyxInk(
             config = args
             val scaleOnly = webView.width / args.viewportWidth
             overlays = inkOverlayRects(args.overlayRects, scaleOnly, InkRect(limit.left, limit.top, limit.right, limit.bottom))
+            // A floating control appearing over the sheet still draws over the panel, so the next
+            // reconcile owes the whole region even though the pen was never paused for it.
+            region.invalidateAll()
             return status()
         }
         pause(releaseDisplay = false)
@@ -270,9 +330,13 @@ internal class OnyxInk(
                     callback(generation),
                     false,
                 )
-                helper!!.setPenUpRefreshEnabled(false) // Refresh only after the web canvas acknowledges its frame.
+                // The SDK's pen-up refresh drives the reconcile, as it does in stock Notes. It is
+                // enabled by default in RawInputReader and stock never touches the (deprecated)
+                // setter; only the interval is re-applied, here and on every resume.
+                helper!!.setPenUpRefreshTimeMs(PEN_UP_REFRESH_MS.toInt())
                 helper!!.setPostInputEvent(false)
                 helper!!.setHostViewScrollListenerEnabled(false)
+                helper!!.setSingleRegionMode()
                 helper!!.setLimitRect(limit, NO_EXCLUDES).openRawDrawing()
                 helper!!.setEraserRawDrawingEnabled(false, 0)
                 helper!!.enableSideBtnErase(true)
@@ -318,12 +382,44 @@ internal class OnyxInk(
             a.selectionRight == b.selectionRight && a.selectionBottom == b.selectionBottom &&
             a.overlayRects != b.overlayRects
 
+    /** Diagnostics only: drive one firmware path at a time while a dead area is on screen. */
+    fun debugRepaint(kind: String): String {
+        if (limit.isEmpty) return "limit empty"
+        return runCatching {
+            when (kind) {
+                "handwriting" -> { EpdController.handwritingRepaint(webView, limit); "handwritingRepaint $limit" }
+                "invalidateGu" -> { EpdController.invalidate(webView, UpdateMode.GU); "invalidate GU" }
+                "toggleRaw" -> { helper?.setRawDrawingRenderEnabled(false); helper?.setRawDrawingRenderEnabled(true); "render off/on" }
+                "toggleInput" -> { helper?.setRawInputReaderEnable(false); helper?.setRawInputReaderEnable(true); "input off/on" }
+                "clearExcludes" -> {
+                    helper?.setExcludeRect(NO_EXCLUDES)
+                    helper?.setLimitRect(limit, NO_EXCLUDES)
+                    "excludes cleared, limit=$limit"
+                }
+                "clearExcludesHard" -> {
+                    helper?.setExcludeRect(EMPTY_EXCLUDE)
+                    helper?.setLimitRect(limit, EMPTY_EXCLUDE)
+                    "degenerate exclude pushed"
+                }
+                "regionMode" -> { helper?.setSingleRegionMode(); "single region mode" }
+                "leaveScribble" -> { EpdController.leaveScribbleMode(webView); "leaveScribbleMode" }
+                else -> "unknown"
+            }
+        }.getOrElse { "error: ${it.message}" }
+    }
+
     fun status(): JSObject = JSObject().apply {
         put("available", failed == null)
         put("active", helper?.isRawDrawingInputEnabled == true)
         put("error", failed)
         put("repaintCount", repaintCount)
         put("lastRepaint", lastRepaint.toShortString())
+        put("lastRepaintWholeRegion", lastRepaintWholeRegion)
+        put("wholeRegionPending", region.wholeRegionPending)
+        put("penUpRefreshSeen", reconcile.penUpRefreshSeen)
+        put("penUpRefreshCount", penUpRefreshCount)
+        put("colorPanel", colorPanel())
+        put("resumeDelayMs", RESUME_DELAY_MS)
         put("repaintModeActive", repaintMode.active)
         put("eraserRenderPaused", eraserRenderGate.active)
         put("lastRepaintModeRaw", lastRepaintModeRaw)
@@ -355,15 +451,51 @@ internal class OnyxInk(
             override fun onComplete(requestId: Long) {
                 if (config?.session != args.session || !frames.ready(requestId, args.sequence)) return
                 webView.removeCallbacks(refresh)
-                webView.postDelayed(refresh, 120)
+                webView.removeCallbacks(penUpWait)
+                // Stock reconciles when the SDK's pen-up timer and its own bitmap flush have both
+                // happened, whichever is last. This is our half of that rendezvous.
+                when (reconcile.canvasReady()) {
+                    InkReconcileGate.Next.NOW -> webView.post(refresh)
+                    InkReconcileGate.Next.SOON -> webView.postDelayed(refresh, FRAME_DELAY_MS)
+                    InkReconcileGate.Next.WAIT -> webView.postDelayed(penUpWait, PEN_UP_WAIT_MS)
+                }
             }
         })
     }
 
+    /**
+     * The SDK's pen-up timer, ~500 ms after the last point of a non-erasing stroke. Its rectangle
+     * is this stroke's bounds expanded by the stroke width and unioned with the previous stroke's
+     * (`RawInputReader.i()`), which is exactly the region stock reconciles.
+     */
+    private fun penUpRefresh(rect: RectF) {
+        if (config == null || !rect.left.isFinite() || !rect.top.isFinite() ||
+            !rect.right.isFinite() || !rect.bottom.isFinite()
+        ) return
+        penUpRefreshCount++
+        region.add(rect.left.toDouble(), rect.top.toDouble(), rect.right.toDouble(), rect.bottom.toDouble())
+        if (reconcile.penUpRefresh() == InkReconcileGate.Next.NOW) {
+            webView.removeCallbacks(refresh)
+            webView.removeCallbacks(penUpWait)
+            refreshFrame()
+        }
+    }
+
+    /**
+     * Stock's `GrayscaleRefreshAction`, and nothing else: mark the view's default update mode as
+     * `HAND_WRITING_REPAINT_MODE`, draw one ordinary frame, reset the mode once that frame is on
+     * screen (its `doFinally`). There is no `handwritingRepaint`, no `refreshScreenRegion`, no pen
+     * state transition and no sleep anywhere in the stock ink path — the mode-marked frame *is*
+     * the mechanism that hands the firmware layer back to the app.
+     */
     private fun refreshFrame() {
         if (!canPresent() || pendingFrame != null) return
         val observer = webView.viewTreeObserver
         if (!observer.isAlive) return
+        val area = region.take(InkBounds(
+            limit.left.toDouble(), limit.top.toDouble(), limit.right.toDouble(), limit.bottom.toDouble(),
+        )) ?: return
+        reconcile.reconciled()
         val submission = frames.submission()
         val submitted = Runnable {
             // Frame callbacks may run off the UI thread. Recheck pen and lifecycle state there.
@@ -371,29 +503,23 @@ internal class OnyxInk(
                 if (!frames.isCurrent(submission)) return@post
                 pendingFrame = null
                 pendingObserver = null
-                var dirty: InkBounds? = null
-                var repainted = false
+                var presented = false
                 try {
                     if (!canPresent() || !frames.present(submission, sequence, gesture.drawing)) return@post
-                    // Submit the canonical buffer before releasing the eraser's pen-render pause.
-                    dirty = damage.take() ?: return@post
-                    val region = Rect(
-                        floor(sheet.left + dirty.left * sheet.width() / 1000).toInt() - 2,
-                        floor(sheet.top + dirty.top * sheet.height() / 1400).toInt() - 2,
-                        ceil(sheet.left + dirty.right * sheet.width() / 1000).toInt() + 2,
-                        ceil(sheet.top + dirty.bottom * sheet.height() / 1400).toInt() + 2)
-                    if (!region.intersect(limit)) return@post
-                    EpdController.handwritingRepaint(webView, region)
-                    repainted = true
-                    lastRepaint = Rect(region)
-                    repaintedPixels += region.width().toLong() * region.height()
+                    presented = true
+                    lastRepaint = Rect(
+                        floor(area.bounds.left).toInt(), floor(area.bounds.top).toInt(),
+                        ceil(area.bounds.right).toInt(), ceil(area.bounds.bottom).toInt())
+                    lastRepaintWholeRegion = area.wholeRegion
+                    repaintedPixels += lastRepaint.width().toLong() * lastRepaint.height()
                     repaintCount++
+                    // The canonical buffer is on screen; the eraser's pen-render pause can go.
                     eraserRenderGate.framePresented()
                 } finally {
-                    // A panel keeps whatever was last pushed to it. Damage consumed by a frame that
-                    // never reached handwritingRepaint would leave that area showing an older image
+                    // A panel keeps whatever was last pushed to it. A region consumed by a frame
+                    // that never reached the panel would leave that area showing an older image
                     // for good — the rectangular holes in dense ink — so it goes back on the pile.
-                    if (!repainted) dirty?.let { damage.add(it.left, it.top, it.right, it.bottom) }
+                    if (!presented) region.putBack(area)
                     repaintMode.release()
                 }
             }
@@ -404,6 +530,9 @@ internal class OnyxInk(
         // A later handwritingRepaint call alone does not remove fast ink on this firmware.
         repaintMode.acquire()
         observer.registerFrameCommitCallback(submitted)
+        // Stock invalidates its whole editor view — which *is* its writing region. Ours is the
+        // whole screen, so this covers more; that only helps a region the firmware latched, and
+        // the mode is reset the moment the frame lands.
         webView.invalidate()
     }
 
@@ -445,10 +574,19 @@ internal class OnyxInk(
     private fun pause(releaseDisplay: Boolean = true) {
         if (releaseDisplay || gesture.drawing) releaseDisplayMode()
         webView.removeCallbacks(refresh)
+        webView.removeCallbacks(penUpWait)
         webView.removeCallbacks(resumeGate)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
         cancelFrameSubmission()
         gate.pause()
+        // Whatever pauses the pen — a dialog, a menu, the keyboard, a tool or page change — also
+        // draws over the panel. Stock clears `isEnabledPenDirtyRect` for exactly that, so the
+        // first reconcile afterwards covers the whole writing region instead of a stroke union.
+        region.invalidateAll()
+        reconcile.reset()
+        // Stock's InvalidateViewWithPenControlAction: with the pen layer down, put the app's own
+        // content back on the panel before anything is allowed to ink over it again.
+        webView.invalidate()
         eraserRenderGate.reset()
         swallowed = false
         if (gesture.ended()) send("cancel")
@@ -476,9 +614,16 @@ internal class OnyxInk(
         displayMode.clear(DisplayModeStack.Layer.SESSION)
     }
 
+    /** Sheet coordinates in, view pixels out: the reconcile region lives in the panel's space. */
     private fun addDamage(left: Double, top: Double, right: Double, bottom: Double) {
-        damage.add(left, top, right, bottom)
         if (displayPolicy.fastRequested) qualityDamage.add(left, top, right, bottom)
+        if (sheet.isEmpty) return
+        region.add(
+            sheet.left + left.coerceIn(0.0, 1000.0) * sheet.width() / 1000,
+            sheet.top + top.coerceIn(0.0, 1400.0) * sheet.height() / 1400,
+            sheet.left + right.coerceIn(0.0, 1000.0) * sheet.width() / 1000,
+            sheet.top + bottom.coerceIn(0.0, 1400.0) * sheet.height() / 1400,
+        )
     }
 
     private fun markNativePoint(point: TouchPoint) {
@@ -510,7 +655,8 @@ internal class OnyxInk(
         config = null
         overlays = emptyList()
         swallowed = false
-        damage.take()
+        region.reset()
+        reconcile.reset()
         // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
         // the moment to clean the panel once.
         if (hadSession) {
@@ -573,10 +719,14 @@ internal class OnyxInk(
         eraserRenderGate.begin(erasing || args.eraser)
         if (args.interaction) setRender(fastPreview)
         gesture.begun()
+        reconcile.began(erasing || args.eraser)
         webView.removeCallbacks(settleDisplay)
-        displayPolicy.begin((args.interaction || args.eraser || erasing) && !fastPreview)
+        // Only a gesture that genuinely animates asks for a transient panel mode: dragging a
+        // selection around. Stock never puts the panel into one while handwriting or erasing.
+        displayPolicy.begin(args.interaction && movingSelection)
         markNativePoint(point)
         webView.removeCallbacks(refresh)
+        webView.removeCallbacks(penUpWait)
         cancelFrameSubmission()
         previewAt = 0L
         send("begin", JSONArray().put(normalize(point)), erasing)
@@ -598,7 +748,10 @@ internal class OnyxInk(
         // The submission in flight belongs to the frame this gesture superseded,
         // exactly as at pen-down.
         cancelFrameSubmission()
-        webView.postDelayed(refresh, 120)
+        // The reconcile itself is driven by the rendezvous in commit()/penUpRefresh(); this is
+        // only the net for an acknowledgement that arrived mid-gesture and was never released.
+        // It is timed so it can never preempt a pen-up refresh that is still on its way.
+        webView.postDelayed(refresh, PEN_UP_WAIT_MS)
     }
 
     private fun stroke(list: TouchPointList, erasing: Boolean) {
@@ -647,5 +800,11 @@ internal class OnyxInk(
         override fun onEndRawErasing(outside: Boolean, point: TouchPoint) { if (epoch == generation) end() }
         override fun onRawErasingTouchPointMoveReceived(point: TouchPoint) { if (epoch == generation) preview(point, true) }
         override fun onRawErasingTouchPointListReceived(points: TouchPointList) { if (epoch == generation) stroke(points, true) }
+        /** Delivered off the UI thread by an RxTimer; stock posts it to MAIN through EventBus. */
+        override fun onPenUpRefresh(rect: RectF) {
+            if (epoch != generation) return
+            val copy = RectF(rect)
+            webView.post { if (epoch == generation) penUpRefresh(copy) }
+        }
     }
 }

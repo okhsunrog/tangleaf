@@ -419,6 +419,44 @@ captured nine writing strokes and eight hardware eraser strokes; afterward Pen S
 active and the eraser render gate was released. Diagnostic listeners were stopped after
 the retest. This supersedes the failed fresh-word erasing retests above.
 
+### Per-stroke reconcile follows the stock Notes sequence — 2026-09-07
+
+Writing for a while left rectangular areas of the Note Air 4C that took no new ink and showed
+no app content. `handwritingRepaint` over the whole writing region, `invalidate(view, GU)` and
+`leaveScribbleMode` did not restore inking there; only cycling `setRawDrawingRenderEnabled`
+did. A decompilation of the stock Notes app
+(`/home/okhsunrog/tmp_zfs/reversed_onyx_notes_app/REPORT.md`) showed its ink path never calls
+`handwritingRepaint` at all. `GrayscaleRefreshAction` sets the host view's default update mode
+to `HAND_WRITING_REPAINT_MODE`, runs a plain `View.invalidate()`, and resets the mode in
+`doFinally`. The mode-marked frame is the whole mechanism.
+
+The adapter now does the same. `refreshFrame` holds the repaint mode on the display stack's
+transient layer across one ordinary `webView.invalidate()` and releases it from the frame-commit
+callback; the frame fence and stroke-sequence checks are unchanged, so a stale frame is still
+never counted. `EpdController.handwritingRepaint` survives only as a `debugRepaint` diagnostic.
+
+Timing follows `EpdShapeHandler.P0()`, a two-sided rendezvous: the SDK's pen-up refresh
+(`RawInputReader`, 500 ms after the last point of a non-erasing stroke) and the frame that puts
+the stroke into the app's own surface, whichever is last. The adapter had disabled the pen-up
+refresh; it is enabled again and its rectangle — this stroke unioned with the previous one —
+drives the reconcile region, so consecutive repaints always overlap. An erasing gesture gets no
+such callback from the SDK and reconciles on the frame alone; a firmware that never delivers one
+falls back to the previous frame-acknowledgement trigger after a timeout.
+
+`setSingleRegionMode()` and `setPenUpRefreshTimeMs` are re-applied on every resume, as
+`ResumeRawDrawingRequest` does. Anything that draws over the panel — a dialog, the keyboard, a
+tool, geometry or overlay change — now arms a whole-region repaint for the next reconcile, which
+is stock's `isEnabledPenDirtyRect` escape hatch, and the pause path invalidates the view before
+resuming the pen after `DELAY_ENABLE_RAW_DRAWING_MILLS` (500 ms on a colour panel, read from
+`Device.currentDevice().getColorType()`), which is stock's `InvalidateScreenAction`.
+
+Transient `ANIMATION_QUALITY` is no longer requested for pen writing or erasing — stock never
+puts the panel into a transient mode while handwriting. Only a selection drag, which genuinely
+animates, still asks for it.
+
+Validation: 18 Kotlin unit tests, including new coverage of the region union, the whole-region
+fallback and the rendezvous. Not yet verified on hardware.
+
 ## SQLite columnar storage validation — 2026-09-06
 
 The independent `ink-format` crate now supplies typed core bodies and full snapshot
