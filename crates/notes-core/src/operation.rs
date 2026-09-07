@@ -2376,12 +2376,37 @@ struct StructureIntent {
     hlc: String,
 }
 
+/// What the `blocks` row for a block currently says, so a reconcile can leave it alone.
+#[derive(Clone)]
+struct StructureRow {
+    existence_hlc: String,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    order_key: OrderKey,
+    structure_hlc: Option<String>,
+    updated_at: i64,
+}
+
 fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
     let existing = {
-        let mut statement = transaction.prepare("SELECT uuid, existence_hlc FROM blocks")?;
+        let mut statement = transaction.prepare(
+            "SELECT uuid, existence_hlc, page_uuid, parent_uuid, order_key, structure_hlc,
+                    updated_at
+               FROM blocks",
+        )?;
         statement
             .query_map([], |row| {
-                Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, uuid::Uuid>(0)?,
+                    StructureRow {
+                        existence_hlc: row.get(1)?,
+                        page_uuid: row.get(2)?,
+                        parent_uuid: row.get(3)?,
+                        order_key: row.get(4)?,
+                        structure_hlc: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    },
+                ))
             })?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?
     };
@@ -2425,9 +2450,9 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
         .collect::<HashMap<_, _>>();
     for intent in intents.values_mut() {
         if intent.parent_uuid.is_some_and(|parent| {
-            existing.get(&parent).is_none_or(|parent_existence_hlc| {
+            existing.get(&parent).is_none_or(|parent_row| {
                 pages_by_block.get(&parent) != Some(&intent.page_uuid)
-                    || intent.hlc.as_str() < parent_existence_hlc.as_str()
+                    || intent.hlc.as_str() < parent_row.existence_hlc.as_str()
             })
         }) {
             intent.parent_uuid = None;
@@ -2436,6 +2461,20 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
     break_structure_cycles(&mut intents);
     for (uuid, intent) in intents {
         let updated_at = sql_hlc(intent.hlc.clone(), 4)?.timestamp_seconds();
+        // Reconciliation walks every block in the workspace, but a structural operation changes
+        // the placement of a handful of them; the rest resolve to exactly the row that is already
+        // stored. Writing those anyway costs an index update each on a table that grows with the
+        // workspace, in one transaction, on the single connection every other query waits behind —
+        // which is how appending one line to a journal came to block the app for minutes.
+        if existing.get(&uuid).is_some_and(|row| {
+            row.page_uuid == intent.page_uuid
+                && row.parent_uuid == intent.parent_uuid
+                && row.order_key == intent.order_key
+                && row.structure_hlc.as_deref() == Some(intent.hlc.as_str())
+                && row.updated_at >= updated_at
+        }) {
+            continue;
+        }
         transaction.execute(
             "UPDATE blocks
                 SET page_uuid = ?2, parent_uuid = ?3, order_key = ?4, structure_hlc = ?5,
