@@ -8,6 +8,7 @@ import { dismissBackOverlay } from "@/lib/back-overlays";
 import { useTheme } from "next-themes";
 import { ArrowLeft, Check, Laptop, Moon, RotateCcw, Save, Sun, Trash2 } from "lucide-react";
 import { WindowControls } from "@/app/window-controls";
+import { WINDOW_CONTROLS_STYLES, WINDOW_CONTROLS_STYLE_NAMES } from "@/app/window-controls-layout";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { PALETTES, useAppearance } from "@/app/appearance";
 import { DISPLAY_PROFILE_OPTIONS, INK_COLOR_OPTIONS } from "@/app/display-profile";
@@ -243,6 +244,9 @@ export function SettingsPage({
   const tokenConfigured =
     settings.configuredKeys.includes("SYNC_TOKEN") && !clearKeys.includes("SYNC_TOKEN");
 
+  const borderless =
+    settings.capabilities.windowDecorations && settings.activeWindowDecorationMode === "borderless";
+
   return (
     <div className="app-shell h-full overflow-y-auto text-foreground">
       <header
@@ -253,6 +257,7 @@ export function SettingsPage({
         )}
       >
         <div className={cn("flex items-center", compact ? "gap-2" : "gap-3")}>
+          {borderless && <WindowControls side="left" />}
           <Button
             variant="ghost"
             size={compact ? "icon-lg" : "icon-sm"}
@@ -270,8 +275,7 @@ export function SettingsPage({
             )}
           </div>
         </div>
-        {settings.capabilities.windowDecorations &&
-          settings.activeWindowDecorationMode === "borderless" && <WindowControls />}
+        {borderless && <WindowControls side="right" />}
       </header>
 
       <form
@@ -408,6 +412,33 @@ export function SettingsPage({
             <p className="text-xs text-muted-foreground">
               Native mode uses system decorations. On Wayland, save your choice and restart the app
               to change the frame; the current window keeps its existing controls.
+            </p>
+            <Field label="Window buttons">
+              <SettingsSelect
+                label="Window buttons"
+                value={settings.windowControlsStyle}
+                disabled={settings.windowDecorationMode !== "borderless"}
+                onValueChange={(value) => update("windowControlsStyle", value)}
+                options={WINDOW_CONTROLS_STYLES.map((style) => ({
+                  value: style,
+                  label:
+                    style === "auto"
+                      ? `Match the desktop (${WINDOW_CONTROLS_STYLE_NAMES[settings.systemWindowControls.style]})`
+                      : WINDOW_CONTROLS_STYLE_NAMES[style],
+                }))}
+              />
+            </Field>
+            <div
+              className="flex h-11 items-center justify-between rounded-lg border bg-background px-3"
+              aria-label="Window buttons preview"
+            >
+              <WindowControls side="left" style={settings.windowControlsStyle} preview />
+              <span className="text-xs text-muted-foreground">Preview</span>
+              <WindowControls side="right" style={settings.windowControlsStyle} preview />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Shapes follow the chosen desktop; colours follow the active palette. Match the desktop
+              also takes the button order and side from its settings. Borderless mode only.
             </p>
             <Field label="Borderless corner radius">
               <SettingsSelect

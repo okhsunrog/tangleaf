@@ -558,6 +558,16 @@ html::before {
     background: transparent;
   }
 
+  /* Borderless title bar buttons. They draw the desktop's shapes (Breeze, Adwaita, ...) but take
+     every colour from the active palette, so they follow its hue in light and dark. */
+  .window-controls {
+    --window-control-fg: var(--foreground);
+    --window-control-hover: var(--foreground);
+    --window-control-hover-fg: var(--background);
+    --window-control-close: var(--destructive);
+    --window-control-close-fg: var(--destructive-foreground);
+  }
+
   .app-chrome {
     background: var(--app-viewport-background);
     background-attachment: fixed;

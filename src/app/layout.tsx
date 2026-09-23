@@ -17,6 +17,8 @@ import {
 import { useCompactLayout } from "./use-compact-layout";
 
 type Props = {
+  /** Before the brand, e.g. window buttons on a desktop that puts them on the left. */
+  headerLeading?: ReactNode;
   headerActions?: ReactNode;
   sidebar: ReactNode;
   workbench: ReactNode;
@@ -36,6 +38,7 @@ type Props = {
 };
 
 export function AppLayout({
+  headerLeading,
   headerActions,
   sidebar,
   workbench,
@@ -188,16 +191,19 @@ export function AppLayout({
           data-tauri-drag-region
           className="relative z-20 flex h-12 shrink-0 items-center justify-between px-3"
         >
-          <button
-            type="button"
-            aria-label="Open dashboard"
-            className="group -ml-1 flex items-center gap-2.5 rounded-xl px-2 py-1 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            onClick={() => {
-              returnToDashboard();
-            }}
-          >
-            <TangleafBrand />
-          </button>
+          <div className="flex items-center gap-2">
+            {headerLeading}
+            <button
+              type="button"
+              aria-label="Open dashboard"
+              className="group -ml-1 flex items-center gap-2.5 rounded-xl px-2 py-1 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              onClick={() => {
+                returnToDashboard();
+              }}
+            >
+              <TangleafBrand />
+            </button>
+          </div>
           <div className="flex items-center gap-1">{headerActions}</div>
         </header>
 
