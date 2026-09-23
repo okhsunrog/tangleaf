@@ -54,7 +54,10 @@ import type {
   StartupView,
   StartupStatus,
   SyncStatus,
+  SystemWindowControls,
   TaskState,
+  WindowButton,
+  WindowControlsStyle,
   WindowDecorationMode,
 } from "@/lib/bindings";
 
@@ -111,7 +114,10 @@ export type {
   StartupView,
   StartupStatus,
   SyncStatus,
+  SystemWindowControls,
   TaskState,
+  WindowButton,
+  WindowControlsStyle,
   WindowDecorationMode,
 };
 

@@ -13,6 +13,8 @@ describe("settings update mapping", () => {
       windowDecorationMode: "native",
       activeWindowDecorationMode: "borderless",
       windowDecorationsRequireRestart: true,
+      windowControlsStyle: "breeze",
+      systemWindowControls: { style: "breeze", left: [], right: ["minimize", "maximize", "close"] },
       startupView: "specific_page",
       startupPageUuid: "019cfa51-8d73-7b53-b090-cdb945bb1b4d",
       syncServerUrl: "https://notes.example.test",
@@ -31,7 +33,9 @@ describe("settings update mapping", () => {
     expect(update).not.toHaveProperty("activeWindowDecorationMode");
     expect(update).not.toHaveProperty("windowDecorationsRequireRestart");
     expect(update).not.toHaveProperty("capabilities");
+    expect(update).not.toHaveProperty("systemWindowControls");
     expect(update.windowDecorationMode).toBe("native");
+    expect(update.windowControlsStyle).toBe("breeze");
     expect(update.apiKeys).toEqual({ SYNC_TOKEN: "secret" });
     expect(update.clearKeys).toEqual(["SYNC_TOKEN"]);
     expect(update.syncServerUrl).toBe(snapshot.syncServerUrl);

@@ -8,6 +8,7 @@ export function toSettingsUpdate(
   return {
     windowCornerRadius: settings.windowCornerRadius,
     windowDecorationMode: settings.windowDecorationMode,
+    windowControlsStyle: settings.windowControlsStyle,
     startupView: settings.startupView,
     startupPageUuid: settings.startupPageUuid,
     syncServerUrl: settings.syncServerUrl,

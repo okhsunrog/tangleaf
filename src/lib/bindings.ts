@@ -713,6 +713,9 @@ export type SettingsSnapshot = {
 	windowDecorationMode: WindowDecorationMode,
 	activeWindowDecorationMode: WindowDecorationMode,
 	windowDecorationsRequireRestart: boolean,
+	windowControlsStyle: WindowControlsStyle,
+	/**  What `auto` resolves to on this desktop, and where it puts each button. */
+	systemWindowControls: SystemWindowControls,
 	startupView: StartupView,
 	startupPageUuid: string | null,
 	syncServerUrl: string | null,
@@ -727,6 +730,7 @@ export type SettingsSnapshot = {
 export type SettingsUpdate = {
 	windowCornerRadius: number,
 	windowDecorationMode: WindowDecorationMode,
+	windowControlsStyle: WindowControlsStyle,
 	startupView: StartupView,
 	startupPageUuid: string | null,
 	syncServerUrl: string | null,
@@ -788,8 +792,19 @@ export type SyncStatus = {
 	quarantineReason: string | null,
 };
 
+/**  What the running desktop uses. `style` is never [`WindowControlsStyle::Auto`]. */
+export type SystemWindowControls = {
+	style: WindowControlsStyle,
+	left: WindowButton[],
+	right: WindowButton[],
+};
+
 /**  Durable workflow state carried only by a task block. */
 export type TaskState = "todo" | "doing" | "now" | "later" | "done" | "waiting" | "cancelled";
+
+export type WindowButton = "minimize" | "maximize" | "close";
+
+export type WindowControlsStyle = "auto" | "breeze" | "adwaita" | "windows" | "macos" | "minimal";
 
 export type WindowDecorationMode = "native" | "borderless";
 
