@@ -32,6 +32,7 @@ export const queryKeys = {
   history: [...root, "history"] as const,
   settings: [...root, "settings"] as const,
   inputCapabilities: [...root, "input-capabilities"] as const,
+  einkWise: [...root, "einkwise"] as const,
   handwritingStatusRoot: [...root, "handwriting-status"] as const,
   handwritingStatus: (uuid: string) => [...root, "handwriting-status", uuid] as const,
   handwritingVersion: (pageUuid: string, versionUuid: string) =>

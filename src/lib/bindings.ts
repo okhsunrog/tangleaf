@@ -40,6 +40,12 @@ export const commands = {
 	 *  nothing but a full refresh clears it.
 	 */
 	requestFullRefresh: () => typedError<null, CommandError>(__TAURI_INVOKE("request_full_refresh")),
+	einkwiseStatus: () => typedError<EinkWiseStatus, CommandError>(__TAURI_INVOKE("einkwise_status")),
+	/**
+	 *  Stores whether EinkWise handles Tangleaf. Off is how stock Notes runs: no firmware refreshes
+	 *  counted from our taps, and no EinkWise DPI either.
+	 */
+	setEinkwise: (enabled: boolean) => typedError<EinkWiseStatus, CommandError>(__TAURI_INVOKE("set_einkwise", { enabled })),
 	syncStatus: () => __TAURI_INVOKE<SyncStatus>("sync_status"),
 	serverAiStatus: () => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("server_ai_status")),
 	saveServerAiSettings: (settings: AiRuntimeSettings) => typedError<AiIndexStatus, CommandError>(__TAURI_INVOKE("save_server_ai_settings", { settings })),
@@ -444,6 +450,19 @@ export type DocumentUnitDraft = {
 export type DomainEvent = { kind: "pages_changed"; page_uuids: string[] } | { kind: "blocks_changed"; block_uuids: string[]; container_uuids: string[] } | { kind: "pages_deleted"; page_uuids: string[] } | { kind: "blocks_deleted"; block_uuids: string[]; container_uuids: string[] } | { kind: "graph_changed"; content_uuids: string[] } | { kind: "structure_changed"; block_uuids: string[] } | { kind: "attachments_changed"; owner_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
+
+/**
+ *  Whether EinkWise, the BOOX per-app optimisation service, handles Tangleaf.
+ * 
+ *  `enabled` is the stored choice and `active` what the firmware enforces now: a change is stored at
+ *  once and enforced after the next reboot. `available` is false everywhere but a BOOX with the
+ *  service, and then both are `None`.
+ */
+export type EinkWiseStatus = {
+	available: boolean,
+	enabled: boolean | null,
+	active: boolean | null,
+};
 
 export type GraphEdge = {
 	sourceUuid: string,

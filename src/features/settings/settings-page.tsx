@@ -39,6 +39,7 @@ import { ServerAiSettingsSection } from "./server-ai-settings-section";
 import { Field, FieldGroup, ModeButton, SettingsSection, ToggleField } from "./settings-controls";
 import { toSettingsUpdate } from "./settings-update";
 import { ConfigurationTransferSection } from "./configuration-transfer-section";
+import { EinkWiseField } from "./einkwise-field";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type Props = {
@@ -391,6 +392,7 @@ export function SettingsPage({
               onValueChange={setInkColor}
             />
           </Field>
+          <EinkWiseField />
         </SettingsSection>
 
         {settings.capabilities.windowDecorations && (

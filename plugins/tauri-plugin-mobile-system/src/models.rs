@@ -68,6 +68,28 @@ pub(crate) struct DisplayProfileArgs {
     pub eink: bool,
 }
 
+/// Whether EinkWise, the BOOX per-app optimisation service, handles this app.
+///
+/// `enabled` is the stored choice and `active` what the firmware enforces now; a change is stored
+/// at once and enforced after the next reboot, so the two differ in between. Both are `None` and
+/// `available` false on devices without the service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EinkWiseState {
+    pub available: bool,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+#[cfg(mobile)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EinkWiseArgs {
+    pub enabled: bool,
+}
+
 #[cfg(mobile)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DeviceNameResponse {

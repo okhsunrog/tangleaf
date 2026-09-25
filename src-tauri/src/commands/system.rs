@@ -147,6 +147,65 @@ pub fn set_display_profile(app: AppHandle, eink: bool) -> CommandResult<DisplayP
     }
 }
 
+/// Whether EinkWise, the BOOX per-app optimisation service, handles Tangleaf.
+///
+/// `enabled` is the stored choice and `active` what the firmware enforces now: a change is stored at
+/// once and enforced after the next reboot. `available` is false everywhere but a BOOX with the
+/// service, and then both are `None`.
+#[derive(Debug, Clone, Copy, Default, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EinkWiseStatus {
+    pub available: bool,
+    pub enabled: Option<bool>,
+    pub active: Option<bool>,
+}
+
+#[cfg(target_os = "android")]
+impl From<tauri_plugin_mobile_system::EinkWiseState> for EinkWiseStatus {
+    fn from(state: tauri_plugin_mobile_system::EinkWiseState) -> Self {
+        Self {
+            available: state.available,
+            enabled: state.enabled,
+            active: state.active,
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn einkwise_status(app: AppHandle) -> CommandResult<EinkWiseStatus> {
+    #[cfg(target_os = "android")]
+    {
+        app.mobile_system().einkwise().map(Into::into).map_err(err)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(EinkWiseStatus::default())
+    }
+}
+
+/// Stores whether EinkWise handles Tangleaf. Off is how stock Notes runs: no firmware refreshes
+/// counted from our taps, and no EinkWise DPI either.
+#[tauri::command]
+#[specta::specta]
+pub fn set_einkwise(app: AppHandle, enabled: bool) -> CommandResult<EinkWiseStatus> {
+    #[cfg(target_os = "android")]
+    {
+        app.mobile_system()
+            .set_einkwise(enabled)
+            .map(Into::into)
+            .map_err(err)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(EinkWiseStatus::default())
+    }
+}
+
 /// Repaints the whole panel once. Partial e-ink update modes leave the previous image behind, and
 /// nothing but a full refresh clears it.
 #[tauri::command]

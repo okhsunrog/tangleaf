@@ -17,7 +17,8 @@ pub use error::{Error, Result};
 #[cfg(mobile)]
 pub use mobile::MobileSystem;
 pub use models::{
-    DisplayInfo, DisplayKind, DisplayProfileOutcome, SafeAreaInsets, StylusCapabilities,
+    DisplayInfo, DisplayKind, DisplayProfileOutcome, EinkWiseState, SafeAreaInsets,
+    StylusCapabilities,
 };
 
 #[cfg(mobile)]

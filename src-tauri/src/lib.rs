@@ -31,6 +31,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::set_immersive_mode,
             commands::set_display_profile,
             commands::request_full_refresh,
+            commands::einkwise_status,
+            commands::set_einkwise,
             commands::sync_status,
             commands::server_ai_status,
             commands::save_server_ai_settings,

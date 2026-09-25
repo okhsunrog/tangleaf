@@ -8,7 +8,8 @@ use crate::{
     Result,
     models::{
         DeviceNameResponse, DisplayInfo, DisplayInfoResponse, DisplayProfileArgs,
-        DisplayProfileOutcome, ImmersiveModeArgs, SafeAreaInsets, SystemBarsStyleArgs,
+        DisplayProfileOutcome, EinkWiseArgs, EinkWiseState, ImmersiveModeArgs, SafeAreaInsets,
+        SystemBarsStyleArgs,
     },
 };
 
@@ -49,6 +50,19 @@ impl<R: Runtime> MobileSystem<R> {
     pub fn set_display_profile(&self, eink: bool) -> Result<DisplayProfileOutcome> {
         self.0
             .run_mobile_plugin("setDisplayProfile", DisplayProfileArgs { eink })
+            .map_err(Into::into)
+    }
+
+    pub fn einkwise(&self) -> Result<EinkWiseState> {
+        self.0
+            .run_mobile_plugin("getEinkWise", ())
+            .map_err(Into::into)
+    }
+
+    /// Stores the choice for this app; the firmware enforces it after the next reboot.
+    pub fn set_einkwise(&self, enabled: bool) -> Result<EinkWiseState> {
+        self.0
+            .run_mobile_plugin("setEinkWise", EinkWiseArgs { enabled })
             .map_err(Into::into)
     }
 

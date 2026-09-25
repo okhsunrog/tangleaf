@@ -48,6 +48,11 @@ class InkSuppressArgs {
     var active: Boolean = false
 }
 
+@InvokeArg
+class EinkWiseArgs {
+    var enabled: Boolean = true
+}
+
 /** No enum value means "the profile claims no base mode"; UpdateMode.None is a real mode. */
 private const val NO_BASE_MODE = "none"
 
@@ -350,6 +355,65 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             }.onFailure { Log.w("OnyxInk", "eac: refresh profile: ${it.message}") }
         }.start()
     }
+    /**
+     * The EinkWise switch in our settings, see [EinkWiseSetting]. The write goes the way the vendor's
+     * own EACManagerV2 does it: `supportEAC` in the app config we already round-trip for the
+     * refresh profile (docs/planning/eink-panel-upkeep.md §5.1).
+     */
+    private fun einkWise(): EinkWiseSetting {
+        val pkg = activity.packageName
+        val vendor = OnyxInk.supported() && VendorAccess.ensure()
+        fun appConfig(): org.json.JSONObject? {
+            val get = EACReflectUtils.sMethodGetAppConfigFromService ?: return null
+            val json = (ReflectUtil.invokeMethodSafely(get, null, listOf(pkg)) as? List<*>)?.firstOrNull() as? String
+            return json?.takeIf { it.isNotBlank() }?.let { org.json.JSONObject(it) }
+        }
+        return EinkWiseSetting(
+            readStored = stored@{
+                if (!vendor) return@stored null
+                val list = EACReflectUtils.sMethodGetDisallowedEACApps ?: return@stored null
+                val off = ReflectUtil.invokeMethodSafely(list, null) as? List<*> ?: return@stored null
+                pkg !in off
+            },
+            readActive = { if (vendor) appConfig()?.optBoolean("supportEAC", true) else null },
+            write = { enabled ->
+                val apply = EACReflectUtils.sMethodApplyAppConfigToService
+                val root = appConfig()
+                if (apply != null && root != null) {
+                    root.put("supportEAC", enabled)
+                    val bundle = android.os.Bundle().apply { putInt("args_operation_flag", 0) }
+                    val result = ReflectUtil.invokeMethodSafely(apply, null, listOf(root.toString()), bundle)
+                    Log.d("OnyxInk", "eac: supportEAC -> $enabled result=$result")
+                }
+            },
+        )
+    }
+
+    private fun EinkWiseSetting.State.toJson(): JSObject = JSObject()
+        .put("available", available)
+        .put("enabled", enabled)
+        .put("active", active)
+
+    /** Binder calls into the optimisation service, so off the UI thread. */
+    @Command
+    fun getEinkWise(invoke: Invoke) {
+        Thread {
+            runCatching { einkWise().state().toJson() }
+                .onSuccess(invoke::resolve)
+                .onFailure { invoke.reject("Could not read the EinkWise state: ${it.message}") }
+        }.start()
+    }
+
+    @Command
+    fun setEinkWise(invoke: Invoke) {
+        val enabled = invoke.parseArgs(EinkWiseArgs::class.java).enabled
+        Thread {
+            runCatching { einkWise().set(enabled).toJson() }
+                .onSuccess(invoke::resolve)
+                .onFailure { invoke.reject("Could not change EinkWise: ${it.message}") }
+        }.start()
+    }
+
     @Command
     fun debugInkRepaint(invoke: Invoke) {
         val kind = invoke.parseArgs(InkSuppressArgs::class.java).reason
