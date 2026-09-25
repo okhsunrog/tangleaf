@@ -228,7 +228,9 @@ export function AppLayout({
             <Panel
               id="navigation-sidebar"
               panelRef={sidebarRef}
-              defaultSize="21%"
+              // Compact starts collapsed: the effect below collapses it only after the first
+              // paint, which used to show the three-column desktop layout for a frame on start.
+              defaultSize={compact ? 0 : "21%"}
               minSize={compact ? 0 : "16%"}
               maxSize={compact ? "100%" : "30%"}
               collapsible
@@ -253,7 +255,7 @@ export function AppLayout({
             <Panel
               id="workbench"
               panelRef={workbenchRef}
-              defaultSize="56%"
+              defaultSize={compact ? "100%" : "56%"}
               minSize={compact ? 0 : "38%"}
               collapsible
               collapsedSize={0}
@@ -278,7 +280,11 @@ export function AppLayout({
               id="assistant-dock"
               panelRef={assistantRef}
               defaultSize={
-                assistantVisibility === DockVisibility.Rail ? "48px" : `${assistantWidth}px`
+                compact
+                  ? 0
+                  : assistantVisibility === DockVisibility.Rail
+                    ? "48px"
+                    : `${assistantWidth}px`
               }
               minSize={
                 compact || !assistantVisible
