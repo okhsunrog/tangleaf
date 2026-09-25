@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { suppressOnyxInk } from "@/app/ink-suppression";
 import { requestFullRefresh } from "@/lib/api";
 
 /**
@@ -21,6 +23,13 @@ import { requestFullRefresh } from "@/lib/api";
  */
 const SETTLE_MS = 300;
 
+/** Held while a refresh the user asked for runs, so the firmware pen gives the panel back. */
+const MANUAL_REFRESH_REASON = "manual-refresh";
+/** Pausing the pen leaves the handwriting schema, which takes SurfaceFlinger about 150 ms. */
+const MANUAL_REFRESH_PAUSE_MS = 200;
+/** The flash has to finish before the pen paints over the panel again. */
+const MANUAL_REFRESH_RESUME_MS = 300;
+
 let eink = false;
 let pending: ReturnType<typeof setTimeout> | null = null;
 
@@ -41,6 +50,24 @@ export function requestFullRefreshSoon(): void {
     pending = null;
     void requestFullRefresh().catch(() => undefined);
   }, SETTLE_MS);
+}
+
+/**
+ * A full refresh the user asked for, for the ghosts erasing occasionally leaves (stock Notes leaves
+ * them too). It is stock's Refresh button — a full-screen GC; the overlay refresh above is a
+ * partial one, which skips the unchanged pixels a ghost sits on. While the firmware pen owns the
+ * sheet SurfaceFlinger does not take the page's frames, so the pen is held down around the flash,
+ * as stock does around its own refreshes.
+ */
+export function refreshPanelNow(): void {
+  suppressOnyxInk(MANUAL_REFRESH_REASON, true);
+  setTimeout(() => {
+    void invoke("plugin:mobile-system|repaint_panel")
+      .catch(() => undefined)
+      .finally(() => {
+        setTimeout(() => suppressOnyxInk(MANUAL_REFRESH_REASON, false), MANUAL_REFRESH_RESUME_MS);
+      });
+  }, MANUAL_REFRESH_PAUSE_MS);
 }
 
 /**

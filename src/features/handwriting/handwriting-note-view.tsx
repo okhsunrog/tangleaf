@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Lasso, PenLine, Redo2, Undo2 } from "lucide-react";
+import { ArrowLeft, Lasso, PenLine, Redo2, RefreshCw, Undo2 } from "lucide-react";
 import { useConfirmation } from "@/app/confirmation";
+import { refreshPanelNow } from "@/app/eink-refresh";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent } from "@/components/ui/popover";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
@@ -644,6 +645,11 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
           >
             {readOnlyNotice}
           </p>
+        )}
+        {capabilities.nativeDeviceEvents && (
+          <ToolbarButton aria-label="Refresh screen" onClick={refreshPanelNow}>
+            <RefreshCw />
+          </ToolbarButton>
         )}
         <NoteMenu
           grid={draft?.background === "grid"}

@@ -9,6 +9,7 @@ Default permissions for non-sensitive mobile system integration
 - `allow-commit-onyx-frame`
 - `allow-suppress-onyx-ink`
 - `allow-debug-ink-repaint`
+- `allow-repaint-panel`
 - `allow-get-safe-area-insets`
 - `allow-get-device-name`
 - `allow-set-system-bars-style`
@@ -175,6 +176,32 @@ Enables the get_stylus_capabilities command without any pre-configured scope.
 <td>
 
 Denies the get_stylus_capabilities command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:allow-repaint-panel`
+
+</td>
+<td>
+
+Enables the repaint_panel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-system:deny-repaint-panel`
+
+</td>
+<td>
+
+Denies the repaint_panel command without any pre-configured scope.
 
 </td>
 </tr>

@@ -3,6 +3,7 @@ const COMMANDS: &[&str] = &[
     "commit_onyx_frame",
     "suppress_onyx_ink",
     "debug_ink_repaint",
+    "repaint_panel",
     "get_stylus_capabilities",
     "get_safe_area_insets",
     "get_device_name",

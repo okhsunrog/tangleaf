@@ -377,6 +377,30 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         }
     }
 
+    /**
+     * The refresh the user asks for from the toolbar, and the one stock's Refresh button issues:
+     * a full recomposite with a one-shot GC, which SurfaceFlinger sends to the panel as a
+     * full-screen update. [requestFullRefresh] invalidates the view in GC instead, which reaches the
+     * panel as a partial update and so leaves alone the pixels the frame does not change — exactly
+     * where an erase ghost sits.
+     */
+    @Command
+    fun repaintPanel(invoke: Invoke) {
+        activity.runOnUiThread {
+            if (!OnyxInk.supported() || inkWebView == null) {
+                invoke.resolve()
+                return@runOnUiThread
+            }
+            try {
+                Log.d("OnyxInk", "panel repaint requested")
+                EpdController.repaintEveryThing(UpdateMode.GC)
+                invoke.resolve()
+            } catch (error: Throwable) {
+                invoke.reject("Could not repaint the panel: ${error.message}")
+            }
+        }
+    }
+
     override fun onInputDeviceAdded(deviceId: Int) = inputDevicesChanged()
     override fun onInputDeviceRemoved(deviceId: Int) = inputDevicesChanged()
     override fun onInputDeviceChanged(deviceId: Int) = inputDevicesChanged()
