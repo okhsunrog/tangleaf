@@ -141,9 +141,10 @@ function App() {
         {windowDecorationMode === "borderless" && (
           <div
             data-tauri-drag-region
-            className="fixed inset-x-0 top-0 flex h-10 justify-end border-b bg-background"
+            className="fixed inset-x-0 top-0 flex h-10 items-center justify-between border-b bg-background px-2"
           >
-            <WindowControls />
+            <WindowControls side="left" />
+            <WindowControls side="right" />
           </div>
         )}
         {startupError ? (
@@ -188,6 +189,7 @@ function App() {
         }}
         onOpenHome={workspace.closePage}
         sheet={sheetMode}
+        headerLeading={windowDecorationMode === "borderless" && <WindowControls side="left" />}
         headerActions={
           <>
             {syncQuery.data && syncQuery.data.state !== "disabled" && (
@@ -312,7 +314,7 @@ function App() {
             >
               <Settings className="size-4" />
             </Button>
-            {windowDecorationMode === "borderless" && <WindowControls />}
+            {windowDecorationMode === "borderless" && <WindowControls side="right" />}
           </>
         }
         sidebar={

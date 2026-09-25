@@ -7,6 +7,9 @@ use std::str::FromStr;
 use tauri::{AppHandle, Manager};
 
 pub(crate) mod transfer;
+pub(crate) mod window_controls;
+
+pub use window_controls::SystemWindowControls;
 
 const SETTINGS_VERSION: u32 = 3;
 const fn default_window_corner_radius() -> u8 {
@@ -54,6 +57,19 @@ settings_enum!(WindowDecorationMode {
     Native => "native",
     Borderless => "borderless",
 });
+
+settings_enum!(WindowControlsStyle {
+    Auto => "auto",
+    Breeze => "breeze",
+    Adwaita => "adwaita",
+    Windows => "windows",
+    Macos => "macos",
+    Minimal => "minimal",
+});
+
+const fn default_window_controls_style() -> WindowControlsStyle {
+    WindowControlsStyle::Auto
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
@@ -109,6 +125,9 @@ pub struct SettingsSnapshot {
     pub window_decoration_mode: WindowDecorationMode,
     pub active_window_decoration_mode: WindowDecorationMode,
     pub window_decorations_require_restart: bool,
+    pub window_controls_style: WindowControlsStyle,
+    /// What `auto` resolves to on this desktop, and where it puts each button.
+    pub system_window_controls: SystemWindowControls,
     pub startup_view: StartupView,
     pub startup_page_uuid: Option<uuid::Uuid>,
     pub sync_server_url: Option<url::Url>,
@@ -125,6 +144,7 @@ pub struct SettingsSnapshot {
 pub struct SettingsUpdate {
     pub window_corner_radius: u8,
     pub window_decoration_mode: WindowDecorationMode,
+    pub window_controls_style: WindowControlsStyle,
     pub startup_view: StartupView,
     pub startup_page_uuid: Option<uuid::Uuid>,
     pub sync_server_url: Option<url::Url>,
@@ -145,6 +165,8 @@ struct StoredSettings {
     window_corner_radius: u8,
     version: u32,
     window_decoration_mode: WindowDecorationMode,
+    #[serde(default = "default_window_controls_style")]
+    window_controls_style: WindowControlsStyle,
     #[serde(default)]
     startup_view: StartupView,
     #[serde(default)]
@@ -167,6 +189,7 @@ impl Default for StoredSettings {
             window_corner_radius: default_window_corner_radius(),
             version: SETTINGS_VERSION,
             window_decoration_mode: WindowDecorationMode::Native,
+            window_controls_style: default_window_controls_style(),
             startup_view: StartupView::Dashboard,
             startup_page_uuid: None,
             sync_server_url: None,
@@ -269,6 +292,8 @@ fn snapshot(stored: StoredSettings, path: PathBuf) -> Result<SettingsSnapshot> {
         window_decoration_mode: stored.window_decoration_mode,
         active_window_decoration_mode: stored.window_decoration_mode,
         window_decorations_require_restart: false,
+        window_controls_style: stored.window_controls_style,
+        system_window_controls: window_controls::system(),
         startup_view: stored.startup_view,
         startup_page_uuid: stored.startup_page_uuid,
         sync_server_url: stored.sync_server_url,
@@ -286,6 +311,7 @@ pub fn save(app: &AppHandle, update: SettingsUpdate) -> Result<SettingsSnapshot>
     let mut stored = load_stored(app)?;
     stored.window_corner_radius = update.window_corner_radius;
     stored.window_decoration_mode = update.window_decoration_mode;
+    stored.window_controls_style = update.window_controls_style;
     stored.startup_view = update.startup_view;
     stored.startup_page_uuid = update.startup_page_uuid;
     stored.sync_server_url = update.sync_server_url;
@@ -519,6 +545,7 @@ mod tests {
                 "startupView",
                 "syncServerUrl",
                 "version",
+                "windowControlsStyle",
                 "windowCornerRadius",
                 "windowDecorationMode",
             ]
