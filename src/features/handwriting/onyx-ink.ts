@@ -140,7 +140,10 @@ export function useOnyxInk({
     };
   });
 
-  /** A gesture whose ink exists only in the firmware layer (the lasso trace). */
+  /**
+   * A firmware trace is on screen: the lasso's dashes or the eraser end's soft-eraser trace. The
+   * gesture exists only in the firmware layer until its full point list arrives.
+   */
   const traceRef = useRef(false);
   useEffect(() => {
     if (!enabled) return;
@@ -352,11 +355,12 @@ export function useOnyxInk({
   ]);
   useEffect(() => {
     if (!native || !session.current) return;
-    // A lasso trace lives only in the firmware layer: the web canvas has nothing to put in its
-    // place, so reconciling while it is being drawn wipes it. Ink is the opposite — the firmware
-    // draws it transiently and expects the canvas to take it over promptly; deferring that leaves
-    // areas of the panel showing whatever they held before. So only a transient trace holds the
-    // reconciliation back, and its end bumps `frame` to release it.
+    // A lasso or eraser trace lives only in the firmware layer: the web canvas has nothing to put
+    // in its place, so reconciling while it is being drawn wipes it. Ink is the opposite — the
+    // firmware draws it transiently and expects the canvas to take it over promptly; deferring
+    // that leaves areas of the panel showing whatever they held before. So only a transient trace
+    // holds the reconciliation back. Its full point list releases it (the erase is applied there,
+    // and the plugin hands the panel back from that commit), or its end when no list came.
     if (traceRef.current) return;
     const id = session.current;
     const currentSequence = sequence.current;

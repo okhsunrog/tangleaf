@@ -290,7 +290,10 @@ export function InkCanvas({
     }
     staging.setLineDash([]);
     staging.lineWidth = SELECTION_FRAME_WIDTH;
-    if (gesture?.action === "erase" && eraserMode !== "lasso" && gesture.points.length) {
+    // The circle is the portable path's eraser cursor. On BOOX the firmware owns the eraser's look
+    // (its soft-eraser trace, or nothing while the pen layer is paused), and a circle in the canvas
+    // reaches the panel whenever SurfaceFlinger leaves the handwriting schema during a contact.
+    if (!onyx && gesture?.action === "erase" && eraserMode !== "lasso" && gesture.points.length) {
       const p = gesture.points[gesture.points.length - 1]!;
       staging.beginPath();
       staging.arc(p.x, p.y, gesture.radius, 0, Math.PI * 2);

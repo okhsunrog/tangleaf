@@ -247,6 +247,25 @@ it("hardware eraser uses the selected pixel mode and cancel leaves handwriting i
   expect(right.points[0].x).toBeCloseTo(100 + 19.9, 1);
 });
 
+it("draws the eraser circle on the portable path, where no firmware draws the eraser", () => {
+  act(() =>
+    renderDraft(emptyDraft(), { tool: "eraser", eraserMode: "pixel", eraserDiameter: 500 }),
+  );
+  pointer("pointerdown", { clientX: 50, clientY: 50 });
+  pointer("pointermove", { clientX: 60, clientY: 50 });
+  const published = vi.spyOn(contexts.get(canvas)!, "drawImage").mock.calls;
+  const staging = contexts.get(published[published.length - 1]![0] as HTMLCanvasElement)!;
+  // At the last point, with the 5.00 mm eraser's reach in CSS millimetres on this 500 px sheet.
+  expect(vi.spyOn(staging, "arc")).toHaveBeenLastCalledWith(
+    120,
+    100,
+    expect.closeTo(18.9, 1),
+    0,
+    Math.PI * 2,
+  );
+  pointer("pointerup", { clientX: 60, clientY: 50 });
+});
+
 it("reuses the sheet bitmap during a contour and rebuilds it when paper changes", () => {
   act(() =>
     resize(

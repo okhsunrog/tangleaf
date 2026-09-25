@@ -8,7 +8,7 @@ private class RecordingSwitches : RawDrawingSwitches {
     override fun render(enabled: Boolean) { calls.add("render=$enabled") }
     override fun input(enabled: Boolean) { calls.add("input=$enabled") }
     override fun pushRects() { calls.add("rects") }
-    override fun resetDefaults() { calls.add("defaults") }
+    override fun pushPen() { calls.add("pen") }
 }
 
 class RawDrawingGateTest {
@@ -18,15 +18,21 @@ class RawDrawingGateTest {
         assertEquals(listOf("render=false", "input=false"), switches.calls)
     }
 
-    @Test fun resumingRePushesGeometryAndArmsInputBeforeRender() {
+    @Test fun resumingRePushesGeometryAndPenAndArmsInputBeforeRender() {
         val switches = RecordingSwitches()
         RawDrawingGate(switches).resume(render = true)
-        assertEquals(listOf("rects", "defaults", "input=true", "render=true"), switches.calls)
+        assertEquals(listOf("rects", "pen", "input=true", "render=true"), switches.calls)
     }
 
     @Test fun aToolThatOnlyWantsRawPointsResumesWithoutFirmwareInk() {
         val switches = RecordingSwitches()
         RawDrawingGate(switches).resume(render = false)
-        assertEquals(listOf("rects", "defaults", "input=true", "render=false"), switches.calls)
+        assertEquals(listOf("rects", "pen", "input=true", "render=false"), switches.calls)
+    }
+
+    @Test fun theEraseHandBackResumesRenderAloneWithTheFullReSend() {
+        val switches = RecordingSwitches()
+        RawDrawingGate(switches).resume(render = true, input = false)
+        assertEquals(listOf("rects", "pen", "render=true"), switches.calls)
     }
 }

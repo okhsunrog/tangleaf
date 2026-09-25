@@ -9,11 +9,12 @@ internal interface RawDrawingSwitches {
     fun pushRects()
 
     /**
-     * `resetPenDefaultRawDrawing`: brush ink on, hardware eraser ink off. `setRawDrawingEnabled`
-     * used to do this as a side effect, and the firmware keeps these flags per device, not per
-     * session, so a resume that skipped it could inherit a brush another app switched off.
+     * The whole pen configuration: the painters' parameters, the tool's width, colour and style,
+     * and the brush and eraser-end flags ([penSettingsCalls]). The firmware keeps the flags per
+     * device, not per session, and keeps one style slot that the eraser end overwrites, so every
+     * resume sends all of it, as stock's `ResumeRawDrawingRequest` does.
      */
-    fun resetDefaults()
+    fun pushPen()
 }
 
 /**
@@ -33,11 +34,15 @@ internal class RawDrawingGate(private val switches: RawDrawingSwitches) {
         switches.input(false)
     }
 
-    /** @param render whether the active tool wants firmware ink, not just raw points. */
-    fun resume(render: Boolean) {
+    /**
+     * @param render whether the active tool wants firmware ink, not just raw points.
+     * @param input whether to arm the reader. The erase hand-back pauses render only, so its
+     * resume leaves the reader alone, as stock's does.
+     */
+    fun resume(render: Boolean, input: Boolean = true) {
         switches.pushRects()
-        switches.resetDefaults()
-        switches.input(true)
+        switches.pushPen()
+        if (input) switches.input(true)
         switches.render(render)
     }
 }

@@ -228,6 +228,188 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
   expect(selectedResult).toEqual(["line"]);
 });
 
+// The eraser end with the pen, and the eraser tool's tip, which the plugin reports as erasing.
+it.each(["pen", "eraser"] as const)(
+  "draws nothing while the firmware traces an erase with the %s tool and commits once its stroke arrives",
+  async (tool) => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const flushFrames = () => {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(0);
+    };
+    const arc = vi.fn();
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      canvas: { width: 300, height: 150 },
+      getTransform() {
+        return { a: 1, d: 1 };
+      },
+      save() {},
+      restore() {},
+      rect() {},
+      clip() {},
+      setTransform() {},
+      clearRect() {},
+      fillRect() {},
+      setLineDash() {},
+      beginPath() {},
+      arc,
+      fill() {},
+      moveTo() {},
+      lineTo() {},
+      stroke() {},
+      drawImage,
+    } as unknown as CanvasRenderingContext2D);
+    await act(async () => root.render(<EditorSheet tool={tool} />));
+    await act(async () => flushFrames());
+    const { session } = bridge.invoke.mock.calls.find(([command]) =>
+      command.endsWith("configure_onyx_ink"),
+    )![1];
+    const commits = () =>
+      bridge.invoke.mock.calls
+        .filter(([command]) => command.endsWith("commit_onyx_frame"))
+        .map(([, args]) => args);
+    const before = commits().length;
+    arc.mockClear();
+    drawImage.mockClear();
+    const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
+    // The plugin marks the erase it lets the firmware draw as a fast preview.
+    const begin: OnyxInkEvent = {
+      session,
+      sequence: 0,
+      kind: "begin",
+      width: 3,
+      erasing: true,
+      fastPreview: true,
+      eraserRadius: 9,
+      points: [p(100, 50)],
+    };
+    await act(async () => {
+      bridge.event(begin);
+      bridge.event({ ...begin, kind: "preview", points: [p(100, 100)] });
+      bridge.event({ ...begin, kind: "preview", points: [p(100, 150)] });
+    });
+    await act(async () => flushFrames());
+    expect(arc).not.toHaveBeenCalled(); // No eraser circle over the firmware's trace.
+    expect(drawImage).not.toHaveBeenCalled(); // Nothing published at all.
+    expect(commits()).toHaveLength(before);
+    expect(latest.strokes).toHaveLength(1);
+
+    await act(async () => {
+      bridge.event({ ...begin, kind: "stroke", sequence: 1, points: [p(100, 50), p(100, 150)] });
+    });
+    await act(async () => flushFrames());
+    // The stroke, not the end, applies the erase with the plugin's radius and releases the commit
+    // that starts the plugin's hand-back; it carries that stroke's sequence.
+    expect(commits().slice(before)).toEqual([expect.objectContaining({ session, sequence: 1 })]);
+    const [left, right] = latest.strokes;
+    expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(90);
+    expect(right!.points[0]!.x).toBeCloseTo(110);
+    await act(async () => bridge.event({ ...begin, kind: "end", sequence: 1 }));
+    await act(async () => flushFrames());
+    expect(
+      commits()
+        .slice(before)
+        .every((args) => args.sequence === 1),
+    ).toBe(true);
+    // The final publish draws the ink's round ends, never a circle of the eraser's radius.
+    expect(arc.mock.calls.some(([, , radius]) => radius === 9)).toBe(false);
+  },
+);
+
+it("never draws the eraser circle over native erasing, with or without a firmware trace", async () => {
+  const arc = vi.fn();
+  const drawImage = vi.fn();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    canvas: { width: 300, height: 150 },
+    getTransform() {
+      return { a: 1, d: 1 };
+    },
+    save() {},
+    restore() {},
+    rect() {},
+    clip() {},
+    setTransform() {},
+    clearRect() {},
+    fillRect() {},
+    setLineDash() {},
+    beginPath() {},
+    arc,
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    drawImage,
+  } as unknown as CanvasRenderingContext2D);
+  const eraserCircles = () => arc.mock.calls.filter(([, , radius]) => radius === 9);
+  await act(async () => root.render(<EditorSheet tool="pen" />));
+  // A measured sheet, so a re-render redraws the canvas.
+  await act(async () =>
+    resize?.(
+      [{ contentRect: { width: 500, height: 700 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  const { session } = bridge.invoke.mock.calls.find(([command]) =>
+    command.endsWith("configure_onyx_ink"),
+  )![1];
+  const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
+  const begin: OnyxInkEvent = {
+    session,
+    sequence: 0,
+    kind: "begin",
+    width: 3,
+    erasing: true,
+    fastPreview: true,
+    eraserRadius: 9,
+    points: [p(100, 100)],
+  };
+  // The eraser end as the tablet delivers it: a contact of a few milliseconds, then the real one.
+  // The short contact's erase and deselection re-render the sheet while the real one is down,
+  // which redraws the canvas in the middle of a traced gesture.
+  drawImage.mockClear();
+  await act(async () => {
+    bridge.event(begin);
+    bridge.event({ ...begin, kind: "stroke", sequence: 1, points: [p(100, 100)] });
+    bridge.event({ ...begin, kind: "end", sequence: 1 });
+    bridge.event({ ...begin, sequence: 1, points: [p(150, 100)] });
+  });
+  expect(latest.strokes).toHaveLength(2); // The short contact's erase is kept.
+  expect(drawImage).toHaveBeenCalled();
+  expect(eraserCircles()).toEqual([]);
+  await act(async () => {
+    bridge.event({ ...begin, kind: "stroke", sequence: 2, points: [p(150, 100), p(180, 100)] });
+    bridge.event({ ...begin, kind: "end", sequence: 2 });
+  });
+  expect(latest.strokes).toHaveLength(3);
+
+  // The eraser end in the lasso tool has no firmware trace, so the page previews the erase itself:
+  // still no circle.
+  await act(async () => root.render(<EditorSheet tool="lasso" />));
+  drawImage.mockClear();
+  const lasso: OnyxInkEvent = { ...begin, sequence: 2, fastPreview: false, points: [p(20, 100)] };
+  await act(async () => {
+    bridge.event(lasso);
+    bridge.event({ ...lasso, kind: "preview", points: [p(40, 100)] });
+    // The preview waits for the next animation frame, a timer here.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(drawImage.mock.calls.length).toBeGreaterThan(1);
+  expect(eraserCircles()).toEqual([]);
+  await act(async () => {
+    bridge.event({ ...lasso, kind: "stroke", sequence: 3, points: [p(20, 100), p(40, 100)] });
+    bridge.event({ ...lasso, kind: "end", sequence: 3 });
+  });
+  expect(eraserCircles()).toEqual([]);
+});
+
 it("hands a new eraser diameter to the plugin, and falls back to CSS millimetres without its radius", async () => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
   await act(async () => root.render(<EditorSheet tool="eraser" />));
