@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import type { InkDraft, InkPoint } from "@/lib/bindings";
+import { DEFAULT_ERASER_TYPE, normalizeDiameter } from "./eraser-settings";
 import type { InkMetrics, InkTool } from "./ink-canvas";
-import type { Bounds, LassoMode } from "./ink-editing";
+import type { Bounds, EraserMode, LassoMode } from "./ink-editing";
 import { eraseAt, MAX_INK_POINTS } from "./ink-model";
 
 export type OnyxInkEvent = {
@@ -12,6 +13,11 @@ export type OnyxInkEvent = {
   width: number;
   erasing: boolean;
   fastPreview?: boolean;
+  /**
+   * The eraser's reach in sheet units, measured by the plugin from the diameter in millimetres at
+   * the device's own density. CSS millimetres are not physical ones on the BOOX WebView.
+   */
+  eraserRadius?: number;
   points?: InkPoint[];
 };
 export type OnyxInkStatus = { available: boolean; active: boolean; error?: string };
@@ -58,6 +64,8 @@ export function useOnyxInk({
   onStroke,
   decoration,
   lassoMode,
+  eraserMode = DEFAULT_ERASER_TYPE,
+  eraserDiameter,
   selection,
   overlayRects,
   interacting = false,
@@ -75,6 +83,9 @@ export function useOnyxInk({
   onStatus?: (status: OnyxInkStatus) => void;
   decoration?: string;
   lassoMode?: LassoMode;
+  eraserMode?: EraserMode;
+  /** Hundredths of a millimetre; the type's default when absent. */
+  eraserDiameter?: number;
   selection?: Bounds | null;
   overlayRects?: InkOverlayRect[];
   /** A local gesture owns the sheet: reconfiguring now would pause raw drawing and cancel it. */
@@ -97,6 +108,8 @@ export function useOnyxInk({
     onInput,
     onStroke,
     lassoMode,
+    eraserMode,
+    eraserDiameter,
     selection,
     overlayRects,
     interacting,
@@ -118,6 +131,8 @@ export function useOnyxInk({
       onInput,
       onStroke,
       lassoMode,
+      eraserMode,
+      eraserDiameter,
       selection,
       overlayRects,
       interacting,
@@ -201,6 +216,10 @@ export function useOnyxInk({
         // Floating DOM controls inside the sheet, so a pen landing on one taps it instead of
         // inking. The handwriting region itself stays whole, or the trace would be cut with it.
         overlayRects: overlays,
+        // The plugin measures the eraser in millimetres and reports its reach with every event.
+        // A value off the menu's grid would be refused, and fast ink with it.
+        eraserType: state.current.eraserMode,
+        eraserDiameter: normalizeDiameter(state.current.eraserMode, state.current.eraserDiameter),
       };
       const key = JSON.stringify(args);
       if (key === lastConfig) return;
@@ -322,6 +341,8 @@ export function useOnyxInk({
     tool,
     width,
     lassoMode,
+    eraserMode,
+    eraserDiameter,
     overlayKey,
     interacting,
     selection?.left,

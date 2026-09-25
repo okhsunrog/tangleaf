@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, createElement, type ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
+import { ConfirmationProvider } from "@/app/confirmation";
 import { PageSessionProvider } from "@/features/pages/page-session";
 import {
   PaneContentKind,
@@ -16,8 +17,10 @@ import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 
 const paneId = () => useWorkspaceStore.getState().primaryPaneId as PaneId;
 import type { InkHistorySnapshot, InkVersionInfo, Page } from "@/lib/bindings";
+import { resetEraserSettings, useEraserSettings } from "./eraser-settings";
 import { HandwritingNoteView } from "./handwriting-note-view";
 import { getWriter, resetHandwritingSessions } from "./handwriting-session";
+import type { InkCanvas } from "./ink-canvas";
 import { useHandwritingPreference } from "./input-capabilities";
 import { emptyDraft } from "./ink-model";
 
@@ -44,6 +47,37 @@ vi.mock("@/lib/notify", () => ({
   notifySuccess: vi.fn(),
   notifyRetryableError: api.notifyRetryableError,
 }));
+
+/** Every full panel refresh an overlay's close asks for, through the shared wrapper's decorator. */
+const refresh = vi.hoisted(() => ({ soon: vi.fn() }));
+vi.mock("@/app/eink-refresh", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/app/eink-refresh")>();
+  return {
+    ...actual,
+    requestFullRefreshSoon: refresh.soon,
+    refreshPanelAfterClose:
+      <Rest extends unknown[]>(handler?: (open: boolean, ...rest: Rest) => void) =>
+      (open: boolean, ...rest: Rest) => {
+        if (!open) refresh.soon();
+        handler?.(open, ...rest);
+      },
+  };
+});
+
+/** What the view hands the sheet, render by render. */
+const canvasProps = vi.hoisted(() => vi.fn());
+vi.mock("./ink-canvas", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ink-canvas")>();
+  return {
+    ...actual,
+    InkCanvas: (props: ComponentProps<typeof InkCanvas>) => {
+      canvasProps(props);
+      return createElement(actual.InkCanvas, props);
+    },
+  };
+});
+const lastCanvasProps = () =>
+  canvasProps.mock.calls[canvasProps.mock.calls.length - 1]![0] as ComponentProps<typeof InkCanvas>;
 
 const page: Page = {
   uuid: "019f0000-0000-7000-8000-00000000000a",
@@ -96,6 +130,11 @@ beforeEach(() => {
   useWorkspaceStore.getState().dispatch({ type: "reset" });
   // Drawing without a detected pen is the explicit device preference.
   useHandwritingPreference.setState({ mouseEnabled: true });
+  // The eraser's settings are per device and persisted; no test may inherit another's.
+  resetEraserSettings();
+  localStorage.clear();
+  refresh.soon.mockReset();
+  canvasProps.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -125,15 +164,17 @@ async function mount(onDelete: (page: Page) => void = () => {}, onBack?: () => v
   await act(async () =>
     root.render(
       <QueryClientProvider client={queryClient}>
-        <PageSessionProvider>
-          <HandwritingNoteView
-            paneId={paneId as PaneId}
-            page={page}
-            onSaved={() => {}}
-            onDelete={onDelete}
-            onBack={onBack}
-          />
-        </PageSessionProvider>
+        <ConfirmationProvider>
+          <PageSessionProvider>
+            <HandwritingNoteView
+              paneId={paneId as PaneId}
+              page={page}
+              onSaved={() => {}}
+              onDelete={onDelete}
+              onBack={onBack}
+            />
+          </PageSessionProvider>
+        </ConfirmationProvider>
       </QueryClientProvider>,
     ),
   );
@@ -500,7 +541,84 @@ it("leaves undo to the rename field while the caret is in it", async () => {
   expect(api.handwritingHistory).toHaveBeenCalledWith(page.uuid, false, "revision-2");
 });
 
-it("keeps one toolbar row and moves the tool options into a popover", async () => {
+function eraserMenu() {
+  return document.querySelector<HTMLElement>("[data-eraser-menu]");
+}
+
+/** The type the toolbar's eraser button shows. */
+function toolbarEraserType() {
+  return container
+    .querySelector('[role="toolbar"] [data-eraser-type]')
+    ?.getAttribute("data-eraser-type");
+}
+
+async function tap(element: HTMLElement) {
+  await act(async () => {
+    element.click();
+  });
+}
+
+async function openEraserMenu() {
+  await tap(button("Eraser"));
+  await tap(button("Eraser options"));
+}
+
+function dialogButton(label: string) {
+  const found = [
+    ...document.querySelectorAll<HTMLElement>('[data-slot="dialog-content"] button'),
+  ].find((element) => element.textContent?.trim() === label);
+  if (!found) throw new Error(`no dialog button labelled ${label}`);
+  return found;
+}
+
+const line = {
+  id: "line",
+  width: 2,
+  points: [
+    { x: 100, y: 100, pressure: 0.5, tiltX: 0, tiltY: 0, time: 0 },
+    { x: 300, y: 100, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+  ],
+};
+
+const inked = (revision: string): InkHistorySnapshot => ({
+  snapshot: { draft: { ...emptyDraft(), strokes: [line] }, revision },
+  canUndo: false,
+  canRedo: false,
+});
+
+/** One pen contact on the sheet, through the pointer path (no BOOX plugin in these tests). */
+async function penTap(x: number, y: number) {
+  const canvas = container.querySelector("canvas");
+  if (!canvas) throw new Error("no canvas");
+  canvas.setPointerCapture = vi.fn();
+  canvas.releasePointerCapture = vi.fn();
+  canvas.hasPointerCapture = () => true;
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+    left: 0,
+    top: 0,
+    right: 500,
+    bottom: 700,
+    width: 500,
+    height: 700,
+  } as DOMRect);
+  for (const type of ["pointerdown", "pointerup"]) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.assign(event, {
+      pointerId: 1,
+      pointerType: "pen",
+      clientX: x,
+      clientY: y,
+      pressure: 0.5,
+      buttons: type === "pointerdown" ? 1 : 0,
+      button: 0,
+    });
+    await act(async () => {
+      canvas.dispatchEvent(event);
+    });
+  }
+}
+
+it("keeps one toolbar row and opens the eraser menu on the second tap only", async () => {
   await mount();
 
   // Every strip of chrome is sheet the pen cannot use; there is exactly one.
@@ -508,20 +626,198 @@ it("keeps one toolbar row and moves the tool options into a popover", async () =
   expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
 
   // The first tap on a tool switches to it; only the second opens its options.
-  await act(async () => {
-    button("Eraser").click();
-  });
+  await tap(button("Eraser"));
   expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
-  await act(async () => {
-    button("Eraser options").click();
-  });
-  expect(document.querySelector("[data-ink-tool-options]")).not.toBeNull();
+  await tap(button("Eraser options"));
+  expect(eraserMenu()).not.toBeNull();
+  // The menu is not a second toolbar.
+  expect(document.querySelectorAll('[role="toolbar"]')).toHaveLength(1);
 
+  // A third tap closes it, and it stays closed.
+  await tap(button("Eraser options"));
+  expect(eraserMenu()).toBeNull();
+
+  // The same toggle for the pen's widths.
+  await tap(button("Pen"));
+  await tap(button("Pen options"));
+  expect(options("Pen width 5")).toBeTruthy();
+  await tap(button("Pen options"));
+  expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
+});
+
+it("offers the three erasers in stock's order, as radios, and closes on a type", async () => {
+  await mount();
+  expect(toolbarEraserType()).toBe("stroke");
+  await openEraserMenu();
+
+  const radios = [...document.querySelectorAll<HTMLElement>('[data-eraser-menu] [role="radio"]')];
+  expect(radios.map((radio) => radio.getAttribute("aria-label"))).toEqual([
+    "Pixel Eraser",
+    "Lasso Eraser",
+    "Stroke Eraser",
+  ]);
+  // A pressed button would be painted solid black on e-ink; the choice is a dot instead.
+  expect(radios.some((radio) => radio.hasAttribute("aria-pressed"))).toBe(false);
+  expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual([
+    "false",
+    "false",
+    "true",
+  ]);
+  expect(eraserMenu()?.textContent).toContain("Stroke Eraser 0.50mm");
+
+  await tap(options("Pixel Eraser"));
+  expect(eraserMenu()).toBeNull();
+  expect(toolbarEraserType()).toBe("pixel");
+  expect(lastCanvasProps()).toMatchObject({ eraserMode: "pixel", eraserDiameter: 500 });
+
+  await tap(button("Eraser options"));
+  expect(eraserMenu()?.textContent).toContain("Pixel Eraser 5.00mm");
+  expect(eraserMenu()?.textContent).toContain("Eraser Diameter");
+
+  await tap(options("Lasso Eraser"));
+  await tap(button("Eraser options"));
+  expect(eraserMenu()?.textContent).toContain("Lasso Eraser");
+  expect(eraserMenu()?.textContent).not.toContain("Eraser Diameter");
+  expect(document.querySelector('[data-eraser-menu] input[type="range"]')).toBeNull();
+
+  // The selected type closes the menu too.
+  await tap(options("Lasso Eraser"));
+  expect(eraserMenu()).toBeNull();
+});
+
+it("steps the diameter with the menu open and hands it to the sheet once it closes", async () => {
+  useEraserSettings.getState().setType("pixel");
+  await mount();
+  await openEraserMenu();
+
+  await tap(options("Decrease eraser diameter"));
+  await tap(options("Decrease eraser diameter"));
+  expect(eraserMenu()?.textContent).toContain("Pixel Eraser 4.90mm");
+  expect(useEraserSettings.getState().diameters.pixel).toBe(490);
+  // Still open, and the sheet still erases with what it had when the menu opened.
+  expect(eraserMenu()).not.toBeNull();
+  expect(lastCanvasProps()).toMatchObject({ eraserMode: "pixel", eraserDiameter: 500 });
+
+  const slider = document.querySelector<HTMLInputElement>(
+    '[data-eraser-menu] input[type="range"]',
+  )!;
+  expect(slider.getAttribute("aria-valuetext")).toBe("4.90mm");
   await act(async () => {
-    options("Pixel eraser").click();
+    slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   });
-  expect(options.bind(null, "Pixel eraser")).toThrow();
-  expect(container.querySelectorAll('[role="toolbar"]')).toHaveLength(1);
+  expect(eraserMenu()?.textContent).toContain("Pixel Eraser 4.95mm");
+  expect(useEraserSettings.getState().diameters.pixel).toBe(495);
+  await act(async () => {
+    slider.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  });
+  expect(eraserMenu()?.textContent).toContain("Pixel Eraser 8.00mm");
+  // Nothing past the end.
+  await tap(options("Increase eraser diameter"));
+  expect(useEraserSettings.getState().diameters.pixel).toBe(800);
+
+  // Stroke keeps its own diameter; pixel's comes back with it.
+  await tap(options("Stroke Eraser"));
+  expect(lastCanvasProps()).toMatchObject({ eraserMode: "stroke", eraserDiameter: 50 });
+  await tap(button("Eraser options"));
+  expect(eraserMenu()?.textContent).toContain("Stroke Eraser 0.50mm");
+  await tap(options("Pixel Eraser"));
+  expect(lastCanvasProps()).toMatchObject({ eraserMode: "pixel", eraserDiameter: 800 });
+});
+
+it("repaints a closed eraser menu without a full refresh", async () => {
+  await mount();
+  await openEraserMenu();
+
+  // A type closes the menu by state; base-ui reports nothing for a controlled close.
+  await tap(options("Pixel Eraser"));
+  expect(eraserMenu()).toBeNull();
+  await tap(button("Eraser options"));
+  await tap(container.querySelector("canvas")!);
+  expect(eraserMenu()).toBeNull();
+  expect(refresh.soon).not.toHaveBeenCalled();
+
+  // The pen's widths keep the full refresh for a press outside, and a width chosen from them,
+  // which is also a controlled close, asks for none either.
+  await tap(button("Pen"));
+  await tap(button("Pen options"));
+  await tap(options("Pen width 5"));
+  expect(refresh.soon).not.toHaveBeenCalled();
+  await tap(button("Pen options"));
+  await tap(container.querySelector("canvas")!);
+  expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
+  expect(refresh.soon).toHaveBeenCalledTimes(1);
+});
+
+it("erases the page after a confirmation, as one undoable write, and goes back to the pen", async () => {
+  api.loadHandwritingNote.mockResolvedValue(inked("revision-1"));
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  await mount();
+  await openEraserMenu();
+
+  await tap(options("Erase Page"));
+  expect(document.body.textContent).toContain(
+    "Are you sure you want to erase strokes on this page?",
+  );
+  await tap(dialogButton("Cancel"));
+  expect(api.saveHandwritingPatch).not.toHaveBeenCalled();
+  expect(button("Eraser options").getAttribute("aria-pressed")).toBe("true");
+  expect(eraserMenu()).not.toBeNull();
+
+  await tap(options("Erase Page"));
+  await tap(dialogButton("Erase"));
+  expect(api.saveHandwritingPatch).toHaveBeenCalledTimes(1);
+  expect(api.saveHandwritingPatch).toHaveBeenCalledWith(
+    page.uuid,
+    { order: [], upserts: [], background: "plain" },
+    "revision-1",
+  );
+  expect(eraserMenu()).toBeNull();
+  expect(button("Pen options").getAttribute("aria-pressed")).toBe("true");
+  expect(button("Undo stroke").disabled).toBe(false);
+});
+
+it("confirms Erase Page on an empty page too, and writes nothing", async () => {
+  await mount();
+  await openEraserMenu();
+
+  expect(options("Erase Page").hasAttribute("disabled")).toBe(false);
+  await tap(options("Erase Page"));
+  await tap(dialogButton("Erase"));
+  expect(api.saveHandwritingPatch).not.toHaveBeenCalled();
+  expect(eraserMenu()).toBeNull();
+  expect(button("Pen options").getAttribute("aria-pressed")).toBe("true");
+  expect(button("Undo stroke").disabled).toBe(true);
+});
+
+it("keeps Auto-deselect on the device and returns to the previous tool after an eraser erase", async () => {
+  api.loadHandwritingNote.mockResolvedValue(inked("revision-1"));
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  await mount();
+  await tap(button("Lasso"));
+  await openEraserMenu();
+
+  const toggle = document.querySelector<HTMLElement>('[data-eraser-menu] [role="switch"]')!;
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  await tap(toggle);
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(eraserMenu()).not.toBeNull();
+  expect(JSON.parse(localStorage.getItem("tangleaf.eraser-settings.v1")!).state.autoDeselect).toBe(
+    true,
+  );
+
+  // The hint opens over the menu, and a tap elsewhere in the menu closes only the hint.
+  const hint = "When enabled, auto-switch to last tool after erasing.";
+  await tap(options("About Auto-deselect Eraser"));
+  expect(document.body.textContent).toContain(hint);
+  await tap(eraserMenu()!.querySelector("p")!);
+  expect(document.body.textContent).not.toContain(hint);
+  expect(eraserMenu()).not.toBeNull();
+
+  await tap(button("Eraser options"));
+  // The stroke eraser on the line at sheet (200, 100): the eraser tool hands back to the lasso.
+  await penTap(100, 50);
+  expect(api.saveHandwritingPatch).toHaveBeenCalledTimes(1);
+  expect(button("Lasso options").getAttribute("aria-pressed")).toBe("true");
 });
 
 it("offers Back in the toolbar only when the note has the screen", async () => {
@@ -558,7 +854,7 @@ it("keeps the grid in the note menu, where it is not a second selected tool", as
   // Only the tool in use is pressed in the bar.
   const pressed = container.querySelectorAll('[role="toolbar"] button[aria-pressed="true"]');
   expect([...pressed].map((element) => element.getAttribute("aria-label"))).toEqual([
-    "Pen, medium",
+    "Pen options",
   ]);
 });
 
@@ -605,37 +901,19 @@ it("says Unsent on its own when there is nothing else to report", async () => {
   expect(container.querySelector('[role="toolbar"]')?.textContent).toContain("Unsent");
 });
 
-it("picks the pen and its width with one tap on a preset", async () => {
+it("offers one pen whose second tap opens its stroke widths, at any bar width", async () => {
   await mount();
-  const pressed = (label: string) => button(label).getAttribute("aria-pressed");
 
-  expect(pressed("Pen, medium")).toBe("true");
+  expect(button.bind(null, "Pen, medium")).toThrow();
+  expect(button("Pen options").getAttribute("aria-pressed")).toBe("true");
   await act(async () => {
     button("Eraser").click();
   });
-  expect(pressed("Pen, medium")).toBe("false");
-
+  expect(button("Pen").getAttribute("aria-pressed")).toBe("false");
   await act(async () => {
-    button("Pen, bold").click();
-  });
-  expect(pressed("Pen, bold")).toBe("true");
-  expect(pressed("Eraser")).toBe("false");
-  expect(pressed("Pen, medium")).toBe("false");
-  // A preset is the whole choice; there are no pen options to open.
-  await act(async () => {
-    button("Pen, bold").click();
+    button("Pen").click();
   });
   expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
-});
-
-it("folds the presets into one pen with a width popover on a narrow bar", async () => {
-  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
-    width: 420,
-    height: 44,
-  } as DOMRect);
-  await mount();
-
-  expect(button.bind(null, "Pen, fine")).toThrow();
   await act(async () => {
     button("Pen options").click();
   });

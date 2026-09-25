@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { Menu } from "@base-ui/react/menu";
-import { Check, Grid2X2, MoreHorizontal, Pencil, PenLine, Star, Trash2 } from "lucide-react";
+import { Check, Grid2X2, MoreHorizontal, Pencil, Star, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
 import { useOverlayInkSuppression } from "@/app/ink-suppression";
@@ -13,27 +13,15 @@ import { cn } from "@/lib/utils";
  * costs sheet height. Text inside the bar stays in rem.
  */
 
-/** One tap picks the pen and its width, like the stock app's pen presets. */
-export const PEN_PRESETS = [
-  { width: 2, label: "fine" },
-  { width: 3, label: "medium" },
-  { width: 5, label: "bold" },
-] as const;
-
-/** Below this bar width the presets fold into one Pen whose second tap opens the widths. */
-const PRESETS_MIN_WIDTH = 600;
 /** Below this bar width the status chip shows its icon only. */
 const STATUS_LABEL_MIN_WIDTH = 480;
 
-export type ToolbarLayout = { penPresets: boolean; statusIconOnly: boolean };
+export type ToolbarLayout = { statusIconOnly: boolean };
 
 /** A bar not measured yet (width 0) gets the wide layout. */
 export function toolbarLayout(width: number): ToolbarLayout {
-  if (width <= 0) return { penPresets: true, statusIconOnly: false };
-  return {
-    penPresets: width >= PRESETS_MIN_WIDTH,
-    statusIconOnly: width < STATUS_LABEL_MIN_WIDTH,
-  };
+  if (width <= 0) return { statusIconOnly: false };
+  return { statusIconOnly: width < STATUS_LABEL_MIN_WIDTH };
 }
 
 /**
@@ -79,19 +67,6 @@ export function ToolbarSeparator() {
       data-ink-toolbar-separator
       className="mx-[2px] h-[24px] w-px shrink-0 bg-border"
     />
-  );
-}
-
-/** A nib over a sample of the stroke the preset draws. */
-export function PenPresetIcon({ width }: { width: number }) {
-  return (
-    <span className="flex flex-col items-center gap-[3px]">
-      <PenLine className="size-[20px]" />
-      <span
-        className="block w-[16px] rounded-full bg-current"
-        style={{ height: Math.max(1, Math.round(width * 0.6)) }}
-      />
-    </span>
   );
 }
 

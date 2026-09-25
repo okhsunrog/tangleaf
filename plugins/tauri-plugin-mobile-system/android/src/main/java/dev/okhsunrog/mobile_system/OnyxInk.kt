@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Build
 import android.os.SystemClock
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -49,6 +50,10 @@ class OnyxInkArgs {
     var selectionBottom: Double = 0.0
     /** DOM controls floating inside the sheet that a pen must tap rather than ink, in CSS pixels. */
     var overlayRects: List<OnyxOverlayRect> = emptyList()
+    /** The eraser menu's type: `stroke`, `pixel` or `lasso`. */
+    var eraserType: String = "stroke"
+    /** The eraser's diameter in hundredths of a millimetre, as the menu stores it. */
+    var eraserDiameter: Int = 50
 }
 
 @InvokeArg
@@ -205,6 +210,18 @@ internal class OnyxInk(
         private const val CLOSE_REFRESH_DELAY_MS = 300L
         fun supported(): Boolean = Build.MANUFACTURER.equals("ONYX", true)
 
+        /** The sheet's width in ink units, the page's `SHEET_BOUNDS.right`. */
+        private const val SHEET_UNITS_WIDE = 1000.0
+
+        /**
+         * The density the eraser is measured at: the device's own, without the per-app DPI a BOOX
+         * user can set. Stock Notes runs at the device density (300) and computes its widths from
+         * `densityDpi`; ours is raised by that per-app setting, and using it would make every
+         * eraser half as wide again as stock's.
+         */
+        private val ERASER_DPI: Int
+            get() = DisplayMetrics.DENSITY_DEVICE_STABLE
+
         /**
          * `RawInputReader`'s default pen-up refresh interval, re-applied on every resume the way
          * `ResumeRawDrawingRequest` does. The SDK starts this timer at the last point of a
@@ -311,6 +328,8 @@ internal class OnyxInk(
             args.selectionRight, args.selectionBottom).all { it.isFinite() })
         require(args.width > 0 && args.height > 0 && args.viewportWidth > 0)
         require(args.strokeWidth in 0.1..20.0)
+        require(args.eraserType in InkEraserSize.TYPES)
+        require(args.eraserDiameter in InkEraserSize.MIN_DIAMETER..InkEraserSize.MAX_DIAMETER)
         // A transient SDK failure — a hidden-API hiccup, a digitizer that was
         // not ready yet — used to disable fast ink for the rest of the process.
         // The message survives for status(); the gate does not.
@@ -337,6 +356,8 @@ internal class OnyxInk(
         }
         pause(releaseDisplay = false, tearDown = false)
         config = args
+        Log.d("OnyxInk", "eraser type=${args.eraserType} d=${args.eraserDiameter} " +
+            "px=${eraserPx(args.eraserDiameter, ERASER_DPI)} dpi=$ERASER_DPI")
         // CSS pixels may differ from Android density because BOOX has per-app DPI settings.
         val scale = webView.width / args.viewportWidth
         val previousSheet = RectF(sheet)
@@ -413,6 +434,7 @@ internal class OnyxInk(
             a.hasSelection == b.hasSelection &&
             a.selectionLeft == b.selectionLeft && a.selectionTop == b.selectionTop &&
             a.selectionRight == b.selectionRight && a.selectionBottom == b.selectionBottom &&
+            a.eraserType == b.eraserType && a.eraserDiameter == b.eraserDiameter &&
             a.overlayRects != b.overlayRects
 
     /** Diagnostics only: drive one firmware path at a time while a dead area is on screen. */
@@ -468,6 +490,23 @@ internal class OnyxInk(
         put("paused", JSONArray(pauses.reasons()))
         put("imeVisible", imeVisible)
         put("imeSource", imeSource)
+        // What the eraser is measured at, next to the densities it could have been measured at.
+        val metrics = activity.resources.displayMetrics
+        put("densityStable", ERASER_DPI)
+        put("densityDpi", metrics.densityDpi)
+        put("xdpi", metrics.xdpi.toDouble())
+        put("eraserType", config?.eraserType)
+        put("eraserDiameter", config?.eraserDiameter)
+        // A float, so the value reads as stock's recorded payload (59.05512 for 5.00 mm).
+        put("eraserPx", config?.let { eraserPx(it.eraserDiameter, ERASER_DPI) })
+        put("eraserRadius", eraserRadius())
+    }
+
+    /** The eraser's reach in sheet units, or null before there is a sheet to measure it on. */
+    private fun eraserRadius(): Double? {
+        val args = config ?: return null
+        if (sheet.isEmpty) return null
+        return eraserRadiusUnits(eraserPx(args.eraserDiameter, ERASER_DPI), sheet.width(), SHEET_UNITS_WIDE)
     }
 
     fun commit(args: OnyxFrameArgs) {
@@ -770,6 +809,9 @@ internal class OnyxInk(
             put("width", args.strokeWidth)
             put("erasing", erasing || args.eraser)
             put("fastPreview", fastPreview)
+            // The hit test's reach, measured here because CSS millimetres are not physical ones
+            // under the per-app DPI.
+            eraserRadius()?.let { put("eraserRadius", it) }
             if (points != null) put("points", points)
         })
     }

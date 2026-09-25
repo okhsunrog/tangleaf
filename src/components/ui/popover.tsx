@@ -5,15 +5,26 @@ import { cn } from "@/lib/utils";
 import { refreshPanelAfterClose } from "@/app/eink-refresh";
 import { useOverlayInkSuppression } from "@/app/ink-suppression";
 
-function Popover({ onOpenChange, ...props }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+function Popover({
+  onOpenChange,
+  fullRefreshOnClose = true,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Root> & {
+  /**
+   * Whether a close reported by the popover schedules a full panel refresh. A menu that only
+   * covers part of the page can leave its repaint to the ordinary partial frame, as stock Notes
+   * does with its eraser menu.
+   */
+  fullRefreshOnClose?: boolean;
+}) {
   const overlay = useOverlayInkSuppression(props.open ?? props.defaultOpen);
-  const closed = refreshPanelAfterClose(onOpenChange);
+  const closed = fullRefreshOnClose ? refreshPanelAfterClose(onOpenChange) : onOpenChange;
   return (
     <PopoverPrimitive.Root
       data-slot="popover"
       onOpenChange={(open, ...rest) => {
         overlay(open);
-        closed(open, ...rest);
+        closed?.(open, ...rest);
       }}
       {...props}
     />
@@ -26,6 +37,7 @@ function PopoverTrigger(props: React.ComponentProps<typeof PopoverPrimitive.Trig
 
 function PopoverContent({
   className,
+  side,
   align = "center",
   sideOffset = 8,
   anchor,
@@ -33,11 +45,12 @@ function PopoverContent({
 }: React.ComponentProps<typeof PopoverPrimitive.Popup> &
   Pick<
     React.ComponentProps<typeof PopoverPrimitive.Positioner>,
-    "align" | "sideOffset" | "anchor"
+    "side" | "align" | "sideOffset" | "anchor"
   >) {
   return (
     <PopoverPrimitive.Portal data-slot="popover-portal">
       <PopoverPrimitive.Positioner
+        side={side}
         align={align}
         sideOffset={sideOffset}
         anchor={anchor}

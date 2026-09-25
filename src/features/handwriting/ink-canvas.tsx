@@ -27,6 +27,7 @@ import {
   type LassoMode,
 } from "./ink-editing";
 import { applyOnyxStroke, useOnyxInk, type OnyxInkEvent, type OnyxInkStatus } from "./onyx-ink";
+import { cssEraserRadius, normalizeDiameter } from "./eraser-settings";
 
 export type InkMetrics = {
   tool: string;
@@ -47,6 +48,8 @@ type Gesture = {
   rect?: DOMRect;
   lastMetrics: number;
   nativeFast: boolean;
+  /** The eraser's reach in sheet units, fixed for the whole gesture. */
+  radius: number;
   /** A finger drag of the selection, which a second pointer abandons. */
   finger?: boolean;
   backdrop?: InkStroke[];
@@ -90,7 +93,8 @@ export function InkCanvas({
   nativeInk = false,
   onNativeStatus,
   eraserMode = "stroke",
-  eraserRadius = 12,
+  eraserDiameter,
+  onEraseFinished,
   lassoMode = "free",
   selected = NO_SELECTION,
   onSelectionChange,
@@ -108,7 +112,10 @@ export function InkCanvas({
   nativeInk?: boolean;
   onNativeStatus?: (status: OnyxInkStatus) => void;
   eraserMode?: EraserMode;
-  eraserRadius?: number;
+  /** Hundredths of a millimetre, as the eraser menu stores it; the type's default when absent. */
+  eraserDiameter?: number;
+  /** An erase gesture made with the eraser tool has been applied (stock's auto-deselect hook). */
+  onEraseFinished?: () => void;
   lassoMode?: LassoMode;
   selected?: string[];
   onSelectionChange?: (ids: string[]) => void;
@@ -118,6 +125,7 @@ export function InkCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bufferRef = useRef<HTMLCanvasElement | null>(null);
   const active = useRef<Gesture | null>(null);
+  const diameter = normalizeDiameter(eraserMode, eraserDiameter);
   const sceneRef = useRef<{
     canvas: HTMLCanvasElement;
     strokes: InkStroke[];
@@ -285,7 +293,7 @@ export function InkCanvas({
     if (gesture?.action === "erase" && eraserMode !== "lasso" && gesture.points.length) {
       const p = gesture.points[gesture.points.length - 1]!;
       staging.beginPath();
-      staging.arc(p.x, p.y, eraserRadius, 0, Math.PI * 2);
+      staging.arc(p.x, p.y, gesture.radius, 0, Math.PI * 2);
       staging.stroke();
     }
     let overlay: Bounds | null = bounds
@@ -305,7 +313,7 @@ export function InkCanvas({
       });
     }
     if (gesture?.action === "select" || gesture?.action === "erase") {
-      const padding = gesture.action === "erase" ? eraserRadius + 2 : 2;
+      const padding = gesture.action === "erase" ? gesture.radius + 2 : 2;
       for (const p of gesture.points)
         overlay = unionBounds(overlay, {
           left: p.x - padding,
@@ -334,6 +342,7 @@ export function InkCanvas({
     base: InkDraft,
     nativeFast = false,
     forced?: Gesture["action"],
+    radius = 0,
   ) => {
     const hit = withinSelection(selectionBounds(base.strokes, selected), point);
     const action =
@@ -353,6 +362,7 @@ export function InkCanvas({
       count,
       lastMetrics: -Infinity,
       nativeFast,
+      radius,
       backdrop:
         action === "move" ? base.strokes.filter((s) => !selected.includes(s.id)) : undefined,
       movingInk:
@@ -391,7 +401,7 @@ export function InkCanvas({
         current.preview,
         last ? [last, point] : [point],
         eraserMode,
-        eraserRadius,
+        current.radius,
       );
       publish(current.preview);
     } else publish(current.preview);
@@ -408,8 +418,11 @@ export function InkCanvas({
         last = gesture[gesture.length - 1]!;
       strokes = moveSelection(strokes, current.ids, last.x - first.x, last.y - first.y);
     } else if (current.action === "erase") {
-      strokes = eraseGesture(strokes, gesture, eraserMode, eraserRadius);
+      strokes = eraseGesture(strokes, gesture, eraserMode, current.radius);
       onSelectionChange?.([]);
+      // Only the eraser tool deselects itself; the stylus's eraser end under another tool never
+      // changes the tool, as in stock.
+      if (tool === "eraser") onEraseFinished?.();
     } else if (current.action === "pen" && gesture.length)
       strokes = [...strokes, { id: crypto.randomUUID(), width, points: gesture }];
     active.current = null;
@@ -422,10 +435,27 @@ export function InkCanvas({
     publish(strokes);
     return strokes === base.strokes ? base : { ...base, strokes };
   };
+  /**
+   * The plugin measures the eraser in millimetres at the device's own density and reports its
+   * reach with every event; CSS millimetres are the fallback where it does not.
+   */
+  const nativeEraserRadius = (event: OnyxInkEvent) => {
+    const radius = event.eraserRadius;
+    if (typeof radius === "number" && Number.isFinite(radius) && radius > 0) return radius;
+    return cssEraserRadius(diameter, canvasRef.current?.getBoundingClientRect().width ?? 0);
+  };
   const nativeInput = (event: OnyxInkEvent, base: InkDraft) => {
     const point = event.points?.[0];
     if (event.kind === "begin" && point && (tool !== "pen" || event.erasing))
-      beginGesture(point, event.erasing, -1, base, event.fastPreview);
+      beginGesture(
+        point,
+        event.erasing,
+        -1,
+        base,
+        event.fastPreview,
+        undefined,
+        nativeEraserRadius(event),
+      );
     else if (event.kind === "preview" && point) sampleGesture(point);
     else if (event.kind === "cancel" || event.kind === "end") {
       if (active.current) {
@@ -439,7 +469,16 @@ export function InkCanvas({
   const nativeStroke = (base: InkDraft, event: OnyxInkEvent) => {
     if (tool === "pen" && !event.erasing) return applyOnyxStroke(base, event);
     if (!event.points?.length) return base;
-    if (!active.current) beginGesture(event.points[0]!, event.erasing, -1, base);
+    if (!active.current)
+      beginGesture(
+        event.points[0]!,
+        event.erasing,
+        -1,
+        base,
+        false,
+        undefined,
+        nativeEraserRadius(event),
+      );
     return finishGesture(base, event.points);
   };
   const selection = selectionBounds(draft.strokes, selected);
@@ -462,6 +501,8 @@ export function InkCanvas({
     onStatus: onNativeStatus,
     decoration: selected.join(","),
     lassoMode,
+    eraserMode,
+    eraserDiameter: diameter,
     selection,
     overlayRects: menuAt ? [{ ...menuAt, ...menuBox }] : undefined,
     interacting: gestureAction !== null,
@@ -599,11 +640,15 @@ export function InkCanvas({
     if (event.pointerType === "mouse" && event.button !== 0) return;
     event.preventDefault();
     const rect = event.currentTarget.getBoundingClientRect();
+    const erasing = tool === "eraser" || event.button === 5 || (event.buttons & 32) !== 0;
     const started = beginGesture(
       inkPoint(event.nativeEvent, rect),
-      tool === "eraser" || event.button === 5 || (event.buttons & 32) !== 0,
+      erasing,
       event.pointerId,
       draft,
+      false,
+      undefined,
+      erasing ? cssEraserRadius(diameter, rect.width) : 0,
     );
     if (!started) return;
     started.rect = rect;

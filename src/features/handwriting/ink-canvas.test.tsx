@@ -231,15 +231,20 @@ it("hardware eraser uses the selected pixel mode and cancel leaves handwriting i
       },
     ],
   };
-  act(() => renderDraft(draft, { eraserMode: "pixel", eraserRadius: 9 }));
+  act(() => renderDraft(draft, { eraserMode: "pixel", eraserDiameter: 500 }));
   pointer("pointerdown", { button: 5, buttons: 32, clientX: 50, clientY: 50 });
   pointer("pointercancel");
   expect(changed).not.toHaveBeenCalled();
   pointer("pointerdown", { button: 5, buttons: 32, clientX: 50, clientY: 50 });
   pointer("pointerup", { button: 5, buttons: 0, clientX: 50, clientY: 50 });
   expect(changed).toHaveBeenCalledTimes(1);
+  const [left, right] = changed.mock.calls[0]![0].strokes;
   expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
   expect(changed.mock.calls[0]![0].background).toBe("grid");
+  // Without a native radius the 5.00 mm eraser is measured in CSS millimetres: 9.45 CSS px of
+  // reach, 18.9 units on this 500 px sheet, plus the stroke's own half-width of one unit.
+  expect(left.points[left.points.length - 1].x).toBeCloseTo(100 - 19.9, 1);
+  expect(right.points[0].x).toBeCloseTo(100 + 19.9, 1);
 });
 
 it("reuses the sheet bitmap during a contour and rebuilds it when paper changes", () => {

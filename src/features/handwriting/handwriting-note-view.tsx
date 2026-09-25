@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Eraser, Lasso, PenLine, Redo2, Trash2, Undo2 } from "lucide-react";
+import { ArrowLeft, Lasso, PenLine, Redo2, Undo2 } from "lucide-react";
+import { useConfirmation } from "@/app/confirmation";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent } from "@/components/ui/popover";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
@@ -26,14 +27,16 @@ import { canDrawHandwriting, editorAccess, type EditorOwnership } from "./handwr
 import { hasConflict, unsentChanges } from "./handwriting-conflict-model";
 import { HandwritingConflictDialog } from "./handwriting-conflicts";
 import { HandwritingStatus, type NoteStatus } from "./handwriting-status";
+import { NoteMenu, ToolbarButton, ToolbarSeparator, useToolbarLayout } from "./handwriting-toolbar";
+import { EraserTypeIcon } from "./eraser-icons";
 import {
-  NoteMenu,
-  PEN_PRESETS,
-  PenPresetIcon,
-  ToolbarButton,
-  ToolbarSeparator,
-  useToolbarLayout,
-} from "./handwriting-toolbar";
+  ERASER_MENU_CLASS,
+  EraserMenu,
+  eraserMenuSideOffset,
+  eraserMenuStyle,
+  eraserMenuUnits,
+} from "./eraser-menu";
+import { useEraserSettings } from "./eraser-settings";
 import {
   acquireEditor,
   awaitCompletion,
@@ -46,7 +49,7 @@ import {
 import { registerPaneLeaveGuard } from "@/features/workspace/pane-leave-guard";
 import { useResolvedInkColor } from "@/app/appearance";
 import { InkCanvas, type InkTool } from "./ink-canvas";
-import type { EraserMode, LassoMode } from "./ink-editing";
+import type { LassoMode } from "./ink-editing";
 import { applyHistoryUpdate } from "./ink-patch";
 import { useHandwritingAvailability, useHandwritingPreference } from "./input-capabilities";
 import type { OnyxInkStatus } from "./onyx-ink";
@@ -79,10 +82,13 @@ function completeInBackground(pageUuid: string) {
 }
 
 const TOOLS = [
-  { id: "pen", label: "Pen", Icon: PenLine },
-  { id: "eraser", label: "Eraser", Icon: Eraser },
-  { id: "lasso", label: "Lasso", Icon: Lasso },
-] as const satisfies readonly { id: InkTool; label: string; Icon: typeof PenLine }[];
+  { id: "pen", label: "Pen" },
+  { id: "eraser", label: "Eraser" },
+  { id: "lasso", label: "Lasso" },
+] as const satisfies readonly { id: InkTool; label: string }[];
+
+/** What the eraser hands back to when it deselects itself: never the eraser. */
+type DrawingTool = Exclude<InkTool, "eraser">;
 
 type Props = {
   paneId: PaneId;
@@ -113,9 +119,14 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<DraftSaveState>("saved");
   const [tool, setTool] = useState<InkTool>("pen");
+  // The tool the eraser was picked from, for Auto-deselect. Stock skips the eraser itself too.
+  const [previousTool, setPreviousTool] = useState<DrawingTool>("pen");
   const [width, setWidth] = useState(3);
-  const [eraserMode, setEraserMode] = useState<EraserMode>("stroke");
-  const [eraserRadius, setEraserRadius] = useState(12);
+  // The eraser's type and diameter are device settings (eraser-settings.ts); the tool is not, so
+  // every note opens with the pen and the remembered eraser behind the Eraser button.
+  const eraserType = useEraserSettings((state) => state.type);
+  const eraserDiameter = useEraserSettings((state) => state.diameters[state.type]);
+  const autoDeselect = useEraserSettings((state) => state.autoDeselect);
   const [lassoMode, setLassoMode] = useState<LassoMode>("free");
   const [selected, setSelected] = useState<string[]>([]);
   const [active, setActive] = useState(false);
@@ -138,6 +149,16 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
   // Anchored to the tool button that was tapped, so the options sit under their own tool.
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [optionsAnchor, setOptionsAnchor] = useState<HTMLElement | null>(null);
+  // What the sheet and the pen erase with. The menu changes the stored settings as it is used;
+  // they reach the eraser once it closes, as stock's reach the firmware only at the resume after
+  // its menu. A reconfigure per tap would also pause and re-arm the pen for every step.
+  const [appliedEraser, setAppliedEraser] = useState(() => ({
+    type: eraserType,
+    diameter: eraserDiameter,
+  }));
+  const confirm = useConfirmation();
+  // Erase Page's confirmation takes focus and the pointer; the menu stays open under it.
+  const confirmingRef = useRef(false);
 
   const latestDraft = useRef<InkDraft | null>(null);
   const historyBusyRef = useRef(false);
@@ -418,27 +439,71 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
     }
   };
   const [toolbarRef, layout] = useToolbarLayout();
-  // Nothing may hold the pen down once the sheet is gone, the tool moved on, or the button the
-  // options hang from was folded away.
+  // Nothing may hold the pen down once the sheet is gone or the tool moved on.
   useEffect(() => {
     if (!editing) setOptionsOpen(false);
   }, [editing]);
-  useEffect(() => setOptionsOpen(false), [tool, layout.penPresets]);
+  useEffect(() => setOptionsOpen(false), [tool]);
+  useEffect(() => {
+    if (optionsOpen) return;
+    setAppliedEraser((applied) =>
+      applied.type === eraserType && applied.diameter === eraserDiameter
+        ? applied
+        : { type: eraserType, diameter: eraserDiameter },
+    );
+  }, [optionsOpen, eraserType, eraserDiameter]);
 
   const undoStroke = () => void navigateHistory(false);
   const redoStroke = () => void navigateHistory(true);
 
   const selectTool = (id: InkTool, button: HTMLElement) => {
-    // The second tap on the active tool is what opens its options; the first
-    // one has to stay a plain tool switch, or every switch costs a dismissal.
+    // The second tap on the active tool is what opens its options, and a tap while they are
+    // open closes them; the first one has to stay a plain tool switch, or every switch costs a
+    // dismissal.
     if (tool === id) {
+      if (optionsOpen) {
+        setOptionsOpen(false);
+        return;
+      }
       setOptionsAnchor(button);
       setOptionsOpen(true);
       return;
     }
+    if (id === "eraser" && tool !== "eraser") setPreviousTool(tool);
     setTool(id);
     if (id !== "lasso") setSelected([]);
   };
+
+  /**
+   * Stock's "Erase Current Layer" for a note of one page and one layer: confirm, clear the page
+   * as one undoable write, go back to the pen and close the menu. Cancel changes nothing and
+   * leaves the menu open. The draft is read after the answer, since the dialog may have been up
+   * while a save or an undo moved it on.
+   */
+  const erasePage = async () => {
+    if (confirmingRef.current) return;
+    confirmingRef.current = true;
+    let erase = false;
+    try {
+      erase = await confirm({
+        title: "Erase page?",
+        description: "Are you sure you want to erase strokes on this page?",
+        confirmLabel: "Erase",
+        destructive: true,
+      });
+    } finally {
+      confirmingRef.current = false;
+    }
+    if (!erase) return;
+    const latest = latestDraft.current;
+    // An empty page is left alone: a fresh empty draft would still be a write and an undo step.
+    if (latest?.strokes.length) change({ ...latest, strokes: [] });
+    setSelected([]);
+    setLimit(false);
+    setTool("pen");
+    setOptionsOpen(false);
+  };
+  const menuUnits = eraserMenuUnits(capabilities.nativeDeviceEvents);
   const toolDisabled = !draft || editingBusy;
   // A stroke in flight holds the tools (nothing may switch under a gesture) but does not dim
   // them: every stroke would otherwise repaint the whole bar twice on e-ink. A button that is
@@ -532,41 +597,26 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
         </div>
         {editing ? (
           <>
-            {/* A wide bar offers the pen as presets, one tap for pen and width; a narrow one
-                folds them into one Pen whose second tap opens the widths. */}
-            {layout.penPresets &&
-              PEN_PRESETS.map((preset) => (
-                <ToolbarButton
-                  key={preset.width}
-                  variant={tool === "pen" && width === preset.width ? "secondary" : "ghost"}
-                  aria-label={`Pen, ${preset.label}`}
-                  aria-pressed={tool === "pen" && width === preset.width}
-                  disabled={toolDisabled}
-                  className={toolHold}
-                  onClick={() => {
-                    setTool("pen");
-                    setWidth(preset.width);
-                    setSelected([]);
-                  }}
-                >
-                  <PenPresetIcon width={preset.width} />
-                </ToolbarButton>
-              ))}
-            {TOOLS.filter(({ id }) => id !== "pen" || !layout.penPresets).map(
-              ({ id, label, Icon }) => (
-                <ToolbarButton
-                  key={id}
-                  variant={tool === id ? "secondary" : "ghost"}
-                  aria-label={tool === id ? `${label} options` : label}
-                  aria-pressed={tool === id}
-                  disabled={toolDisabled}
-                  className={toolHold}
-                  onClick={(event) => selectTool(id, event.currentTarget)}
-                >
-                  <Icon />
-                </ToolbarButton>
-              ),
-            )}
+            {TOOLS.map(({ id, label }) => (
+              <ToolbarButton
+                key={id}
+                variant={tool === id ? "secondary" : "ghost"}
+                aria-label={tool === id ? `${label} options` : label}
+                aria-pressed={tool === id}
+                disabled={toolDisabled}
+                className={toolHold}
+                onClick={(event) => selectTool(id, event.currentTarget)}
+              >
+                {id === "pen" ? (
+                  <PenLine />
+                ) : id === "lasso" ? (
+                  <Lasso />
+                ) : (
+                  // The eraser shows its current type, as stock's toolbar button does.
+                  <EraserTypeIcon type={eraserType} />
+                )}
+              </ToolbarButton>
+            ))}
             <ToolbarSeparator />
             <ToolbarButton
               aria-label="Undo stroke"
@@ -609,16 +659,44 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
         />
       </div>
       {editing && (
-        <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
-          {/* The tool options hang under the tool that opened them. The eraser's options are the
-              slot a stock-like eraser menu takes: anchored under the Eraser button, as wide as
-              stock's (322 CSS px on the Note Air), sized in px so the system font scale cannot
-              narrow it. The pen is paused by the popover while it is open. */}
+        <Popover
+          open={optionsOpen}
+          // Stock repaints its closed eraser menu with one partial frame, not a full refresh.
+          fullRefreshOnClose={tool !== "eraser"}
+          onOpenChange={(open, details) => {
+            if (!open) {
+              // The tool's own button is not a trigger, so its tap reaches the popover as a
+              // press outside before its click handler runs; that handler toggles instead.
+              if (
+                details.reason === "outside-press" &&
+                details.event.target instanceof Node &&
+                optionsAnchor?.contains(details.event.target)
+              ) {
+                details.cancel();
+                return;
+              }
+              if (confirmingRef.current) {
+                details.cancel();
+                return;
+              }
+            }
+            setOptionsOpen(open);
+          }}
+        >
+          {/* The tool options hang under the tool that opened them. The pen and lasso options
+              are sized in px so the system font scale cannot narrow them; the eraser menu is
+              laid out in stock's dp (eraser-menu.tsx). The pen is paused while it is open. */}
           <PopoverContent
             anchor={optionsAnchor}
             align="center"
+            sideOffset={tool === "eraser" ? eraserMenuSideOffset(menuUnits) : undefined}
             data-ink-tool-options
-            className="w-auto max-w-[min(322px,calc(100vw-24px))] p-2"
+            style={tool === "eraser" ? eraserMenuStyle(menuUnits) : undefined}
+            className={
+              tool === "eraser"
+                ? ERASER_MENU_CLASS
+                : "w-auto max-w-[min(322px,calc(100vw-24px))] p-2"
+            }
           >
             {tool === "pen" && (
               <div className="flex items-center gap-1" role="group" aria-label="Pen width">
@@ -645,76 +723,12 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
               </div>
             )}
             {tool === "eraser" && (
-              <div className="flex flex-wrap items-center gap-1">
-                {(
-                  [
-                    ["stroke", "Stroke"],
-                    ["pixel", "Pixel"],
-                    ["lasso", "Lasso"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <Button
-                    key={value}
-                    variant={eraserMode === value ? "secondary" : "ghost"}
-                    aria-pressed={eraserMode === value}
-                    aria-label={`${label} eraser`}
-                    disabled={editingBusy}
-                    onClick={() => {
-                      setEraserMode(value);
-                      setOptionsOpen(false);
-                    }}
-                  >
-                    {label}
-                  </Button>
-                ))}
-                {eraserMode !== "lasso" && (
-                  <div
-                    className="flex items-center gap-1 border-l pl-2"
-                    role="group"
-                    aria-label="Eraser size"
-                  >
-                    {(
-                      [
-                        [6, "Small"],
-                        [12, "Medium"],
-                        [24, "Large"],
-                      ] as const
-                    ).map(([value, label]) => (
-                      <Button
-                        key={value}
-                        variant={eraserRadius === value ? "secondary" : "ghost"}
-                        aria-label={`${label} eraser size`}
-                        aria-pressed={eraserRadius === value}
-                        disabled={editingBusy}
-                        onClick={() => {
-                          setEraserRadius(value);
-                          setOptionsOpen(false);
-                        }}
-                        className="w-9 px-0"
-                      >
-                        <span
-                          className="rounded-full border border-current"
-                          style={{ width: value, height: value }}
-                        />
-                      </Button>
-                    ))}
-                  </div>
-                )}
-                <Button
-                  variant="ghost"
-                  disabled={editingBusy || !draft?.strokes.length}
-                  onClick={() => {
-                    if (draft) {
-                      change({ ...draft, strokes: [] });
-                      setSelected([]);
-                      setLimit(false);
-                    }
-                    setOptionsOpen(false);
-                  }}
-                >
-                  <Trash2 className="size-4" /> Clear sheet
-                </Button>
-              </div>
+              <EraserMenu
+                units={menuUnits}
+                eraseDisabled={!draft || editingBusy}
+                onTypeChosen={() => setOptionsOpen(false)}
+                onErasePage={() => void erasePage()}
+              />
             )}
             {tool === "lasso" && (
               <div className="flex flex-wrap items-center gap-1">
@@ -771,8 +785,11 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }:
               mono={monoInk}
               disabled={!editing || suspended || historyBusy || leaving}
               tool={tool}
-              eraserMode={eraserMode}
-              eraserRadius={eraserRadius}
+              eraserMode={appliedEraser.type}
+              eraserDiameter={appliedEraser.diameter}
+              onEraseFinished={() => {
+                if (autoDeselect) setTool(previousTool);
+              }}
               lassoMode={lassoMode}
               selected={selected}
               onSelectionChange={setSelected}

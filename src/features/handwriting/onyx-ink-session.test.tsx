@@ -83,6 +83,8 @@ it("keeps consecutive batches received before a render, deduplicates them and re
     command.endsWith("configure_onyx_ink"),
   )![1];
   expect(config).toMatchObject({ left: 12, top: 80, width: 500, height: 700 });
+  // The plugin measures the eraser itself, from the menu's type and diameter in hundredths of a mm.
+  expect(config).toMatchObject({ eraserType: "stroke", eraserDiameter: 50 });
   expect(container.querySelector("canvas")!.dataset.native).toBe("true");
   const event: OnyxInkEvent = {
     session: config.session,
@@ -117,9 +119,11 @@ let selectedResult: string[] = [];
 function EditorSheet({
   tool,
   lassoMode = "rectangle",
+  eraserDiameter = 500,
 }: {
   tool: InkTool;
   lassoMode?: "free" | "rectangle";
+  eraserDiameter?: number;
 }) {
   const [draft, setDraft] = useState(() => ({
     ...emptyDraft(),
@@ -145,7 +149,7 @@ function EditorSheet({
       nativeInk
       mouseEnabled={false}
       eraserMode="pixel"
-      eraserRadius={9}
+      eraserDiameter={eraserDiameter}
       lassoMode={lassoMode}
       selected={selected}
       onSelectionChange={setSelected}
@@ -182,6 +186,7 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
   const config = bridge.invoke.mock.calls.find(([command]) =>
     command.endsWith("configure_onyx_ink"),
   )![1];
+  expect(config).toMatchObject({ eraserType: "pixel", eraserDiameter: 500 });
   const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
   const base: OnyxInkEvent = {
     session: config.session,
@@ -189,6 +194,7 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
     kind: "begin",
     width: 3,
     erasing: true,
+    eraserRadius: 9,
     points: [p(100, 50)],
   };
   await act(async () => {
@@ -201,6 +207,10 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
     bridge.event({ ...base, kind: "end" });
   });
   expect(latest.strokes).toHaveLength(2);
+  // The plugin's radius, not a CSS measurement: 9 units plus the line's half-width of one.
+  const [left, right] = latest.strokes;
+  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(90);
+  expect(right!.points[0]!.x).toBeCloseTo(110);
   await act(async () => root.render(<EditorSheet tool="lasso" />));
   expect(bridge.invoke.mock.calls.some(([, args]) => args.interaction === true)).toBe(true);
   await act(async () => {
@@ -216,6 +226,37 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
   });
   expect(latest.strokes).toHaveLength(2);
   expect(selectedResult).toEqual(["line"]);
+});
+
+it("hands a new eraser diameter to the plugin, and falls back to CSS millimetres without its radius", async () => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  await act(async () => root.render(<EditorSheet tool="eraser" />));
+  const configs = () =>
+    bridge.invoke.mock.calls
+      .filter(([command]) => command.endsWith("configure_onyx_ink"))
+      .map(([, args]) => args);
+  expect(configs().pop()).toMatchObject({ eraser: true, eraserType: "pixel", eraserDiameter: 500 });
+  await act(async () => root.render(<EditorSheet tool="eraser" eraserDiameter={490} />));
+  expect(configs().pop()).toMatchObject({ eraserDiameter: 490 });
+
+  const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
+  const event: OnyxInkEvent = {
+    session: configs()[0]!.session,
+    sequence: 1,
+    kind: "begin",
+    width: 3,
+    erasing: true,
+    points: [p(100, 100)],
+  };
+  await act(async () => {
+    bridge.event(event);
+    bridge.event({ ...event, kind: "stroke", points: [p(100, 100)] });
+    bridge.event({ ...event, kind: "end" });
+  });
+  // 4.90 mm in CSS millimetres on the 500 px canvas: 18.52 units of reach, plus one of line.
+  const [left, right] = latest.strokes;
+  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(100 - 19.52, 1);
+  expect(right!.points[0]!.x).toBeCloseTo(100 + 19.52, 1);
 });
 
 it("keeps fast native lasso transient and sends selection bounds for subsequent dragging", async () => {

@@ -42,18 +42,17 @@ describe("note status", () => {
 });
 
 describe("toolbarLayout", () => {
-  it("keeps the pen presets from 600 CSS px, like the tablet in either orientation", () => {
-    expect(toolbarLayout(661)).toEqual({ penPresets: true, statusIconOnly: false });
-    expect(toolbarLayout(600)).toEqual({ penPresets: true, statusIconOnly: false });
-    expect(toolbarLayout(599)).toEqual({ penPresets: false, statusIconOnly: false });
+  it("labels the status chip on the tablet in either orientation", () => {
+    expect(toolbarLayout(661)).toEqual({ statusIconOnly: false });
+    expect(toolbarLayout(480)).toEqual({ statusIconOnly: false });
   });
 
   it("shows only the status icon on a phone", () => {
-    expect(toolbarLayout(479)).toEqual({ penPresets: false, statusIconOnly: true });
-    expect(toolbarLayout(360)).toEqual({ penPresets: false, statusIconOnly: true });
+    expect(toolbarLayout(479)).toEqual({ statusIconOnly: true });
+    expect(toolbarLayout(360)).toEqual({ statusIconOnly: true });
   });
 
   it("uses the wide bar until the bar has been measured", () => {
-    expect(toolbarLayout(0)).toEqual({ penPresets: true, statusIconOnly: false });
+    expect(toolbarLayout(0)).toEqual({ statusIconOnly: false });
   });
 });
