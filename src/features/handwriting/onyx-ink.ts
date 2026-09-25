@@ -90,7 +90,12 @@ export function useOnyxInk({
   overlayRects?: InkOverlayRect[];
   /** A local gesture owns the sheet: reconfiguring now would pause raw drawing and cancel it. */
   interacting?: boolean;
-  damage?: { take: () => Bounds | null; invalidate: () => void };
+  damage?: {
+    take: () => Bounds | null;
+    invalidate: () => void;
+    /** Diagnostics: what the erases since the last commit removed, for the plugin's hand-back log. */
+    takeErased?: () => Bounds | null;
+  };
   onInput?: (event: OnyxInkEvent, draft: InkDraft) => void;
   onStroke?: (draft: InkDraft, event: OnyxInkEvent) => InkDraft;
 }) {
@@ -141,8 +146,9 @@ export function useOnyxInk({
   });
 
   /**
-   * A firmware trace is on screen: the lasso's dashes or the eraser end's soft-eraser trace. The
-   * gesture exists only in the firmware layer until its full point list arrives.
+   * A firmware trace is on screen: the lasso's dashes, or the eraser's soft-eraser trace or, for
+   * the lasso eraser, its dashes. The gesture exists only in the firmware layer until its full
+   * point list arrives.
    */
   const traceRef = useRef(false);
   useEffect(() => {
@@ -368,6 +374,8 @@ export function useOnyxInk({
     const handle = requestAnimationFrame(() => {
       const damage = state.current.damage;
       const bounds = damage?.take();
+      // Only logged by the plugin, next to the region its erase hand-back repaints.
+      const erased = damage?.takeErased?.();
       void invoke("plugin:mobile-system|commit_onyx_frame", {
         session: id,
         sequence: currentSequence,
@@ -376,6 +384,10 @@ export function useOnyxInk({
         top: bounds?.top ?? 0,
         right: bounds?.right ?? 0,
         bottom: bounds?.bottom ?? 0,
+        erasedLeft: erased?.left ?? 0,
+        erasedTop: erased?.top ?? 0,
+        erasedRight: erased?.right ?? 0,
+        erasedBottom: erased?.bottom ?? 0,
       }).catch((error: unknown) => {
         damage?.invalidate();
         console.error(error);

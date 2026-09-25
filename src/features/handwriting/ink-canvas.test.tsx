@@ -266,6 +266,42 @@ it("draws the eraser circle on the portable path, where no firmware draws the er
   pointer("pointerup", { clientX: 60, clientY: 50 });
 });
 
+it("draws the lasso eraser's loop on the portable path and erases what it encloses at the lift", () => {
+  const draft: InkDraft = {
+    ...emptyDraft(),
+    strokes: [
+      {
+        id: "inside",
+        width: 2,
+        points: [
+          { x: 100, y: 100, pressure: 0.5, tiltX: 0, tiltY: 0, time: 1 },
+          { x: 120, y: 110, pressure: 0.5, tiltX: 0, tiltY: 0, time: 2 },
+        ],
+      },
+      {
+        id: "outside",
+        width: 2,
+        points: [{ x: 600, y: 600, pressure: 0.5, tiltX: 0, tiltY: 0, time: 3 }],
+      },
+    ],
+  };
+  act(() => renderDraft(draft, { tool: "eraser", eraserMode: "lasso", eraserDiameter: 50 }));
+  // A loop from (40, 40) round to (200, 200) and back, in sheet units.
+  pointer("pointerdown", { clientX: 20, clientY: 20 });
+  pointer("pointermove", { clientX: 100, clientY: 20 });
+  pointer("pointermove", { clientX: 100, clientY: 100 });
+  pointer("pointermove", { clientX: 20, clientY: 100 });
+  const published = vi.spyOn(contexts.get(canvas)!, "drawImage").mock.calls;
+  const staging = contexts.get(published[published.length - 1]![0] as HTMLCanvasElement)!;
+  expect(vi.spyOn(staging, "moveTo")).toHaveBeenLastCalledWith(40, 40);
+  expect(vi.spyOn(staging, "lineTo")).toHaveBeenCalledWith(200, 200);
+  expect(vi.spyOn(staging, "arc")).not.toHaveBeenCalled(); // A loop, not a circle.
+  expect(changed).not.toHaveBeenCalled(); // Nothing is erased before the lift.
+  pointer("pointerup", { clientX: 20, clientY: 100 });
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(changed.mock.calls[0]![0].strokes.map((s: { id: string }) => s.id)).toEqual(["outside"]);
+});
+
 it("reuses the sheet bitmap during a contour and rebuilds it when paper changes", () => {
   act(() =>
     resize(

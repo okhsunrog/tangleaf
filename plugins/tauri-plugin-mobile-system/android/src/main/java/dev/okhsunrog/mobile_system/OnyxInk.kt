@@ -72,6 +72,14 @@ class OnyxFrameArgs {
     var bottom: Double = 0.0
     var session: String = ""
     var sequence: Long = 0
+    /**
+     * Diagnostics only: the bounds of the strokes the erase in this frame removed, in sheet units,
+     * for the hand-back's log line. Empty when the frame erased nothing.
+     */
+    var erasedLeft: Double = 0.0
+    var erasedTop: Double = 0.0
+    var erasedRight: Double = 0.0
+    var erasedBottom: Double = 0.0
 }
 
 /** Vendor fast ink is transient. Completed points go to the ordinary, durable web canvas. */
@@ -136,9 +144,10 @@ internal class OnyxInk(
     // Resuming into the tail of an IME teardown leaves ghost ink; stock Notes waits too.
     private val resumeGate = Runnable { resume() }
     /**
-     * Pauses render at pen-down for the erase gestures the firmware does not draw a trace for yet:
-     * the eraser end in the lasso tool, and the lasso eraser type (its eraser end with the pen
-     * tool; with the eraser tool render is off already, so the pause changes nothing there).
+     * Pauses render at pen-down for the one erase the firmware draws no trace for: the eraser end
+     * in the lasso tool, which erases there although stock's selection tool does not. The eraser
+     * flag is off in that tool, and the page previews the erase itself, which reaches the panel
+     * only with the pen layer down.
      */
     private val eraserRenderGate = InkEraserRenderGate(
         pause = { setRender(false) },
@@ -146,6 +155,8 @@ internal class OnyxInk(
     )
     /** Stock's post-erase sequence for gestures whose trace the firmware drew; see [InkEraseHandBack]. */
     private val handBack = InkEraseHandBack()
+    /** Diagnostics: what the page erased, next to the region the hand-back's frame was taken for. */
+    private val coverage = InkHandBackCoverage()
     private val handBackHold = Runnable { handBackAct("hold", handBack.holdElapsed(gesture.drawing)) }
     private val handBackCanvasTimeout = Runnable {
         handBackAct("canvas timeout", handBack.canvasTimedOut(gesture.drawing))
@@ -156,8 +167,8 @@ internal class OnyxInk(
     }
     private val handBackHardCap = Runnable { handBackAct("hard cap", handBack.hardCapElapsed()) }
     /**
-     * The gesture in progress is drawn by the firmware as a soft-eraser trace: the eraser end, or
-     * the eraser tool's tip.
+     * The gesture in progress is an erase the firmware draws: the eraser end, or the eraser tool's
+     * tip, as a soft-eraser trace or, for the lasso type, a dashed one.
      */
     private var traceGesture = false
     /** When the gesture in progress touched down: the digitizer's timestamp, and the uptime. */
@@ -243,6 +254,9 @@ internal class OnyxInk(
 
         /** The sheet's width in ink units, the page's `SHEET_BOUNDS.right`. */
         private const val SHEET_UNITS_WIDE = 1000.0
+
+        /** The sheet's height in ink units, the page's `SHEET_BOUNDS.bottom`. */
+        private const val SHEET_UNITS_HIGH = 1400.0
 
         /**
          * The density the eraser is measured at: the device's own, without the per-app DPI a BOOX
@@ -536,6 +550,8 @@ internal class OnyxInk(
         if (config?.session != args.session) return
         if (args.partial) addDamage(args.left, args.top, args.right, args.bottom)
         else addDamage(0.0, 0.0, 1000.0, 1400.0)
+        // Taken at the call, not the acknowledgement, which a newer commit may supersede.
+        if (traceGesture || handBack.active) erasedBounds(args)?.let(coverage::add)
         cancelFrameSubmission()
         val revision = frames.request()
         // This only guarantees readiness for the next WebView draw, not a submitted frame.
@@ -564,6 +580,18 @@ internal class OnyxInk(
         })
     }
 
+    /** What a commit reports its erase removed, in view pixels on the visible part of the sheet. */
+    private fun erasedBounds(args: OnyxFrameArgs): InkBounds? {
+        if (sheet.isEmpty || limit.isEmpty) return null
+        return InkHandBackCoverage.sheetToView(
+            InkBounds(sheet.left.toDouble(), sheet.top.toDouble(), sheet.right.toDouble(), sheet.bottom.toDouble()),
+            SHEET_UNITS_WIDE,
+            SHEET_UNITS_HIGH,
+            InkBounds(args.erasedLeft, args.erasedTop, args.erasedRight, args.erasedBottom),
+            InkBounds(limit.left.toDouble(), limit.top.toDouble(), limit.right.toDouble(), limit.bottom.toDouble()),
+        )
+    }
+
     /**
      * The SDK's pen-up timer, ~500 ms after the last point of a non-erasing stroke. Its rectangle
      * is this stroke's bounds expanded by the stroke width and unioned with the previous stroke's
@@ -572,7 +600,7 @@ internal class OnyxInk(
     private fun penUpRefresh(rect: RectF) {
         val args = config ?: return
         if (!rect.left.isFinite() || !rect.top.isFinite() || !rect.right.isFinite() || !rect.bottom.isFinite()) return
-        if (!penUpRefreshReconciles(args.eraser, args.interaction, args.eraserType)) {
+        if (!penUpRefreshReconciles(args.eraser, args.interaction)) {
             // The eraser tool's tip is an ordinary stroke to the SDK; its erase is the hand-back's.
             penUpRefreshIgnored++
             return
@@ -597,15 +625,15 @@ internal class OnyxInk(
      * is an ordinary one: render is already off and SurfaceFlinger out of the handwriting schema,
      * as with stock's `InvalidateViewWithPenControlAction`.
      * @param forHandBack whether the frame's presentation belongs to [handBack].
-     * @return whether a frame was submitted.
+     * @return the region the submitted frame was taken for, or null when no frame was submitted.
      */
-    private fun refreshFrame(repaint: Boolean = true, forHandBack: Boolean = false): Boolean {
-        if (!canPresent() || pendingFrame != null) return false
+    private fun refreshFrame(repaint: Boolean = true, forHandBack: Boolean = false): InkReconcileRegion.Taken? {
+        if (!canPresent() || pendingFrame != null) return null
         val observer = webView.viewTreeObserver
-        if (!observer.isAlive) return false
+        if (!observer.isAlive) return null
         val area = region.take(InkBounds(
             limit.left.toDouble(), limit.top.toDouble(), limit.right.toDouble(), limit.bottom.toDouble(),
-        )) ?: return false
+        )) ?: return null
         reconcile.reconciled()
         val submission = frames.submission()
         val submitted = Runnable {
@@ -625,8 +653,15 @@ internal class OnyxInk(
                     repaintedPixels += lastRepaint.width().toLong() * lastRepaint.height()
                     repaintCount++
                     // The canonical buffer is on screen; the eraser's pen-render pause can go.
-                    if (forHandBack) handBackAct("frame presented", handBack.framePresented())
-                    else eraserRenderGate.framePresented()
+                    if (forHandBack) {
+                        // Always logged, even after the hand-back ended without it: the region
+                        // next to what the page erased is the line this frame is for.
+                        handBackAct("frame presented ${coverage.presented(area)}", handBack.framePresented(), always = true)
+                    } else {
+                        eraserRenderGate.framePresented()
+                        // This frame covered the region an earlier erase put there.
+                        coverage.reset()
+                    }
                 } finally {
                     // A panel keeps whatever was last pushed to it. A region consumed by a frame
                     // that never reached the panel would leave that area showing an older image
@@ -646,7 +681,7 @@ internal class OnyxInk(
         // whole screen, so this covers more; that only helps a region the firmware latched, and
         // the mode is reset the moment the frame lands.
         webView.invalidate()
-        return true
+        return area
     }
 
     private fun canPresent(): Boolean =
@@ -706,6 +741,8 @@ internal class OnyxInk(
         }
         handBack.reset()
         removeHandBackTimers()
+        // The pause's own invalidate below repaints the view; nothing is owed to a later line.
+        coverage.reset()
         traceGesture = false
         colorCu(false)
         frames.request() // Invalidate visual/frame callbacks from the old geometry or lifecycle.
@@ -727,7 +764,7 @@ internal class OnyxInk(
 
     /** Whether the active tool wants firmware ink rather than only its raw points; see [toolRenders]. */
     private fun toolRendering(): Boolean = config?.let {
-        toolRenders(it.eraser, it.eraserType, it.interaction, it.fastLasso, it.hasSelection)
+        toolRenders(it.eraser, it.interaction, it.fastLasso, it.hasSelection)
     } ?: false
 
     private fun restoreToolRendering() {
@@ -791,11 +828,15 @@ internal class OnyxInk(
         webView.removeCallbacks(handBackHardCap)
     }
 
-    /** Carries out what [handBack] decided. Every call but a pass-through is logged, with the time. */
-    private fun handBackAct(cause: String, action: InkEraseHandBack.Action) {
+    /**
+     * Carries out what [handBack] decided. Every call but a pass-through is logged, with the time.
+     *
+     * @param always log the cause even when nothing is left to do and no hand-back is running.
+     */
+    private fun handBackAct(cause: String, action: InkEraseHandBack.Action, always: Boolean = false) {
         if (action == InkEraseHandBack.Action.PASS) return
         // A pen-down with no hand-back running is every ordinary stroke; keep it out of the log.
-        if (action == InkEraseHandBack.Action.NONE && !handBack.active) return
+        if (action == InkEraseHandBack.Action.NONE && !handBack.active && !always) return
         Log.d("OnyxInk", "hand-back $cause: $action -> ${handBack.state} at ${SystemClock.uptimeMillis()}")
         when (action) {
             InkEraseHandBack.Action.NONE, InkEraseHandBack.Action.PASS -> Unit
@@ -844,11 +885,15 @@ internal class OnyxInk(
     }
 
     private fun submitErasedCanvas() {
-        val submitted = refreshFrame(repaint = false, forHandBack = true)
+        val taken = refreshFrame(repaint = false, forHandBack = true)
+        val submitted = taken != null
         // Stock's InvalidateViewWithPenControlAction invalidates while paused whatever the canvas
         // holds, and so does pause(). Without a frame of the app's own the trace stays on the panel.
         if (!submitted) webView.invalidate()
-        handBackAct("frame submitted=$submitted", handBack.frameSubmitted(submitted))
+        // A submitted frame reports its region when it is presented; one that could not be
+        // submitted never is, so what the page erased is reported here.
+        val detail = if (submitted) "submitted=true" else "submitted=false ${coverage.describe(null)}"
+        handBackAct("frame $detail", handBack.frameSubmitted(submitted))
     }
 
     /**
@@ -915,7 +960,8 @@ internal class OnyxInk(
 
     /**
      * How far around a native point the panel may have changed, in sheet units. An erasing point
-     * reaches as far as the eraser: the firmware's soft-eraser trace is as wide as the eraser.
+     * reaches as far as the eraser: the firmware's soft-eraser trace is as wide as the eraser. The
+     * lasso type's dash is drawn at a stroke width, which the ink margin already covers.
      */
     private fun damageMargin(erasing: Boolean): Double {
         val ink = maxOf(3.0, (config?.strokeWidth ?: 3.0) * 2)
@@ -1033,19 +1079,20 @@ internal class OnyxInk(
             gesture.begun()
             return
         }
-        val trace = eraseTrace(erasing, args.eraser, args.interaction, args.eraserType)
+        val trace = eraseTrace(erasing, args.eraser, args.interaction)
         // A firmware trace, the lasso's or the eraser's, is all there is to see during the
         // gesture: the page draws nothing of its own and holds its commits until the stroke.
         fastPreview = (args.fastLasso && !erasing && !args.eraser && !movingSelection) || trace
         if (trace) {
             // Stock's eraser end, and its eraser tool: the session keeps running and
-            // SurfaceFlinger paints the soft eraser. The hand-back after the lift takes the trace
-            // away again.
+            // SurfaceFlinger paints the soft eraser, or the dash for the lasso type. The hand-back
+            // after the lift takes the trace away again.
             traceGesture = true
             colorCu(true)
         } else {
-            // Erasing without a firmware trace pauses the pen layer, even while Pen is selected.
-            // Raw input stays on so the software eraser keeps receiving points.
+            // The eraser end in the lasso tool has no firmware trace: it pauses the pen layer so
+            // the page's own preview of the erase reaches the panel. Raw input stays on so the
+            // software eraser keeps receiving points. A tip stroke ends any such pause.
             eraserRenderGate.begin(erasing || args.eraser)
         }
         if (args.interaction) setRender(fastPreview)

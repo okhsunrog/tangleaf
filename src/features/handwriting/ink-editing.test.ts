@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { InkPoint, InkStroke } from "@/lib/bindings";
 import {
   eraseGesture,
+  gestureLoop,
   lassoPolygon,
   moveSelection,
   scaleSelection,
@@ -56,6 +57,23 @@ it("lasso selects crossing segments with both endpoints outside, supports rectan
   expect(
     selectLasso([stroke], [point(80, 80), point(120, 80), point(120, 90), point(80, 90)]),
   ).toEqual([]);
+});
+it("draws a lasso eraser's loop only where no firmware traces it, and the selection lasso as before", () => {
+  const points = [point(0, 0), point(100, 0), point(100, 100), point(0, 100)];
+  const loop = (action: "pen" | "erase" | "select" | "move", firmwareTrace: boolean) =>
+    gestureLoop({ action, points, firmwareTrace }, "lasso", "rectangle");
+  // The portable path and the BOOX lasso tool's eraser end: the page's own free loop.
+  expect(loop("erase", false)).toEqual(lassoPolygon(points, "free"));
+  // The eraser tool and the eraser end with the pen on BOOX: SurfaceFlinger's dash, nothing else.
+  expect(loop("erase", true)).toEqual([]);
+  // The selection lasso keeps its own mode either way, and other gestures draw no loop.
+  expect(loop("select", true)).toEqual(lassoPolygon(points, "rectangle"));
+  expect(loop("select", false)).toEqual(lassoPolygon(points, "rectangle"));
+  expect(loop("pen", false)).toEqual([]);
+  expect(loop("move", false)).toEqual([]);
+  expect(gestureLoop({ action: "erase", points, firmwareTrace: false }, "pixel", "free")).toEqual(
+    [],
+  );
 });
 it("moves the whole selection together at sheet edges and preserves input metadata", () => {
   const moved = moveSelection([stroke], ["a"], 900, -200);

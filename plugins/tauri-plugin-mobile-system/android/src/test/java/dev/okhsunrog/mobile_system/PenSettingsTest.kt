@@ -60,7 +60,8 @@ class PenSettingsTest {
         assertTrue(PenCall.EraserTrace(true, 8) in calls)
     }
 
-    @Test fun theLassoTypeKeepsTheEraserEndOffUntilItsTraceExists() {
+    /** Stock's pen with the area eraser selected: the eraser end draws the dash, `[1, 5]`. */
+    @Test fun thePenToolWithTheLassoTypeLetsTheEraserEndDrawTheDash() {
         val calls = penSettingsCalls(
             fastLasso = false,
             interaction = false,
@@ -69,8 +70,18 @@ class PenSettingsTest {
             eraserPx = eraserPx(50, 300),
             penPx = 5.2f,
         )
-        assertTrue(PenCall.EraserTrace(false, 5) in calls)
-        assertEquals(PenCall.StrokeStyle(1), calls[4])
+        assertEquals(
+            listOf(
+                PenCall.StrokeParameters(5, listOf(5f)),
+                PenCall.StrokeParameters(8, listOf(5.905512f, 0.5f, 0.1f)),
+                PenCall.StrokeWidth(5.2f),
+                PenCall.StrokeColor(-16777216),
+                PenCall.StrokeStyle(1),
+                PenCall.EraserTrace(true, 5),
+                PenCall.BrushTrace(true),
+            ),
+            calls,
+        )
     }
 
     /** Stock on selecting its eraser (`A7:19-45`): style 8, the soft eraser's parameters, no width. */
@@ -100,7 +111,11 @@ class PenSettingsTest {
         assertTrue(stroke.none { it is PenCall.StrokeWidth })
     }
 
-    @Test fun theEraserToolWithTheLassoTypeKeepsThePensSettingsForNow() {
+    /**
+     * Stock on choosing its lasso eraser (`A7:241-252`): style 5, the dash parameters, the soft
+     * eraser's at 0.50 mm, `[1, 5]`, and no width, so the dash keeps the previous tool's width.
+     */
+    @Test fun theEraserToolWithTheLassoTypeMakesTheDashItsStyleAndSendsNoWidth() {
         val calls = penSettingsCalls(
             fastLasso = false,
             interaction = false,
@@ -110,9 +125,51 @@ class PenSettingsTest {
             penPx = 5.2f,
         )
         assertEquals(
-            penSettingsCalls(false, false, false, "lasso", eraserPx(50, 300), 5.2f),
+            listOf(
+                PenCall.StrokeParameters(5, listOf(5f)),
+                PenCall.StrokeParameters(8, listOf(5.905512f, 0.5f, 0.1f)),
+                PenCall.StrokeColor(-16777216),
+                PenCall.StrokeStyle(5),
+                PenCall.EraserTrace(true, 5),
+                PenCall.BrushTrace(true),
+            ),
             calls,
         )
+        // Stock's recorded payload for the lasso eraser's fixed 0.50 mm, bit for bit.
+        val width = (calls[1] as PenCall.StrokeParameters).values[0]
+        assertEquals(1086126580, java.lang.Float.floatToIntBits(width))
+    }
+
+    /** The lasso tool keeps its own dash and width, and the eraser end stays off, whatever the type. */
+    @Test fun theLassoToolWithTheLassoTypeStillKeepsTheEraserEndOff() {
+        val calls = penSettingsCalls(
+            fastLasso = true,
+            interaction = true,
+            eraser = false,
+            eraserType = "lasso",
+            eraserPx = eraserPx(50, 300),
+            penPx = 5.2f,
+        )
+        assertEquals(
+            listOf(PenCall.StrokeWidth(5f), PenCall.StrokeColor(-16777216), PenCall.StrokeStyle(5)),
+            calls.subList(2, 5),
+        )
+        assertTrue(PenCall.EraserTrace(false, 5) in calls)
+        // The rectangle lasso draws nothing of its own and keeps the pen's style.
+        val rectangle = penSettingsCalls(false, true, false, "lasso", eraserPx(50, 300), 5.2f)
+        assertTrue(PenCall.StrokeStyle(1) in rectangle)
+        assertTrue(PenCall.EraserTrace(false, 5) in rectangle)
+    }
+
+    /** Switching the eraser tool from the lasso type back to Pixel, and then to the pen. */
+    @Test fun leavingTheLassoTypePutsTheSoftEraserAndThenThePenBack() {
+        val lasso = penSettingsCalls(false, false, true, "lasso", eraserPx(50, 300), 5.2f)
+        val pixel = penSettingsCalls(false, false, true, "pixel", eraserPx(500, 300), 5.2f)
+        val pen = penSettingsCalls(false, false, false, "pixel", eraserPx(500, 300), 5.2f)
+        assertTrue(PenCall.StrokeStyle(5) in lasso)
+        assertTrue(PenCall.StrokeStyle(8) in pixel && PenCall.EraserTrace(true, 8) in pixel)
+        assertEquals(PenCall.StrokeParameters(8, listOf(59.05512f, 0.5f, 0.1f)), pixel[1])
+        assertTrue(PenCall.StrokeStyle(1) in pen && PenCall.StrokeWidth(5.2f) in pen)
     }
 
     /** Switching back from the eraser tool: the resume puts the pen's width and style 1 back. */
@@ -125,12 +182,14 @@ class PenSettingsTest {
     }
 
     @Test fun everyResumeEndsWithTheFlagsAfterTheStyle() {
-        for ((fastLasso, eraser) in listOf(false to false, true to false, false to true)) {
-            val calls = penSettingsCalls(fastLasso, fastLasso, eraser, "pixel", 59f, 5f)
-            val style = calls.indexOfFirst { it is PenCall.StrokeStyle }
-            val eraserFlag = calls.indexOfFirst { it is PenCall.EraserTrace }
-            assertTrue(style in 0 until eraserFlag)
-            assertEquals(PenCall.BrushTrace(true), calls.last())
+        for (type in listOf("pixel", "lasso")) {
+            for ((fastLasso, eraser) in listOf(false to false, true to false, false to true)) {
+                val calls = penSettingsCalls(fastLasso, fastLasso, eraser, type, 59f, 5f)
+                val style = calls.indexOfFirst { it is PenCall.StrokeStyle }
+                val eraserFlag = calls.indexOfFirst { it is PenCall.EraserTrace }
+                assertTrue(style in 0 until eraserFlag)
+                assertEquals(PenCall.BrushTrace(true), calls.last())
+            }
         }
     }
 
@@ -138,58 +197,56 @@ class PenSettingsTest {
         val erasing: Boolean,
         val eraser: Boolean,
         val interaction: Boolean,
-        val type: String,
         val trace: Boolean,
     )
 
-    @Test fun theFirmwareTracesEveryEraseButTheLassoToolsAndTheLassoTypes() {
+    @Test fun theFirmwareTracesEveryEraseButTheLassoTools() {
         val table = listOf(
-            TraceCase(erasing = true, eraser = false, interaction = false, type = "pixel", trace = true), // eraser end, pen
-            TraceCase(erasing = true, eraser = false, interaction = false, type = "stroke", trace = true),
-            TraceCase(erasing = false, eraser = true, interaction = false, type = "pixel", trace = true), // eraser tool, tip
-            TraceCase(erasing = true, eraser = true, interaction = false, type = "stroke", trace = true), // its eraser end
-            TraceCase(erasing = false, eraser = false, interaction = false, type = "pixel", trace = false), // pen tip
-            TraceCase(erasing = true, eraser = false, interaction = true, type = "pixel", trace = false), // lasso tool
-            TraceCase(erasing = false, eraser = false, interaction = true, type = "pixel", trace = false),
-            TraceCase(erasing = true, eraser = false, interaction = false, type = "lasso", trace = false), // step 4
-            TraceCase(erasing = false, eraser = true, interaction = false, type = "lasso", trace = false),
+            TraceCase(erasing = true, eraser = false, interaction = false, trace = true), // eraser end, pen
+            TraceCase(erasing = false, eraser = true, interaction = false, trace = true), // eraser tool, tip
+            TraceCase(erasing = true, eraser = true, interaction = false, trace = true), // its eraser end
+            TraceCase(erasing = false, eraser = false, interaction = false, trace = false), // pen tip
+            TraceCase(erasing = true, eraser = false, interaction = true, trace = false), // lasso tool, eraser end
+            TraceCase(erasing = false, eraser = false, interaction = true, trace = false), // lasso tool, tip
         )
         for (case in table) {
-            assertEquals(case.toString(), case.trace, eraseTrace(case.erasing, case.eraser, case.interaction, case.type))
+            assertEquals(case.toString(), case.trace, eraseTrace(case.erasing, case.eraser, case.interaction))
         }
     }
 
-    @Test fun theEraserToolRendersUnlessItsTypeIsTheLasso() {
-        // eraser, type, interaction, fastLasso, hasSelection -> renders
-        assertTrue(toolRenders(eraser = true, eraserType = "pixel", interaction = false, fastLasso = false, hasSelection = false))
-        assertTrue(toolRenders(eraser = true, eraserType = "stroke", interaction = false, fastLasso = false, hasSelection = true))
-        assertFalse(toolRenders(eraser = true, eraserType = "lasso", interaction = false, fastLasso = false, hasSelection = false))
+    @Test fun theEraserToolRendersWhateverItsType() {
+        // eraser, interaction, fastLasso, hasSelection -> renders
+        assertTrue(toolRenders(eraser = true, interaction = false, fastLasso = false, hasSelection = false))
+        assertTrue(toolRenders(eraser = true, interaction = false, fastLasso = false, hasSelection = true))
         // The pen always renders; the lasso tool only its free-form trace with nothing selected.
-        assertTrue(toolRenders(eraser = false, eraserType = "lasso", interaction = false, fastLasso = false, hasSelection = true))
-        assertTrue(toolRenders(eraser = false, eraserType = "pixel", interaction = true, fastLasso = true, hasSelection = false))
-        assertFalse(toolRenders(eraser = false, eraserType = "pixel", interaction = true, fastLasso = true, hasSelection = true))
-        assertFalse(toolRenders(eraser = false, eraserType = "pixel", interaction = true, fastLasso = false, hasSelection = false))
+        assertTrue(toolRenders(eraser = false, interaction = false, fastLasso = false, hasSelection = true))
+        assertTrue(toolRenders(eraser = false, interaction = true, fastLasso = true, hasSelection = false))
+        assertFalse(toolRenders(eraser = false, interaction = true, fastLasso = true, hasSelection = true))
+        assertFalse(toolRenders(eraser = false, interaction = true, fastLasso = false, hasSelection = false))
     }
 
     @Test fun theEraserEndDirtiesTheStyleSlotOnlyUnderAToolWithAnotherStyle() {
         assertEquals(PenStyle.SOFT_ERASER, toolStrokeStyle(eraser = true, fastLasso = false, eraserType = "pixel"))
-        assertEquals(PenStyle.FOUNTAIN, toolStrokeStyle(eraser = true, fastLasso = false, eraserType = "lasso"))
+        assertEquals(PenStyle.DASH, toolStrokeStyle(eraser = true, fastLasso = false, eraserType = "lasso"))
         assertEquals(PenStyle.FOUNTAIN, toolStrokeStyle(eraser = false, fastLasso = false, eraserType = "pixel"))
+        assertEquals(PenStyle.FOUNTAIN, toolStrokeStyle(eraser = false, fastLasso = false, eraserType = "lasso"))
         assertEquals(PenStyle.DASH, toolStrokeStyle(eraser = false, fastLasso = true, eraserType = "pixel"))
         assertEquals(PenStyle.DASH, eraserEndStyle("lasso"))
         assertEquals(PenStyle.SOFT_ERASER, eraserEndStyle("stroke"))
 
+        // The pen: the eraser end's painter is never the pen's, so the tip after it needs a re-send.
         assertTrue(eraserEndOverwritesStyle(eraser = false, fastLasso = false, eraserType = "pixel"))
+        assertTrue(eraserEndOverwritesStyle(eraser = false, fastLasso = false, eraserType = "lasso"))
+        // The eraser tool: its tip draws with the eraser end's own painter.
         assertFalse(eraserEndOverwritesStyle(eraser = true, fastLasso = false, eraserType = "pixel"))
         assertFalse(eraserEndOverwritesStyle(eraser = true, fastLasso = false, eraserType = "stroke"))
+        assertFalse(eraserEndOverwritesStyle(eraser = true, fastLasso = false, eraserType = "lasso"))
     }
 
     @Test fun theEraserToolsPenUpRefreshNeverReconcilesInsideTheHandBack() {
-        assertFalse(penUpRefreshReconciles(eraser = true, interaction = false, eraserType = "pixel"))
-        assertFalse(penUpRefreshReconciles(eraser = true, interaction = false, eraserType = "stroke"))
-        // The lasso type keeps today's reconcile; so do the pen and the lasso tool.
-        assertTrue(penUpRefreshReconciles(eraser = true, interaction = false, eraserType = "lasso"))
-        assertTrue(penUpRefreshReconciles(eraser = false, interaction = false, eraserType = "pixel"))
-        assertTrue(penUpRefreshReconciles(eraser = false, interaction = true, eraserType = "pixel"))
+        assertFalse(penUpRefreshReconciles(eraser = true, interaction = false))
+        // The pen and the lasso tool keep their reconcile.
+        assertTrue(penUpRefreshReconciles(eraser = false, interaction = false))
+        assertTrue(penUpRefreshReconciles(eraser = false, interaction = true))
     }
 }

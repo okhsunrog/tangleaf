@@ -95,3 +95,16 @@ selection (A10) has not been observed yet.
 
 **Finger scrolling and pinch on the handwriting page do not work**, and never did: the canvas is
 `touch-none` and covers the sheet, and its finger handler only drags an existing selection.
+
+## Later, 2026-09-25/26: firmware eraser trace (eraser steps 2–3)
+
+- With the firmware drawing the eraser (e4fcdf1), every Tangleaf hand-back ends with one partial
+  `waveform[2] update_mode[0] flags[0x0]`, the same panel command stock issues after an erase.
+- **Occasional ghost outline after erasing, in both apps.** Now and then a faint outline of the erased
+  stroke stays on the panel after the hand-back and disappears only with a full refresh. The user
+  reproduced it in stock Notes at a similar rate (in colour there: a light trace of the soft eraser).
+  Treated as panel/firmware behaviour after the handwriting layer, not a Tangleaf defect. Tangleaf logs
+  the refreshed rectangle and the erased bounds per hand-back to rule out a short refresh region.
+- **Split eraser contacts in Tangleaf:** every eraser-end contact starts with a 3–15 ms micro-contact,
+  then the real one 30–155 ms later; stock's recordings show none. Worked around by holding the
+  hand-back after contacts under 20 ms (backlog entry "Split eraser contacts").

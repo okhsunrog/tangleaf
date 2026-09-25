@@ -69,6 +69,23 @@ export function lassoPolygon(path: XY[], mode: LassoMode): XY[] {
     b = path[path.length - 1];
   return a && b ? [a, { x: b.x, y: a.y }, b, { x: a.x, y: b.y }] : [];
 }
+/**
+ * The dashed loop the page draws for a gesture in progress: the selection lasso in its own mode, or
+ * the lasso eraser's free loop. Nothing for any other gesture, and nothing for a lasso erase the
+ * firmware traces: on BOOX SurfaceFlinger draws that dash itself, and a loop of the page's would
+ * reach the panel whenever it leaves the handwriting schema during the contact. The eraser end in
+ * the lasso tool has no firmware trace, so the page keeps drawing that loop.
+ */
+export function gestureLoop(
+  gesture: { action: "pen" | "erase" | "select" | "move"; points: XY[]; firmwareTrace: boolean },
+  eraserMode: EraserMode,
+  lassoMode: LassoMode,
+): XY[] {
+  if (gesture.action === "select") return lassoPolygon(gesture.points, lassoMode);
+  if (gesture.action === "erase" && eraserMode === "lasso" && !gesture.firmwareTrace)
+    return lassoPolygon(gesture.points, "free");
+  return [];
+}
 export function inside(p: XY, polygon: XY[]) {
   let found = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {

@@ -11,6 +11,7 @@ import { drawSegment, drawSheet, inkPoint, MAX_INK_POINTS } from "./ink-model";
 import { changedInkBounds, drawInkRegion, unionBounds, SHEET_BOUNDS } from "./ink-region";
 import {
   eraseGesture,
+  gestureLoop,
   lassoPolygon,
   moveSelection,
   scaleSelection,
@@ -132,6 +133,8 @@ export function InkCanvas({
     background: InkDraft["background"];
   } | null>(null);
   const damageRef = useRef<Bounds | null>(SHEET_BOUNDS);
+  /** Diagnostics for the plugin's erase hand-back: what the erases since the last commit removed. */
+  const erasedRef = useRef<Bounds | null>(null);
   const publishedRef = useRef<{ strokes: InkStroke[]; overlay: Bounds | null } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -275,18 +278,19 @@ export function InkCanvas({
       staging.stroke();
     }
     staging.lineWidth = SELECTION_TRACE_WIDTH;
-    if (gesture?.action === "select" || (gesture?.action === "erase" && eraserMode === "lasso")) {
-      const polygon = lassoPolygon(
-        gesture.points,
-        gesture.action === "select" ? lassoMode : "free",
-      );
-      if (polygon.length > 1) {
-        staging.beginPath();
-        staging.moveTo(polygon[0]!.x, polygon[0]!.y);
-        for (const p of polygon.slice(1)) staging.lineTo(p.x, p.y);
-        staging.lineTo(polygon[0]!.x, polygon[0]!.y);
-        staging.stroke();
-      }
+    const polygon = gesture
+      ? gestureLoop(
+          { action: gesture.action, points: gesture.points, firmwareTrace: gesture.nativeFast },
+          eraserMode,
+          lassoMode,
+        )
+      : [];
+    if (polygon.length > 1) {
+      staging.beginPath();
+      staging.moveTo(polygon[0]!.x, polygon[0]!.y);
+      for (const p of polygon.slice(1)) staging.lineTo(p.x, p.y);
+      staging.lineTo(polygon[0]!.x, polygon[0]!.y);
+      staging.stroke();
     }
     staging.setLineDash([]);
     staging.lineWidth = SELECTION_FRAME_WIDTH;
@@ -421,7 +425,10 @@ export function InkCanvas({
         last = gesture[gesture.length - 1]!;
       strokes = moveSelection(strokes, current.ids, last.x - first.x, last.y - first.y);
     } else if (current.action === "erase") {
-      strokes = eraseGesture(strokes, gesture, eraserMode, current.radius);
+      const erased = eraseGesture(strokes, gesture, eraserMode, current.radius);
+      if (onyx)
+        erasedRef.current = unionBounds(erasedRef.current, changedInkBounds(strokes, erased));
+      strokes = erased;
       onSelectionChange?.([]);
       // Only the eraser tool deselects itself; the stylus's eraser end under another tool never
       // changes the tool, as in stock.
@@ -519,6 +526,11 @@ export function InkCanvas({
       },
       invalidate: () => {
         damageRef.current = SHEET_BOUNDS;
+      },
+      takeErased: () => {
+        const bounds = erasedRef.current;
+        erasedRef.current = null;
+        return bounds;
       },
     },
   });
