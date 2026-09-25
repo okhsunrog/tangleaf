@@ -7,6 +7,8 @@ import android.graphics.RectF
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import android.view.MotionEvent
+import android.view.View
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import app.tauri.annotation.InvokeArg
@@ -75,8 +77,9 @@ internal class OnyxInk(
     private val displayMode: ViewDisplayMode,
     private val pauses: InkPauseRegistry,
     private val emit: (JSObject) -> Unit,
-) : ViewTreeObserver.OnWindowFocusChangeListener {
+) : ViewTreeObserver.OnWindowFocusChangeListener, View.OnTouchListener {
     private var helper: TouchHelper? = null
+    private val stylusRouting = InkStylusRouting()
     private var config: OnyxInkArgs? = null
     private var sheet = RectF()
     private var limit = Rect()
@@ -252,6 +255,25 @@ internal class OnyxInk(
         runCatching { resetPalm() }
             .onFailure { Log.d("OnyxInk", "no palm region to clear: ${it.message}") }
         webView.viewTreeObserver.addOnWindowFocusChangeListener(this)
+        webView.setOnTouchListener(this)
+    }
+
+    /** See [InkStylusRouting]: the pen on the sheet belongs to the raw reader, not the WebView. */
+    override fun onTouch(view: View, event: MotionEvent): Boolean {
+        val tool = event.getToolType(0)
+        return stylusRouting.consume(
+            down = event.actionMasked == MotionEvent.ACTION_DOWN,
+            end = event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL,
+            stylus = tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER,
+            // Not canPresent(): that also waits for frame submission, which is closed while a
+            // gesture is drawing — and the raw reader has already begun the gesture by the time
+            // its MotionEvent down arrives here.
+            active = helper != null && resumed && webView.hasWindowFocus() && !pauses.isPaused && !limit.isEmpty,
+            limit = InkRect(limit.left, limit.top, limit.right, limit.bottom),
+            overlays = overlays,
+            x = event.x,
+            y = event.y,
+        )
     }
 
     /** Reported by the plugin, which owns the one insets listener the WebView can have. */
@@ -714,6 +736,7 @@ internal class OnyxInk(
         config = null
         overlays = emptyList()
         swallowed = false
+        stylusRouting.reset()
         region.reset()
         reconcile.reset()
         // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
@@ -733,6 +756,7 @@ internal class OnyxInk(
         close()
         webView.removeCallbacks(resumeGate)
         webView.viewTreeObserver.removeOnWindowFocusChangeListener(this)
+        webView.setOnTouchListener(null)
         // The registry outlives this session; a keyboard held down here must not pause the next.
         pauses.resume(IME_REASON)
     }
