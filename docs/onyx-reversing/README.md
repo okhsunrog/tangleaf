@@ -38,6 +38,11 @@ Understanding any symptom means knowing which of these it lives in:
 | [04-system-screennote-pipeline.md](04-system-screennote-pipeline.md) | the system's own handwriting pipeline, how an app becomes eligible for it, and why we deliberately stay out of it                                                    |
 | [05-panel-refresh-levers.md](05-panel-refresh-levers.md)             | every refresh lever an unprivileged app can reach, what each does on a colour panel, and which of ours are pointless                                                 |
 
+The end-to-end study of the stock Notes app, reconciled with Tangleaf's path and the hardware
+observation plan, is in [stock-notes/README.md](stock-notes/README.md). Five open-source apps on the
+same SDK, documented in the same terms and compared with stock and Tangleaf, are in
+[reference-apps/README.md](reference-apps/README.md).
+
 Related, outside this directory: [`../planning/handwriting-pen-stack-comparison.md`](../planning/handwriting-pen-stack-comparison.md)
 compares our implementation against the stock Notes app and five open-source BOOX note apps,
 state by state through our git history.
