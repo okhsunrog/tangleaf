@@ -242,9 +242,9 @@ it("hardware eraser uses the selected pixel mode and cancel leaves handwriting i
   expect(changed.mock.calls[0]![0].strokes).toHaveLength(2);
   expect(changed.mock.calls[0]![0].background).toBe("grid");
   // Without a native radius the 5.00 mm eraser is measured in CSS millimetres: 9.45 CSS px of
-  // reach, 18.9 units on this 500 px sheet, plus the stroke's own half-width of one unit.
-  expect(left.points[left.points.length - 1].x).toBeCloseTo(100 - 19.9, 1);
-  expect(right.points[0].x).toBeCloseTo(100 + 19.9, 1);
+  // reach, 18.9 units from the stroke's centreline on this 500 px sheet.
+  expect(left.points[left.points.length - 1].x).toBeCloseTo(100 - 18.9, 1);
+  expect(right.points[0].x).toBeCloseTo(100 + 18.9, 1);
 });
 
 it("draws the eraser circle on the portable path, where no firmware draws the eraser", () => {

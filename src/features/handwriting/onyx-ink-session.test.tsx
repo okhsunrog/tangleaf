@@ -210,10 +210,10 @@ it("routes native hardware erasing and lasso gestures to the shared editor witho
     bridge.event({ ...base, kind: "end" });
   });
   expect(latest.strokes).toHaveLength(2);
-  // The plugin's radius, not a CSS measurement: 9 units plus the line's half-width of one.
+  // The plugin's radius, not a CSS measurement: 9 units from the line's centre.
   const [left, right] = latest.strokes;
-  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(90);
-  expect(right!.points[0]!.x).toBeCloseTo(110);
+  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(91);
+  expect(right!.points[0]!.x).toBeCloseTo(109);
   await act(async () => root.render(<EditorSheet tool="lasso" />));
   expect(bridge.invoke.mock.calls.some(([, args]) => args.interaction === true)).toBe(true);
   await act(async () => {
@@ -313,8 +313,8 @@ it.each(["pen", "eraser"] as const)(
     // that starts the plugin's hand-back; it carries that stroke's sequence.
     expect(commits().slice(before)).toEqual([expect.objectContaining({ session, sequence: 1 })]);
     const [left, right] = latest.strokes;
-    expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(90);
-    expect(right!.points[0]!.x).toBeCloseTo(110);
+    expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(91);
+    expect(right!.points[0]!.x).toBeCloseTo(109);
     await act(async () => bridge.event({ ...begin, kind: "end", sequence: 1 }));
     await act(async () => flushFrames());
     expect(
@@ -469,7 +469,7 @@ it.each(["pen", "eraser"] as const)(
         .map(([, args]) => args);
     const before = commits().length;
     const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
-    const loop = [p(20, 60), p(180, 60), p(180, 140), p(20, 140), p(20, 60)];
+    const loop = [p(20, 60), p(220, 60), p(220, 140), p(20, 140), p(20, 60)];
     const begin: OnyxInkEvent = {
       session,
       sequence: 0,
@@ -499,14 +499,15 @@ it.each(["pen", "eraser"] as const)(
       ),
     );
     expect(drawImage).toHaveBeenCalled();
-    expect(lineTo.mock.calls.some(([x, y]) => x === 180 && y === 140)).toBe(false);
+    expect(lineTo.mock.calls.some(([x, y]) => x === 220 && y === 140)).toBe(false);
     expect(commits()).toHaveLength(before);
     expect(latest.strokes).toHaveLength(1);
 
     await act(async () => bridge.event({ ...begin, kind: "stroke", sequence: 1, points: loop }));
     await settle();
-    // The loop crosses the line: selectLasso takes it whole, and the commit that starts the
-    // hand-back carries the stroke's sequence and what the erase removed.
+    // The loop encloses the line's right end, and the one vertex left is no line, so the stroke
+    // goes. The commit that starts the hand-back carries the stroke's sequence and what the erase
+    // removed.
     expect(latest.strokes).toEqual([]);
     const [commit] = commits().slice(before);
     expect(commit).toMatchObject({ session, sequence: 1 });
@@ -518,7 +519,7 @@ it.each(["pen", "eraser"] as const)(
     await settle();
     // Reported once: a later commit erased nothing.
     for (const later of commits().slice(before + 1)) expect(later.erasedRight).toBe(0);
-    expect(lineTo.mock.calls.some(([x, y]) => x === 180 && y === 140)).toBe(false);
+    expect(lineTo.mock.calls.some(([x, y]) => x === 220 && y === 140)).toBe(false);
     expect(arc.mock.calls.some(([, , radius]) => radius === 1.7)).toBe(false);
   },
 );
@@ -531,7 +532,7 @@ it("keeps drawing the lasso eraser's loop for the eraser end in the lasso tool, 
     .map(([, args]) => args);
   expect(configs[configs.length - 1]).toMatchObject({ interaction: true, eraserType: "lasso" });
   const p = (x: number, y: number) => ({ x, y, pressure: 0.5, tiltX: 0, tiltY: 0, time: x });
-  const loop = [p(20, 60), p(180, 60), p(180, 140), p(20, 140), p(20, 60)];
+  const loop = [p(20, 60), p(220, 60), p(220, 140), p(20, 140), p(20, 60)];
   const begin: OnyxInkEvent = {
     session: configs[0]!.session,
     sequence: 0,
@@ -550,11 +551,12 @@ it("keeps drawing the lasso eraser's loop for the eraser end in the lasso tool, 
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   });
-  expect(lineTo.mock.calls.some(([x, y]) => x === 180 && y === 140)).toBe(true);
+  expect(lineTo.mock.calls.some(([x, y]) => x === 220 && y === 140)).toBe(true);
   await act(async () => {
     bridge.event({ ...begin, kind: "stroke", sequence: 1, points: loop });
     bridge.event({ ...begin, kind: "end", sequence: 1 });
   });
+  // The loop encloses the line's right end: the one vertex left is no line, so the stroke goes.
   expect(latest.strokes).toEqual([]);
 });
 
@@ -583,10 +585,10 @@ it("hands a new eraser diameter to the plugin, and falls back to CSS millimetres
     bridge.event({ ...event, kind: "stroke", points: [p(100, 100)] });
     bridge.event({ ...event, kind: "end" });
   });
-  // 4.90 mm in CSS millimetres on the 500 px canvas: 18.52 units of reach, plus one of line.
+  // 4.90 mm in CSS millimetres on the 500 px canvas: 18.52 units of reach from the centreline.
   const [left, right] = latest.strokes;
-  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(100 - 19.52, 1);
-  expect(right!.points[0]!.x).toBeCloseTo(100 + 19.52, 1);
+  expect(left!.points[left!.points.length - 1]!.x).toBeCloseTo(100 - 18.52, 1);
+  expect(right!.points[0]!.x).toBeCloseTo(100 + 18.52, 1);
 });
 
 it("keeps fast native lasso transient and sends selection bounds for subsequent dragging", async () => {

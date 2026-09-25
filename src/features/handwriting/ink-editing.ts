@@ -97,6 +97,24 @@ export function inside(p: XY, polygon: XY[]) {
   }
   return found;
 }
+/**
+ * Inside a closed loop by the non-zero winding rule, the fill rule of the region stock Notes builds
+ * from its lasso eraser's path: ink that a second turn round the loop encloses again stays inside,
+ * where the even-odd `inside` would count it out. Points on an edge count as inside.
+ */
+export function insideNonZero(p: XY, polygon: XY[]) {
+  let winding = 0;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[j]!,
+      b = polygon[i]!;
+    if (distance(p, a, b) < EPS) return true;
+    const side = (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);
+    if (a.y <= p.y) {
+      if (b.y > p.y && side > 0) winding++;
+    } else if (b.y <= p.y && side < 0) winding--;
+  }
+  return winding !== 0;
+}
 function crosses(a: XY, b: XY, c: XY, d: XY) {
   const cross = (p: XY, q: XY, r: XY) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
   const x = cross(a, b, c),
@@ -111,10 +129,15 @@ function crosses(a: XY, b: XY, c: XY, d: XY) {
     (Math.abs(w) < EPS && distance(b, c, d) < EPS)
   );
 }
-export function selectLasso(strokes: InkStroke[], polygon: XY[]): string[] {
-  if (polygon.length < 3) return [];
+/** A loop's bounds, or null for a tap or a scribble too small to enclose anything. */
+function lassoBounds(polygon: XY[]): Bounds | null {
+  if (polygon.length < 3) return null;
   const bounds = boundsOf(polygon)!;
-  if (bounds.right - bounds.left < 2 || bounds.bottom - bounds.top < 2) return [];
+  return bounds.right - bounds.left < 2 || bounds.bottom - bounds.top < 2 ? null : bounds;
+}
+export function selectLasso(strokes: InkStroke[], polygon: XY[]): string[] {
+  const bounds = lassoBounds(polygon);
+  if (!bounds) return [];
   return strokes
     .filter(
       (stroke) =>
@@ -129,6 +152,49 @@ export function selectLasso(strokes: InkStroke[], polygon: XY[]): string[] {
         ),
     )
     .map((s) => s.id);
+}
+/**
+ * The lasso eraser, by stock Notes' rule: the vertices inside the loop go, and every run of two or
+ * more consecutive vertices outside it stays as a stroke. A stroke with no vertex inside is kept
+ * whole even where one of its segments passes through the loop, and one left without such a run
+ * goes. The first run keeps the stroke's id and every run keeps its place in the list, as the pixel
+ * eraser's fragments do; stock gives each run a new id at the end of its list, which one ink colour
+ * cannot show. Stock also leaves a stroke whose only survivors are single vertices unchanged; that
+ * stroke goes here.
+ */
+export function cutLasso(strokes: InkStroke[], polygon: XY[]): InkStroke[] {
+  const bounds = lassoBounds(polygon);
+  if (!bounds) return strokes;
+  let changed = false;
+  const result: InkStroke[] = [];
+  for (const stroke of strokes) {
+    if (!overlaps(strokeBounds(stroke), bounds)) {
+      result.push(stroke);
+      continue;
+    }
+    let cut = false;
+    const runs: InkPoint[][] = [];
+    let run: InkPoint[] = [];
+    for (const p of stroke.points) {
+      const near =
+        p.x >= bounds.left && p.x <= bounds.right && p.y >= bounds.top && p.y <= bounds.bottom;
+      if (near && insideNonZero(p, polygon)) {
+        cut = true;
+        if (run.length > 1) runs.push(run);
+        run = [];
+      } else run.push(p);
+    }
+    if (!cut) {
+      result.push(stroke);
+      continue;
+    }
+    if (run.length > 1) runs.push(run);
+    changed = true;
+    runs.forEach((points, i) =>
+      result.push({ ...stroke, id: i === 0 ? stroke.id : crypto.randomUUID(), points }),
+    );
+  }
+  return changed ? result : strokes;
 }
 export function boundsOf(points: XY[]): Bounds | null {
   if (!points.length) return null;
@@ -324,15 +390,12 @@ export function eraseGesture(
 ): InkStroke[] {
   if (!gesture.length) return strokes;
   const path = simplifyGesture(gesture);
-  if (mode === "lasso") {
-    const ids = new Set(selectLasso(strokes, path));
-    return ids.size ? strokes.filter((s) => !ids.has(s.id)) : strokes;
-  }
+  if (mode === "lasso") return cutLasso(strokes, path);
   let changed = false;
   const result: InkStroke[] = [];
   const pathBounds = boundsOf(path)!;
   for (const stroke of strokes) {
-    if (!overlaps(strokeBounds(stroke), pathBounds, radius + (stroke.width * 1.75) / 2)) {
+    if (!overlaps(strokeBounds(stroke), pathBounds, radius)) {
       result.push(stroke);
       continue;
     }
@@ -351,13 +414,9 @@ export function eraseGesture(
     for (let i = 0; i < stroke.points.length; i++) {
       const a = stroke.points[Math.max(0, i - 1)]!,
         b = stroke.points[i]!;
-      // Include the rendered stroke's radius; partial erasing removes vector segments.
-      const cuts = cutIntervals(
-        a,
-        b,
-        path,
-        radius + (stroke.width * (0.25 + 1.5 * Math.max(a.pressure, b.pressure))) / 2,
-      );
+      // The eraser reaches what the firmware's trace covers: `radius` from the stroke's
+      // centreline, as stock tests it. The ink's own width and pressure do not widen it.
+      const cuts = cutIntervals(a, b, path, radius);
       if (!cuts.length) {
         if (mode === "pixel") {
           push(a);

@@ -1126,6 +1126,9 @@ Risks:
 full GC; Q5 settings global per device; Q7 the eraser end keeps erasing in the lasso tool; Q8 no "Do Not Erase
 Shapes"; Q21 our own dialog wording (title and "Erase"). The rest keep the plan's defaults until asked.
 
+**Status 2026-09-26:** all five steps are implemented and verified with the pen on the tablet (Q12 settled:
+the pressure-scaled half-width is gone). Steps 1–4 are e3a195e, e4fcdf1, 7f2c7a4; step 5 follows them.
+
 1. **Icons**: draw our own look-alikes in the lucide style (the default here), or copy Onyx's vector path data?
    Those are Onyx's assets.
 2. **Menu close**: skip the full GC for the eraser menu (S1.6), as stock does with its partial repaint?
