@@ -4,7 +4,8 @@ import android.os.Build
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 
 /**
- * Vendor firmware APIs (android.onyx.*, the View update-mode accessors) are hidden from apps
+ * Vendor firmware APIs (android.onyx.*, the View update-mode accessors, the WebView scroll-A2
+ * switch) are hidden from apps
  * targeting recent Android versions. Every entry point that touches them — the ink session, the
  * display-mode stack, the profile command — must lift the restriction first, and the first of
  * them to run is not always the ink editor: the display profile is applied at startup.
@@ -17,7 +18,11 @@ internal object VendorAccess {
     fun ensure(): Boolean {
         granted?.let { return it }
         val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            HiddenApiBypass.addHiddenApiExemptions("Landroid/onyx/", "Landroid/view/View;")
+            HiddenApiBypass.addHiddenApiExemptions(
+                "Landroid/onyx/",
+                "Landroid/view/View;",
+                "Landroid/webkit/WebView;",
+            )
         } else {
             true
         }

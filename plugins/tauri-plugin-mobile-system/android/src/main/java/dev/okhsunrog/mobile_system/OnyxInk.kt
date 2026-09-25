@@ -92,6 +92,21 @@ internal class OnyxInk(
 ) : ViewTreeObserver.OnWindowFocusChangeListener, View.OnTouchListener {
     private var helper: TouchHelper? = null
     private val stylusRouting = InkStylusRouting()
+    private val autoA2 = AutoA2Switch(
+        read = { autoA2ForScrolling() },
+        write = { enabled ->
+            runCatching { webViewMethod("setAutoA2ForScrolling", Boolean::class.javaPrimitiveType!!)?.invoke(webView, enabled) }
+                .onFailure { Log.w("OnyxInk", "autoA2ForScrolling write failed: ${it.message}") }
+        },
+        log = { Log.d("OnyxInk", it) },
+    )
+
+    /** The BOOX WebView's scroll-A2 switch, or null on firmware without it. */
+    private fun autoA2ForScrolling(): Boolean? =
+        runCatching { webViewMethod("isAutoA2ForScrolling")?.invoke(webView) as? Boolean }.getOrNull()
+
+    private fun webViewMethod(name: String, vararg params: Class<*>) =
+        runCatching { WebView::class.java.getMethod(name, *params) }.getOrNull()
     private var config: OnyxInkArgs? = null
     private var sheet = RectF()
     private var limit = Rect()
@@ -440,6 +455,7 @@ internal class OnyxInk(
                 helper!!.setLimitRect(limit, NO_EXCLUDES).openRawDrawing()
                 helper!!.setEraserRawDrawingEnabled(false, 0)
                 eraserTraceOn = false
+                autoA2.acquire()
             }
             // The tool's width, colour and style go out with the rest of the pen settings on the
             // resume, every resume, so nothing can turn render on with a stale style slot.
@@ -495,6 +511,8 @@ internal class OnyxInk(
 
     fun status(): JSObject = JSObject().apply {
         put("available", failed == null)
+        put("autoA2ForScrolling", autoA2ForScrolling())
+        put("autoA2Held", autoA2.held)
         put("active", helper?.isRawDrawingInputEnabled == true)
         put("error", failed)
         put("repaintCount", repaintCount)
@@ -1003,6 +1021,7 @@ internal class OnyxInk(
         overlays = emptyList()
         swallowed = false
         stylusRouting.reset()
+        autoA2.release()
         region.reset()
         reconcile.reset()
         // Ink drawn under the partial mode leaves the sharpest ghosts; the sheet going away is
