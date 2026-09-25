@@ -7,6 +7,7 @@ import { AppearanceProvider } from "@/app/appearance";
 import { ConfirmationProvider } from "@/app/confirmation";
 import { ErrorBoundary } from "@/app/error-boundary";
 import { installTextFocusSuppression } from "@/app/ink-suppression";
+import { useSheetMode } from "@/app/sheet-mode";
 import { registerLifecycleFlush } from "@/app/lifecycle-flush";
 import { disableViewportZoom } from "@/app/viewport-zoom";
 import { PageSessionProvider, PageSessionRegistry } from "@/features/pages/page-session";
@@ -45,16 +46,36 @@ root.render(
           </ConfirmationProvider>
           {/* Inside the appearance provider: the toaster's duration and icons follow the
               resolved display profile. */}
-          <Toaster
-            position="bottom-right"
-            mobileOffset={{
-              right: "calc(1rem + var(--safe-area-inset-right))",
-              bottom: "calc(1rem + var(--safe-area-inset-bottom))",
-              left: "calc(1rem + var(--safe-area-inset-left))",
-            }}
-          />
+          <AppToaster />
         </AppearanceProvider>
       </QueryClientProvider>
     </ThemeProvider>
   </React.StrictMode>,
 );
+
+/**
+ * Bottom right, except while a handwritten note has the screen: there the corner is sheet, a pen
+ * tap on a toast action would be taken by the ink routing, and the firmware ink would draw over
+ * the toast. In sheet mode toasts cover the toolbar row at the top instead.
+ *
+ * One toaster whose props change, not two: a remounted toaster starts empty, so a toast on screen
+ * when a note opens would vanish instead of moving up.
+ */
+function AppToaster() {
+  const sheet = useSheetMode((state) => state.sheet);
+  return (
+    <Toaster
+      position={sheet ? "top-center" : "bottom-right"}
+      offset={sheet ? { top: 4 } : undefined}
+      mobileOffset={
+        sheet
+          ? { top: 4 }
+          : {
+              right: "calc(1rem + var(--safe-area-inset-right))",
+              bottom: "calc(1rem + var(--safe-area-inset-bottom))",
+              left: "calc(1rem + var(--safe-area-inset-left))",
+            }
+      }
+    />
+  );
+}

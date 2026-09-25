@@ -33,6 +33,11 @@ type Props = {
   onCloseSearch: () => void;
   onNavigateBack: () => void;
   onOpenHome: () => void;
+  /**
+   * A handwritten note has the screen (sheet mode): the header steps aside, and the note's own
+   * toolbar is the only chrome. Android Back keeps working as before.
+   */
+  sheet?: boolean;
 };
 
 export function AppLayout({
@@ -52,6 +57,7 @@ export function AppLayout({
   onCloseSearch,
   onNavigateBack,
   onOpenHome,
+  sheet = false,
 }: Props) {
   const compact = useCompactLayout();
   const [compactNavigation, dispatchCompactNavigation] = useReducer(
@@ -75,6 +81,14 @@ export function AppLayout({
       dispatchCompactNavigation({ type: "open_home" });
     }
   }, [compactRegion, workbenchIsHome]);
+  useEffect(() => {
+    // A note with the whole screen is the editor, however it got there: a pane tab can show a
+    // note while the region is still Home. Without this the note's Back (no pane history) and
+    // Android Back would have nowhere to go, and the header and pane tabs are gone.
+    if (sheet && compactRegion === CompactRegion.Home) {
+      dispatchCompactNavigation({ type: "open_editor" });
+    }
+  }, [compactRegion, sheet]);
   useEffect(() => {
     if (!assistantVisible && compactRegion === CompactRegion.Assistant) {
       dispatchCompactNavigation({ type: "close_assistant" });
@@ -184,27 +198,30 @@ export function AppLayout({
       value={compact && compactRegion === CompactRegion.Editor ? returnToDashboard : null}
     >
       <div className="app-shell flex h-full flex-col overflow-hidden text-foreground">
-        <header
-          data-tauri-drag-region
-          className="relative z-20 flex h-12 shrink-0 items-center justify-between px-3"
-        >
-          <button
-            type="button"
-            aria-label="Open dashboard"
-            className="group -ml-1 flex items-center gap-2.5 rounded-xl px-2 py-1 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            onClick={() => {
-              returnToDashboard();
-            }}
+        {!sheet && (
+          <header
+            data-tauri-drag-region
+            className="relative z-20 flex h-12 shrink-0 items-center justify-between px-3"
           >
-            <TangleafBrand />
-          </button>
-          <div className="flex items-center gap-1">{headerActions}</div>
-        </header>
+            <button
+              type="button"
+              aria-label="Open dashboard"
+              className="group -ml-1 flex items-center gap-2.5 rounded-xl px-2 py-1 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              onClick={() => {
+                returnToDashboard();
+              }}
+            >
+              <TangleafBrand />
+            </button>
+            <div className="flex items-center gap-1">{headerActions}</div>
+          </header>
+        )}
 
         <div
           className={cn(
             "workspace-frame relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-popover",
             compact && "mx-0 mb-0 rounded-none border-x-0 border-b-0 shadow-none",
+            sheet && "border-t-0",
           )}
         >
           <Group orientation="horizontal" className="h-full min-h-0" disabled={compact}>

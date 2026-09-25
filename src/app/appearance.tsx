@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { addPluginListener } from "@tauri-apps/api/core";
 import { useTheme } from "next-themes";
 import {
   getMobileSystemInfo,
@@ -6,6 +7,8 @@ import {
   setSystemBarsStyle,
 } from "@/lib/api";
 import { setEinkRefreshEnabled } from "./eink-refresh";
+import { nativeSafeAreaChanged, writeSafeArea, type SafeArea } from "./safe-area";
+import { isAndroid } from "./sheet-mode";
 import {
   DISPLAY_PROFILE_STORAGE_KEY,
   INK_COLOR_STORAGE_KEY,
@@ -138,27 +141,47 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
 
   useEffect(() => {
     const root = document.documentElement;
+    let disposed = false;
+    let listening = false;
+    let unlisten: (() => Promise<void>) | undefined;
+    // Hiding or showing a system bar in an edge-to-edge window changes only the insets: the
+    // window keeps its size, so no resize follows and the plugin has to say so itself.
+    const listen = () => {
+      if (listening) return;
+      listening = true;
+      void addPluginListener<SafeArea>("mobile-system", "safeAreaChanged", (area) => {
+        if (!disposed) nativeSafeAreaChanged(area);
+      })
+        .then((listener) => {
+          if (disposed) void listener.unregister();
+          else unlisten = () => listener.unregister();
+        })
+        .catch(() => undefined);
+    };
     const updateInsets = async () => {
       const info = await getMobileSystemInfo();
-      if (!info) return;
+      if (!info || disposed) return;
       root.dataset.mobile = "true";
       setDisplayInfo((previous) =>
         previous?.displayKind === info.displayKind && previous.colorPanel === info.colorPanel
           ? previous
           : { displayKind: info.displayKind, colorPanel: info.colorPanel },
       );
-      root.style.setProperty("--safe-area-inset-top", `${info.safeArea.top}px`);
-      root.style.setProperty("--safe-area-inset-right", `${info.safeArea.right}px`);
-      root.style.setProperty("--safe-area-inset-bottom", `${info.safeArea.bottom}px`);
-      root.style.setProperty("--safe-area-inset-left", `${info.safeArea.left}px`);
+      writeSafeArea(info.safeArea, root);
+      listen();
     };
 
+    // On Android the listener goes up at once rather than after the first query: a note restored
+    // at startup can hide the bars before that query has come back.
+    if (isAndroid()) listen();
     void updateInsets().catch(() => undefined);
     window.addEventListener("resize", updateInsets);
     window.addEventListener("orientationchange", updateInsets);
     return () => {
+      disposed = true;
       window.removeEventListener("resize", updateInsets);
       window.removeEventListener("orientationchange", updateInsets);
+      void unlisten?.();
     };
   }, []);
 

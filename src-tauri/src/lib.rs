@@ -28,6 +28,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::save_handwriting_patch,
             commands::complete_handwriting_note,
             commands::set_system_bars_style,
+            commands::set_immersive_mode,
             commands::set_display_profile,
             commands::request_full_refresh,
             commands::sync_status,

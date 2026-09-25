@@ -180,3 +180,20 @@ pub fn set_system_bars_style(app: AppHandle, dark_background: bool) -> CommandRe
         Ok(())
     }
 }
+
+/// Hides the system bars while a handwritten note has the screen, and shows them again after.
+/// Only Android has bars to hide; elsewhere the request succeeds without doing anything.
+#[tauri::command]
+#[specta::specta]
+pub fn set_immersive_mode(app: AppHandle, enabled: bool) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        app.mobile_system().set_immersive_mode(enabled).map_err(err)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}

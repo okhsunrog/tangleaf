@@ -1,23 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Menu } from "@base-ui/react/menu";
-import {
-  Eraser,
-  Grid2X2,
-  Lasso,
-  MoreHorizontal,
-  PenLine,
-  Pencil,
-  Redo2,
-  Square,
-  Star,
-  Trash2,
-  Undo2,
-} from "lucide-react";
+import { ArrowLeft, Eraser, Lasso, PenLine, Redo2, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent } from "@/components/ui/popover";
-import { refreshPanelAfterClose } from "@/app/eink-refresh";
-import { useOverlayInkSuppression } from "@/app/ink-suppression";
 import { usePageNavigationStore } from "@/features/pages/page-navigation-store";
 import { RenamePageDialog } from "@/features/pages/rename-page-dialog";
 import { usePageTitleEditor } from "@/features/pages/use-page-title-editor";
@@ -40,6 +25,15 @@ import type { DraftSaveState } from "./draft-writer";
 import { canDrawHandwriting, editorAccess, type EditorOwnership } from "./handwriting-access";
 import { hasConflict, unsentChanges } from "./handwriting-conflict-model";
 import { HandwritingConflictDialog } from "./handwriting-conflicts";
+import { HandwritingStatus, type NoteStatus } from "./handwriting-status";
+import {
+  NoteMenu,
+  PEN_PRESETS,
+  PenPresetIcon,
+  ToolbarButton,
+  ToolbarSeparator,
+  useToolbarLayout,
+} from "./handwriting-toolbar";
 import {
   acquireEditor,
   awaitCompletion,
@@ -56,6 +50,7 @@ import type { EraserMode, LassoMode } from "./ink-editing";
 import { applyHistoryUpdate } from "./ink-patch";
 import { useHandwritingAvailability, useHandwritingPreference } from "./input-capabilities";
 import type { OnyxInkStatus } from "./onyx-ink";
+import { SHEET_WIDTH_CSS } from "./sheet-fit";
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -89,85 +84,23 @@ const TOOLS = [
   { id: "lasso", label: "Lasso", Icon: Lasso },
 ] as const satisfies readonly { id: InkTool; label: string; Icon: typeof PenLine }[];
 
-/**
- * Favourite, rename and delete, off the single toolbar row.
- *
- * A menu is an overlay, so opening it holds the firmware pen down: the items take their taps
- * instead of the sheet taking a stroke through them.
- */
-function NoteMenu({
-  favorite,
-  busy,
-  onToggleFavorite,
-  onRename,
-  onDelete,
-}: {
-  favorite: boolean;
-  busy: boolean;
-  onToggleFavorite: () => void;
-  onRename: () => void;
-  onDelete: () => void;
-}) {
-  const overlay = useOverlayInkSuppression();
-  return (
-    <Menu.Root onOpenChange={refreshPanelAfterClose(overlay)}>
-      <Menu.Trigger
-        render={
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Note options"
-            className="shrink-0 rounded-lg text-muted-foreground"
-          />
-        }
-      >
-        <MoreHorizontal className="size-4" />
-      </Menu.Trigger>
-      <Menu.Portal>
-        <Menu.Positioner sideOffset={6} align="end">
-          <Menu.Popup className="z-50 min-w-44 rounded-xl border bg-popover p-1 text-popover-foreground shadow-panel outline-none">
-            <Menu.Item
-              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
-              onClick={onToggleFavorite}
-            >
-              <Star className={cn("size-4", favorite && "fill-current text-primary")} />
-              {favorite ? "Remove from favorites" : "Add to favorites"}
-            </Menu.Item>
-            <Menu.Item
-              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-accent"
-              onClick={onRename}
-            >
-              <Pencil className="size-4" />
-              Rename
-            </Menu.Item>
-            <Menu.Item
-              disabled={busy}
-              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm text-destructive outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent"
-              onClick={onDelete}
-            >
-              <Trash2 className="size-4" />
-              Delete note
-            </Menu.Item>
-          </Menu.Popup>
-        </Menu.Positioner>
-      </Menu.Portal>
-    </Menu.Root>
-  );
-}
-
 type Props = {
   paneId: PaneId;
   page: Page;
   onSaved: (updated: Page) => void;
   onDelete: (page: Page) => void | Promise<void>;
+  /**
+   * Leaves the note. Given in sheet mode, where the pane bar with its Back is gone and the
+   * toolbar is the only chrome on screen.
+   */
+  onBack?: () => void;
 };
 
 /**
  * A handwritten note in a workspace pane. It owns the note's ink session for as
  * long as it is mounted; the text editor is never mounted for this page kind.
  */
-export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) {
+export function HandwritingNoteView({ paneId, page, onSaved, onDelete, onBack }: Props) {
   const monoInk = useResolvedInkColor() === "mono";
   const uuid = page.uuid;
   const { available, capabilities } = useHandwritingAvailability();
@@ -484,14 +417,67 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       setHistoryBusy(false);
     }
   };
-  // Nothing may hold the pen down once the sheet is gone or the tool moved on.
+  const [toolbarRef, layout] = useToolbarLayout();
+  // Nothing may hold the pen down once the sheet is gone, the tool moved on, or the button the
+  // options hang from was folded away.
   useEffect(() => {
     if (!editing) setOptionsOpen(false);
   }, [editing]);
-  useEffect(() => setOptionsOpen(false), [tool]);
+  useEffect(() => setOptionsOpen(false), [tool, layout.penPresets]);
 
   const undoStroke = () => void navigateHistory(false);
   const redoStroke = () => void navigateHistory(true);
+
+  const selectTool = (id: InkTool, button: HTMLElement) => {
+    // The second tap on the active tool is what opens its options; the first
+    // one has to stay a plain tool switch, or every switch costs a dismissal.
+    if (tool === id) {
+      setOptionsAnchor(button);
+      setOptionsOpen(true);
+      return;
+    }
+    setTool(id);
+    if (id !== "lasso") setSelected([]);
+  };
+  const toolDisabled = !draft || editingBusy;
+  // A stroke in flight holds the tools (nothing may switch under a gesture) but does not dim
+  // them: every stroke would otherwise repaint the whole bar twice on e-ink. A button that is
+  // disabled for another reason as well keeps its dimmed look, so nothing flickers either way.
+  const idleBusy = historyBusy || leaving || suspended;
+  const heldByStroke = (disabledOtherwise: boolean) =>
+    active && !disabledOtherwise ? "disabled:opacity-100" : undefined;
+  const toolHold = heldByStroke(!draft || idleBusy);
+
+  const statuses: NoteStatus[] = [];
+  if (saveState instanceof Error) {
+    statuses.push({
+      kind: "save-error",
+      message: saveState.message,
+      onRetry: () => void getWriter(uuid)?.flush(),
+    });
+  }
+  if (title.conflict) {
+    statuses.push({
+      kind: "title-conflict",
+      onUseRemote: title.useRemote,
+      onKeepLocal: title.keepLocal,
+    });
+  }
+  if (status && hasConflict(status)) {
+    statuses.push({
+      kind: "versions",
+      count: status.heads.length,
+      compareDisabled: busy || comparing,
+      onCompare: () => void compareVersions(),
+    });
+  }
+  if (limit) statuses.push({ kind: "sheet-full" });
+  if (nativeStatus?.error) statuses.push({ kind: "pen-error", message: nativeStatus.error });
+
+  const readOnlyNotice =
+    access === "other_pane"
+      ? "This note is open for writing in another pane. Close it there to edit here."
+      : "Connect a pen or enable mouse drawing in Settings to edit.";
 
   return (
     <div
@@ -509,99 +495,114 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
         }
       }}
     >
-      {/* One row over the sheet: every extra strip of chrome is sheet the pen cannot use. */}
+      {/* One fixed 44 px row over the sheet, like the stock app's top bar: every extra strip of
+          chrome is sheet the pen cannot use, and a row that changed height would move the sheet.
+          The tools sit at the right end and never move; whatever comes and goes (the status
+          chip, "Unsent", a longer title) only changes the width of the title. */}
       <div
+        ref={toolbarRef}
         role="toolbar"
         aria-label="Handwriting tools"
-        className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5"
-      >
-        <button
-          type="button"
-          onClick={() => setRenaming(true)}
-          aria-label="Rename note"
-          className="min-w-0 flex-1 truncate rounded-lg px-1 py-1 text-left text-sm leading-tight font-semibold text-foreground"
-        >
-          {title.title || <span className="text-muted-foreground/40">Untitled note</span>}
-        </button>
-        {unsentChanges(status) && (
-          <span className="shrink-0 text-[11px] eink:text-xs text-muted-foreground">Unsent</span>
+        className={cn(
+          "flex h-[44px] shrink-0 items-center border-b bg-background px-[4px] eink:border-black eink:bg-white",
+          // On a phone-width bar the 4 px gaps are the title's last room: at 360 CSS px they
+          // would push an icon-only chip over the Pen button.
+          layout.statusIconOnly ? "gap-0" : "gap-[4px]",
         )}
-        {editing && (
+      >
+        {onBack && (
+          <ToolbarButton aria-label="Go back" onClick={onBack}>
+            <ArrowLeft />
+          </ToolbarButton>
+        )}
+        <div className="flex min-w-0 flex-1 items-center gap-[4px]">
+          <button
+            type="button"
+            onClick={() => setRenaming(true)}
+            aria-label="Rename note"
+            className="min-w-0 flex-1 truncate rounded-lg px-[4px] py-1 text-left text-sm leading-tight font-semibold text-foreground"
+          >
+            {title.title || <span className="text-muted-foreground/40">Untitled note</span>}
+          </button>
+          <HandwritingStatus
+            statuses={statuses}
+            unsent={unsentChanges(status)}
+            iconOnly={layout.statusIconOnly}
+          />
+        </div>
+        {editing ? (
           <>
-            {TOOLS.map(({ id, label, Icon }) => (
-              <Button
-                key={id}
-                type="button"
-                size="icon-sm"
-                variant={tool === id ? "secondary" : "ghost"}
-                aria-label={tool === id ? `${label} options` : label}
-                aria-pressed={tool === id}
-                disabled={!draft || editingBusy}
-                onClick={(event) => {
-                  // The second tap on the active tool is what opens its options; the first
-                  // one has to stay a plain tool switch, or every switch costs a dismissal.
-                  if (tool === id) {
-                    setOptionsAnchor(event.currentTarget);
-                    setOptionsOpen(true);
-                    return;
-                  }
-                  setTool(id);
-                  if (id !== "lasso") setSelected([]);
-                }}
-                className="shrink-0 rounded-lg"
-              >
-                <Icon className="size-4" />
-              </Button>
-            ))}
-            <Button
-              type="button"
-              size="icon-sm"
-              variant={draft?.background === "grid" ? "secondary" : "ghost"}
-              aria-label="Grid paper"
-              aria-pressed={draft?.background === "grid"}
-              disabled={!draft || editingBusy}
-              onClick={() => {
-                if (draft)
-                  change({
-                    ...draft,
-                    background: draft.background === "grid" ? "plain" : "grid",
-                  });
-              }}
-              className="shrink-0 rounded-lg"
-            >
-              {draft?.background === "grid" ? (
-                <Grid2X2 className="size-4" />
-              ) : (
-                <Square className="size-4" />
-              )}
-            </Button>
-            <Button
-              type="button"
-              size="icon-sm"
-              variant="ghost"
+            {/* A wide bar offers the pen as presets, one tap for pen and width; a narrow one
+                folds them into one Pen whose second tap opens the widths. */}
+            {layout.penPresets &&
+              PEN_PRESETS.map((preset) => (
+                <ToolbarButton
+                  key={preset.width}
+                  variant={tool === "pen" && width === preset.width ? "secondary" : "ghost"}
+                  aria-label={`Pen, ${preset.label}`}
+                  aria-pressed={tool === "pen" && width === preset.width}
+                  disabled={toolDisabled}
+                  className={toolHold}
+                  onClick={() => {
+                    setTool("pen");
+                    setWidth(preset.width);
+                    setSelected([]);
+                  }}
+                >
+                  <PenPresetIcon width={preset.width} />
+                </ToolbarButton>
+              ))}
+            {TOOLS.filter(({ id }) => id !== "pen" || !layout.penPresets).map(
+              ({ id, label, Icon }) => (
+                <ToolbarButton
+                  key={id}
+                  variant={tool === id ? "secondary" : "ghost"}
+                  aria-label={tool === id ? `${label} options` : label}
+                  aria-pressed={tool === id}
+                  disabled={toolDisabled}
+                  className={toolHold}
+                  onClick={(event) => selectTool(id, event.currentTarget)}
+                >
+                  <Icon />
+                </ToolbarButton>
+              ),
+            )}
+            <ToolbarSeparator />
+            <ToolbarButton
               aria-label="Undo stroke"
               disabled={editingBusy || !canUndo}
+              className={heldByStroke(idleBusy || !canUndo)}
               onClick={undoStroke}
-              className="shrink-0 rounded-lg"
             >
-              <Undo2 className="size-4" />
-            </Button>
-            <Button
-              type="button"
-              size="icon-sm"
-              variant="ghost"
+              <Undo2 />
+            </ToolbarButton>
+            <ToolbarButton
               aria-label="Redo stroke"
               disabled={editingBusy || !canRedo}
+              className={heldByStroke(idleBusy || !canRedo)}
               onClick={redoStroke}
-              className="shrink-0 rounded-lg"
             >
-              <Redo2 className="size-4" />
-            </Button>
+              <Redo2 />
+            </ToolbarButton>
+            <ToolbarSeparator />
           </>
+        ) : (
+          <p
+            role="status"
+            title={readOnlyNotice}
+            className="line-clamp-2 max-w-[260px] min-w-0 shrink text-right text-xs leading-tight text-muted-foreground"
+          >
+            {readOnlyNotice}
+          </p>
         )}
         <NoteMenu
+          grid={draft?.background === "grid"}
+          gridDisabled={!editing || toolDisabled}
           favorite={favorite}
           busy={busy}
+          onGridChange={(grid) => {
+            if (draft) change({ ...draft, background: grid ? "grid" : "plain" });
+          }}
           onToggleFavorite={() => toggleFavoritePage(uuid)}
           onRename={() => setRenaming(true)}
           onDelete={() => void deleteNote()}
@@ -609,11 +610,15 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
       </div>
       {editing && (
         <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
+          {/* The tool options hang under the tool that opened them. The eraser's options are the
+              slot a stock-like eraser menu takes: anchored under the Eraser button, as wide as
+              stock's (322 CSS px on the Note Air), sized in px so the system font scale cannot
+              narrow it. The pen is paused by the popover while it is open. */}
           <PopoverContent
             anchor={optionsAnchor}
             align="center"
             data-ink-tool-options
-            className="w-auto max-w-[min(22rem,calc(100vw-1.5rem))] p-2"
+            className="w-auto max-w-[min(322px,calc(100vw-24px))] p-2"
           >
             {tool === "pen" && (
               <div className="flex items-center gap-1" role="group" aria-label="Pen width">
@@ -743,55 +748,24 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           </PopoverContent>
         </Popover>
       )}
-      {title.conflict && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs"
-        >
-          <span className="mr-auto">
-            This title changed on another replica. Choose which version to keep.
-          </span>
-          <Button type="button" variant="outline" size="xs" onClick={title.useRemote}>
-            Use remote
-          </Button>
-          <Button type="button" size="xs" onClick={title.keepLocal}>
-            Keep mine
-          </Button>
-        </div>
-      )}
-      {hasConflict(status) && (
-        <div className="flex flex-wrap items-center gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs">
-          <span className="mr-auto">
-            This note has {status?.heads.length} versions from other devices
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={busy || comparing}
-            onClick={() => void compareVersions()}
-          >
-            Compare
-          </Button>
-        </div>
-      )}
-      {!editing && (
-        <p role="status" className="shrink-0 border-b px-3 py-2 text-xs text-muted-foreground">
-          {access === "other_pane"
-            ? "This note is open for writing in another pane. Close it there to edit here."
-            : "Connect a pen or enable mouse drawing in Settings to edit."}
-        </p>
-      )}
+      {/* Nothing but the toolbar sits above or below the viewport, so the sheet only moves when
+          the viewport itself resizes, which is what the pen session observes. The viewport is a
+          size container; the wrapper's width fits the whole 5:7 sheet into it (sheet-fit.ts).
+          The letterbox is white on e-ink, where a light grey dithers into a surface that is not
+          there. `--sheet-zoom` is the hook a later zoom sets. */}
       <div
         data-ink-viewport
-        className="min-h-0 flex-1 overflow-auto overscroll-contain bg-neutral-100 px-2 py-3 sm:px-6"
+        className="min-h-0 flex-1 overflow-auto overscroll-contain bg-neutral-100 p-[6px] [container-type:size] [--sheet-zoom:1] eink:bg-white min-[1000px]:p-[16px]"
       >
         {loadError ? (
           <p role="alert" className="mx-auto max-w-xl p-6 text-red-800">
             Could not open this note. It has not been changed. {loadError}
           </p>
         ) : draft ? (
-          <div className="mx-auto w-full max-w-[900px] border border-neutral-300 bg-white">
+          <div
+            className="mx-auto border border-neutral-300 bg-white eink:border-black"
+            style={{ width: SHEET_WIDTH_CSS }}
+          >
             <InkCanvas
               draft={draft}
               mono={monoInk}
@@ -817,33 +791,6 @@ export function HandwritingNoteView({ paneId, page, onSaved, onDelete }: Props) 
           </p>
         )}
       </div>
-      {(saveState instanceof Error || limit || nativeStatus?.error) && (
-        <footer className="shrink-0 space-y-1 border-t px-4 py-2 text-xs">
-          {saveState instanceof Error && (
-            <div role="alert" className="text-destructive">
-              Could not save your changes. {saveState.message}
-              <button
-                type="button"
-                className="ml-2 underline"
-                onClick={() => {
-                  void getWriter(uuid)?.flush();
-                }}
-              >
-                Retry saving
-              </button>
-            </div>
-          )}
-          {limit && (
-            <p role="status">
-              This sheet is full. Your completed strokes are kept; erase handwriting or undo to make
-              room.
-            </p>
-          )}
-          {nativeStatus?.error && (
-            <p role="alert">Fast pen input is unavailable: {nativeStatus.error}</p>
-          )}
-        </footer>
-      )}
       {renaming && (
         <RenamePageDialog
           page={page}

@@ -15,7 +15,7 @@ import { mayLeavePane, resetPaneLeaveGuards } from "@/features/workspace/pane-le
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 
 const paneId = () => useWorkspaceStore.getState().primaryPaneId as PaneId;
-import type { InkHistorySnapshot, Page } from "@/lib/bindings";
+import type { InkHistorySnapshot, InkVersionInfo, Page } from "@/lib/bindings";
 import { HandwritingNoteView } from "./handwriting-note-view";
 import { getWriter, resetHandwritingSessions } from "./handwriting-session";
 import { useHandwritingPreference } from "./input-capabilities";
@@ -115,7 +115,7 @@ function paneContentKind() {
   return state.panes[state.primaryPaneId]?.content.kind;
 }
 
-async function mount(onDelete: (page: Page) => void = () => {}) {
+async function mount(onDelete: (page: Page) => void = () => {}, onBack?: () => void) {
   const paneId = useWorkspaceStore.getState().primaryPaneId;
   useWorkspaceStore.getState().dispatch({
     type: "open_target",
@@ -131,6 +131,7 @@ async function mount(onDelete: (page: Page) => void = () => {}) {
             page={page}
             onSaved={() => {}}
             onDelete={onDelete}
+            onBack={onBack}
           />
         </PageSessionProvider>
       </QueryClientProvider>,
@@ -139,12 +140,67 @@ async function mount(onDelete: (page: Page) => void = () => {}) {
 }
 
 /** Menus and popovers are portalled out of the pane, so they are looked up in the document. */
-function menuItem(label: string) {
-  const found = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+function menuItem(label: string, role = "menuitem") {
+  const found = [...document.querySelectorAll<HTMLElement>(`[role="${role}"]`)].find(
     (element) => element.textContent?.trim() === label,
   );
   if (!found) throw new Error(`no menu item labelled ${label}`);
   return found;
+}
+
+/** The grid is a checkbox in the note menu, not a toggle in the toolbar. */
+async function toggleNoteMenu() {
+  await act(async () => {
+    button("Note options").click();
+  });
+}
+
+function gridItem() {
+  return menuItem("Grid paper", "menuitemcheckbox");
+}
+
+async function toggleGrid() {
+  await toggleNoteMenu();
+  await act(async () => {
+    gridItem().click();
+  });
+}
+
+/** Save errors, conflicts and the sheet limit live behind one status chip in the toolbar. */
+function statusChip() {
+  return container.querySelector<HTMLElement>("[data-ink-status]");
+}
+
+async function openStatus() {
+  const chip = statusChip();
+  if (!chip) throw new Error("no status chip");
+  await act(async () => {
+    chip.click();
+  });
+}
+
+function statusDetails() {
+  return document.querySelector<HTMLElement>("[data-ink-status-details]");
+}
+
+function statusAction(label: string) {
+  const found = [
+    ...document.querySelectorAll<HTMLElement>("[data-ink-status-details] button"),
+  ].find((element) => element.textContent?.trim() === label);
+  if (!found) throw new Error(`no status action labelled ${label}`);
+  return found;
+}
+
+function head(versionUuid: string): InkVersionInfo {
+  return {
+    versionUuid,
+    parents: [],
+    rootHash: `hash-${versionUuid}`,
+    deviceName: "Tablet",
+    deviceId: `device-${versionUuid}`,
+    modifiedAtMs: 0,
+    available: true,
+  };
 }
 
 function options(label: string) {
@@ -220,9 +276,7 @@ it("stays on the note when the flush before Back fails", async () => {
   api.saveHandwritingPatch.mockRejectedValue(new Error("disk full"));
   await mount();
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
+  await toggleGrid();
   let allowed = true;
   await act(async () => {
     allowed = await mayLeavePane(paneId());
@@ -231,7 +285,9 @@ it("stays on the note when the flush before Back fails", async () => {
   expect(allowed).toBe(false);
   expect(paneContentKind()).toBe(PaneContentKind.Page);
   expect(api.completeHandwritingNote).not.toHaveBeenCalled();
-  expect(container.textContent).toContain("Could not save your changes");
+  expect(statusChip()?.textContent).toContain("Not saved");
+  await openStatus();
+  expect(statusDetails()?.textContent).toContain("Could not save your changes");
 });
 
 it("leaves after a successful flush and offers a retry when completion fails", async () => {
@@ -239,9 +295,7 @@ it("leaves after a successful flush and offers a retry when completion fails", a
   api.completeHandwritingNote.mockRejectedValue(new Error("outbox unavailable"));
   await mount();
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
+  await toggleGrid();
   let allowed = false;
   await act(async () => {
     allowed = await mayLeavePane(paneId());
@@ -290,10 +344,9 @@ it("retries the gestures an earlier mount could not store before reading again",
   api.saveHandwritingPatch.mockRejectedValue(new Error("disk full"));
   await mount();
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
-  expect(container.textContent).toContain("Could not save your changes");
+  await toggleGrid();
+  await openStatus();
+  expect(statusDetails()?.textContent).toContain("Could not save your changes");
 
   await act(async () => root.unmount());
   root = createRoot(container);
@@ -303,13 +356,16 @@ it("retries the gestures an earlier mount could not store before reading again",
   await mount();
 
   // The unsaved gesture is on the canvas again and no snapshot replaced it.
-  expect(button("Grid paper").getAttribute("aria-pressed")).toBe("true");
+  await toggleNoteMenu();
+  expect(gridItem().getAttribute("aria-checked")).toBe("true");
+  await toggleNoteMenu();
   expect(api.loadHandwritingNote).not.toHaveBeenCalled();
-  expect(container.textContent).toContain("Could not save your changes");
+  await openStatus();
+  expect(statusDetails()?.textContent).toContain("Could not save your changes");
 
   api.saveHandwritingPatch.mockResolvedValue("revision-2");
   await act(async () => {
-    button("Retry saving").click();
+    statusAction("Retry saving").click();
   });
 
   expect(api.saveHandwritingPatch).toHaveBeenLastCalledWith(
@@ -329,12 +385,8 @@ it("stores queued gestures before deleting and never asks to retry sync", async 
   const deleted = vi.fn();
   await mount(deleted);
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
-  await act(async () => {
-    button("Note options").click();
-  });
+  await toggleGrid();
+  await toggleNoteMenu();
   await act(async () => {
     menuItem("Delete note").click();
   });
@@ -363,9 +415,7 @@ it("re-reads the note for editing once a pen or the mouse preference appears", a
   // A read-only open holds no session, so the note has to be read again before
   // anything drawn on it can be stored.
   expect(api.loadHandwritingNote).toHaveBeenLastCalledWith(page.uuid, true);
-  await act(async () => {
-    button("Grid paper").click();
-  });
+  await toggleGrid();
   expect(api.saveHandwritingPatch).toHaveBeenCalledWith(
     page.uuid,
     expect.objectContaining({ background: "grid" }),
@@ -380,9 +430,7 @@ it("closes the session of a note that was deleted while gestures were queued", a
   );
   await mount();
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
+  await toggleGrid();
   expect(getWriter(page.uuid)).not.toBeNull();
 
   await act(async () => root.unmount());
@@ -433,9 +481,7 @@ it("leaves undo to the rename field while the caret is in it", async () => {
   });
   await mount();
 
-  await act(async () => {
-    button("Grid paper").click();
-  });
+  await toggleGrid();
 
   await act(async () => {
     button("Rename note").click();
@@ -476,4 +522,189 @@ it("keeps one toolbar row and moves the tool options into a popover", async () =
   });
   expect(options.bind(null, "Pixel eraser")).toThrow();
   expect(container.querySelectorAll('[role="toolbar"]')).toHaveLength(1);
+});
+
+it("offers Back in the toolbar only when the note has the screen", async () => {
+  await mount();
+  expect(button.bind(null, "Go back")).toThrow();
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  const back = vi.fn();
+  await mount(undefined, back);
+
+  await act(async () => {
+    button("Go back").click();
+  });
+  expect(back).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the grid in the note menu, where it is not a second selected tool", async () => {
+  api.saveHandwritingPatch.mockResolvedValue("revision-2");
+  await mount();
+
+  expect(button.bind(null, "Grid paper")).toThrow();
+  await toggleNoteMenu();
+  expect(gridItem().getAttribute("aria-checked")).toBe("false");
+  await act(async () => {
+    gridItem().click();
+  });
+
+  expect(api.saveHandwritingPatch).toHaveBeenCalledWith(
+    page.uuid,
+    expect.objectContaining({ background: "grid" }),
+    "revision-1",
+  );
+  // Only the tool in use is pressed in the bar.
+  const pressed = container.querySelectorAll('[role="toolbar"] button[aria-pressed="true"]');
+  expect([...pressed].map((element) => element.getAttribute("aria-label"))).toEqual([
+    "Pen, medium",
+  ]);
+});
+
+it("shows the most urgent status on the chip and every status behind it", async () => {
+  api.saveHandwritingPatch.mockRejectedValue(new Error("disk full"));
+  api.handwritingNoteStatus.mockResolvedValue({
+    pageUuid: page.uuid,
+    revision: "revision-1",
+    unpublishedChanges: true,
+    publicationRequested: false,
+    baseVersion: null,
+    heads: [head("a"), head("b")],
+  });
+  await mount();
+
+  expect(statusChip()?.textContent).toBe("2 versions");
+  expect(container.textContent).not.toContain("Unsent");
+
+  await toggleGrid();
+
+  // A failing save outranks the conflict; the chip counts what else is waiting.
+  expect(statusChip()?.textContent).toBe("Not saved+1");
+  await openStatus();
+  const details = statusDetails()?.textContent ?? "";
+  expect(details).toContain("Could not save your changes. disk full");
+  expect(details).toContain("This note has 2 versions from other devices");
+  expect(details.indexOf("Could not save")).toBeLessThan(details.indexOf("versions"));
+  // Nothing about the note is a row above or below the sheet any more.
+  expect(container.querySelector("footer")).toBeNull();
+});
+
+it("says Unsent on its own when there is nothing else to report", async () => {
+  api.handwritingNoteStatus.mockResolvedValue({
+    pageUuid: page.uuid,
+    revision: "revision-1",
+    unpublishedChanges: true,
+    publicationRequested: false,
+    baseVersion: null,
+    heads: [],
+  });
+  await mount();
+
+  expect(statusChip()).toBeNull();
+  expect(container.querySelector('[role="toolbar"]')?.textContent).toContain("Unsent");
+});
+
+it("picks the pen and its width with one tap on a preset", async () => {
+  await mount();
+  const pressed = (label: string) => button(label).getAttribute("aria-pressed");
+
+  expect(pressed("Pen, medium")).toBe("true");
+  await act(async () => {
+    button("Eraser").click();
+  });
+  expect(pressed("Pen, medium")).toBe("false");
+
+  await act(async () => {
+    button("Pen, bold").click();
+  });
+  expect(pressed("Pen, bold")).toBe("true");
+  expect(pressed("Eraser")).toBe("false");
+  expect(pressed("Pen, medium")).toBe("false");
+  // A preset is the whole choice; there are no pen options to open.
+  await act(async () => {
+    button("Pen, bold").click();
+  });
+  expect(document.querySelector("[data-ink-tool-options]")).toBeNull();
+});
+
+it("folds the presets into one pen with a width popover on a narrow bar", async () => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 420,
+    height: 44,
+  } as DOMRect);
+  await mount();
+
+  expect(button.bind(null, "Pen, fine")).toThrow();
+  await act(async () => {
+    button("Pen options").click();
+  });
+  await act(async () => {
+    options("Pen width 5").click();
+  });
+  expect(options.bind(null, "Pen width 5")).toThrow();
+
+  await act(async () => {
+    button("Pen options").click();
+  });
+  expect(options("Pen width 5").getAttribute("aria-pressed")).toBe("true");
+});
+
+it("holds the tools during a stroke without dimming them", async () => {
+  await mount();
+  const canvas = container.querySelector("canvas");
+  if (!canvas) throw new Error("no canvas");
+  canvas.setPointerCapture = vi.fn();
+  canvas.releasePointerCapture = vi.fn();
+  canvas.hasPointerCapture = () => true;
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+    left: 0,
+    top: 0,
+    right: 500,
+    bottom: 700,
+    width: 500,
+    height: 700,
+  } as DOMRect);
+  const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+  Object.assign(down, {
+    pointerId: 1,
+    pointerType: "pen",
+    clientX: 20,
+    clientY: 30,
+    pressure: 0.5,
+    buttons: 1,
+    button: 0,
+  });
+  await act(async () => {
+    canvas.dispatchEvent(down);
+  });
+
+  // Nothing may switch under the gesture, but a bar that dimmed on every stroke would repaint
+  // twice per stroke on e-ink.
+  const eraser = button("Eraser");
+  expect(eraser.disabled).toBe(true);
+  expect(eraser.className).toContain("disabled:opacity-100");
+  // Undo was already off before the stroke and keeps its dimmed look.
+  const undo = button("Undo stroke");
+  expect(undo.disabled).toBe(true);
+  expect(undo.className).not.toContain("disabled:opacity-100");
+});
+
+it("names an icon-only status chip in words", async () => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 360,
+    height: 44,
+  } as DOMRect);
+  api.handwritingNoteStatus.mockResolvedValue({
+    pageUuid: page.uuid,
+    revision: "revision-1",
+    unpublishedChanges: false,
+    publicationRequested: false,
+    baseVersion: null,
+    heads: [head("a"), head("b")],
+  });
+  await mount();
+
+  expect(statusChip()?.textContent).toBe("");
+  expect(statusChip()?.getAttribute("aria-label")).toBe("2 versions");
 });

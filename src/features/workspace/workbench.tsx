@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Columns2, X } from "lucide-react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
@@ -38,7 +38,29 @@ type WorkbenchProps = {
     blockUuid: string | null;
     autoFocusTitle: boolean;
   } | null;
+  /**
+   * The pane whose handwritten note has the whole screen (sheet mode), or null. Its pane bar and
+   * the pane tabs step aside; the note's own toolbar carries Back instead.
+   */
+  sheetPaneId?: PaneId | null;
 };
+
+/**
+ * Back for a pane in compact layout: the pane's own history first, then the dashboard. Asks the
+ * pane's leave guard before anything moves, so a handwritten note can finish writing first.
+ */
+export function usePaneBack(paneId: PaneId) {
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const backToHome = useCompactBackToHome();
+  return useCallback(() => {
+    void mayLeavePane(paneId).then((allowed) => {
+      if (!allowed) return;
+      const pane = useWorkspaceStore.getState().panes[paneId];
+      if (pane && pane.back.length > 0) dispatch({ type: "go_back", paneId });
+      else backToHome?.();
+    });
+  }, [backToHome, dispatch, paneId]);
+}
 
 export function Workbench(props: WorkbenchProps) {
   const compact = useCompactLayout();
@@ -52,7 +74,7 @@ export function Workbench(props: WorkbenchProps) {
   const paneIds = leafPaneIds(tree);
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {compact && paneIds.length > 1 && (
+      {compact && paneIds.length > 1 && !props.sheetPaneId && (
         <div
           role="tablist"
           aria-label="Open workspace panes"
@@ -196,7 +218,10 @@ function PaneFrame({
   const compactVisible = useWorkspaceStore((state) => state.compactVisiblePaneId === paneId);
   const dispatch = useWorkspaceStore((state) => state.dispatch);
   const backToHome = useCompactBackToHome();
+  const goBack = usePaneBack(paneId);
   if (!pane) return null;
+  // The sheet has the screen: no pane bar, and no active ring painting over its letterbox.
+  const sheet = compact && props.sheetPaneId === paneId;
 
   return (
     <section
@@ -207,14 +232,14 @@ function PaneFrame({
       data-active={active || undefined}
       className={cn(
         "flex h-full min-h-0 flex-col bg-canvas transition-shadow",
-        active && "ring-1 ring-inset ring-primary/15",
+        active && !sheet && "ring-1 ring-inset ring-primary/15",
         compact && !compactVisible && "pointer-events-none invisible",
       )}
       onPointerDown={() => {
         if (!active) dispatch({ type: "focus_pane", paneId });
       }}
     >
-      {(!compact || pane.content.kind !== PaneContentKind.Home) && (
+      {!sheet && (!compact || pane.content.kind !== PaneContentKind.Home) && (
         <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 surface-card px-2">
           {compact && backToHome ? (
             <Button
@@ -222,13 +247,7 @@ function PaneFrame({
               variant="ghost"
               size="xs"
               aria-label="Go back"
-              onClick={() => {
-                void mayLeavePane(paneId).then((allowed) => {
-                  if (!allowed) return;
-                  if (pane.back.length > 0) dispatch({ type: "go_back", paneId });
-                  else backToHome();
-                });
-              }}
+              onClick={goBack}
               className="gap-1 rounded-lg px-1.5"
             >
               <ArrowLeft className="size-3.5" />
@@ -338,6 +357,8 @@ function PagePane({
   const controller = useWorkspaceController();
   const active = useWorkspaceStore((state) => state.activePaneId === paneId);
   const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const goBack = usePaneBack(paneId);
+  const sheetBack = props.sheetPaneId === paneId ? goBack : undefined;
   const pageQuery = useQuery({
     queryKey: queryKeys.page(content.pageUuid),
     queryFn: () => getPage(content.pageUuid),
@@ -354,10 +375,10 @@ function PagePane({
     return <PaneLoading />;
   }
   if (pageQuery.error) {
-    return <PaneError message={String(pageQuery.error)} />;
+    return <PaneError message={String(pageQuery.error)} onBack={sheetBack} />;
   }
   if (!page) {
-    return <PaneError message="This page no longer exists." />;
+    return <PaneError message="This page no longer exists." onBack={sheetBack} />;
   }
 
   if (page.kind.kind === "handwriting") {
@@ -368,6 +389,7 @@ function PagePane({
         page={page}
         onSaved={controller.onSaved}
         onDelete={controller.onDelete}
+        onBack={sheetBack}
       />
     );
   }
@@ -430,10 +452,20 @@ function PaneLoading() {
   );
 }
 
-function PaneError({ message }: { message: string }) {
+/**
+ * `onBack` is for the sheet pane: sheet mode hides the pane bar with its Back, and a failed
+ * refetch of a note that App still sees as handwritten would otherwise leave no way out.
+ */
+function PaneError({ message, onBack }: { message: string; onBack?: () => void }) {
   return (
-    <div className="flex h-full min-h-64 items-center justify-center p-6 text-sm text-destructive">
+    <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-sm text-destructive">
       {message}
+      {onBack && (
+        <Button type="button" variant="outline" size="sm" onClick={onBack} className="gap-1">
+          <ArrowLeft className="size-3.5" />
+          Back
+        </Button>
+      )}
     </div>
   );
 }

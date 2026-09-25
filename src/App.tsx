@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, GitFork, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
+import { isAndroid, sheetModeActive, useSheetMode, useSheetSystemBars } from "@/app/sheet-mode";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { WindowControls } from "@/app/window-controls";
 import { useWindowCorners } from "@/app/use-window-corners";
@@ -77,6 +78,20 @@ function App() {
   const handwritingActive =
     activePane.content.kind === PaneContentKind.Page &&
     workspace.activePage?.kind.kind === "handwriting";
+
+  // A handwritten note on a compact Android screen gets the whole screen, bars included.
+  const sheetMode = sheetModeActive({
+    compact,
+    android: isAndroid(),
+    handwriting: handwritingActive,
+    workspace: ready && !settingsOpen,
+  });
+  useSheetSystemBars(sheetMode);
+  useEffect(() => {
+    useSheetMode.setState({ sheet: sheetMode });
+    // The error boundary replaces this whole tree; its screen must not keep sheet-mode toasts.
+    return () => useSheetMode.setState({ sheet: false });
+  }, [sheetMode]);
 
   useAppShortcuts({
     enabled: ready,
@@ -172,6 +187,7 @@ function App() {
           });
         }}
         onOpenHome={workspace.closePage}
+        sheet={sheetMode}
         headerActions={
           <>
             {syncQuery.data && syncQuery.data.state !== "disabled" && (
@@ -322,6 +338,7 @@ function App() {
             creatingNote={workspace.creatingNote}
             journalBusy={workspace.journalBusy}
             newNote={workspace.newNote}
+            sheetPaneId={sheetMode ? activePane.id : null}
           />
         }
         assistant={

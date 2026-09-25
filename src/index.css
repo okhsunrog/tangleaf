@@ -1203,6 +1203,7 @@ html::before {
 [data-display="eink"] [role="tab"][aria-selected="true"],
 [data-display="eink"] [role="option"][data-highlighted],
 [data-display="eink"] [role="menuitem"][data-highlighted],
+[data-display="eink"] [role="menuitemcheckbox"][data-highlighted],
 [data-display="eink"] button[aria-current="page"],
 [data-display="eink"] a[aria-current="page"] {
   border-color: oklch(0 0 0);
@@ -1244,4 +1245,23 @@ html::before {
 [data-ink-tool-options] button[aria-pressed="false"] {
   background: transparent;
   color: inherit;
+}
+
+/* The note's status chip changes only its own box in the toolbar. On e-ink it carries no tint:
+   an alert (a failing save, a title conflict) inverts, anything else is outlined in black. */
+[data-ink-status] {
+  transition: none;
+}
+[data-display="eink"] [data-ink-status] {
+  border-color: oklch(0 0 0);
+  background: oklch(1 0 0);
+  color: oklch(0 0 0);
+  box-shadow: none;
+}
+[data-display="eink"] [data-ink-status][data-alert] {
+  background: oklch(0 0 0);
+  color: oklch(1 0 0);
+}
+[data-display="eink"] [data-ink-toolbar-separator] {
+  background: oklch(0 0 0);
 }

@@ -8,7 +8,7 @@ use crate::{
     Result,
     models::{
         DeviceNameResponse, DisplayInfo, DisplayInfoResponse, DisplayProfileArgs,
-        DisplayProfileOutcome, SafeAreaInsets, SystemBarsStyleArgs,
+        DisplayProfileOutcome, ImmersiveModeArgs, SafeAreaInsets, SystemBarsStyleArgs,
     },
 };
 
@@ -65,6 +65,14 @@ impl<R: Runtime> MobileSystem<R> {
                 "setSystemBarsStyle",
                 SystemBarsStyleArgs { dark_background },
             )
+            .map_err(Into::into)
+    }
+
+    /// Hides or shows the status and navigation bars. The plugin remembers the request and
+    /// applies it again when the activity resumes, so another app cannot leave the bars behind.
+    pub fn set_immersive_mode(&self, enabled: bool) -> Result<()> {
+        self.0
+            .run_mobile_plugin("setImmersiveMode", ImmersiveModeArgs { enabled })
             .map_err(Into::into)
     }
 }

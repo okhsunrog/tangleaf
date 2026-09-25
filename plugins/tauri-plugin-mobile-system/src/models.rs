@@ -99,3 +99,10 @@ impl From<DisplayInfoResponse> for DisplayInfo {
 pub(crate) struct SystemBarsStyleArgs {
     pub dark_background: bool,
 }
+
+#[cfg(mobile)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImmersiveModeArgs {
+    pub enabled: bool,
+}

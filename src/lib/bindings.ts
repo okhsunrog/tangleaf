@@ -29,6 +29,11 @@ export const commands = {
 	saveHandwritingPatch: (pageUuid: string, patch: InkDraftPatch, expectedRevision: string | null) => typedError<string, CommandError>(__TAURI_INVOKE("save_handwriting_patch", { pageUuid, patch, expectedRevision })),
 	completeHandwritingNote: (pageUuid: string) => typedError<InkNoteStatus, CommandError>(__TAURI_INVOKE("complete_handwriting_note", { pageUuid })),
 	setSystemBarsStyle: (darkBackground: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_system_bars_style", { darkBackground })),
+	/**
+	 *  Hides the system bars while a handwritten note has the screen, and shows them again after.
+	 *  Only Android has bars to hide; elsewhere the request succeeds without doing anything.
+	 */
+	setImmersiveMode: (enabled: boolean) => typedError<null, CommandError>(__TAURI_INVOKE("set_immersive_mode", { enabled })),
 	setDisplayProfile: (eink: boolean) => typedError<DisplayProfileResult, CommandError>(__TAURI_INVOKE("set_display_profile", { eink })),
 	/**
 	 *  Repaints the whole panel once. Partial e-ink update modes leave the previous image behind, and

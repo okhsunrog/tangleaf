@@ -9,9 +9,11 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.util.Log
 import android.webkit.WebView
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.pen.EpdPenManager
 import com.onyx.android.sdk.api.device.epd.UpdateMode
@@ -28,6 +30,11 @@ import app.tauri.plugin.Plugin
 @InvokeArg
 class SystemBarsStyleArgs {
     var darkBackground: Boolean = false
+}
+
+@InvokeArg
+class ImmersiveModeArgs {
+    var enabled: Boolean = false
 }
 
 @InvokeArg
@@ -72,9 +79,13 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
         clearStaleInkState(webView)
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
         // One insets listener per view: the keyboard pauses the pen and switches the panel to
-        // a text-friendly update mode, whether or not an ink session exists at the time.
+        // a text-friendly update mode, whether or not an ink session exists at the time. The
+        // same listener tells the page when the safe area moved: hiding a system bar inside an
+        // edge-to-edge window changes only the insets, and the page sees no resize for it.
         ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
             imeChanged(webView, insets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0)
+            val area = safeAreaOf(insets)
+            if (safeAreaChanges.offer(area)) trigger("safeAreaChanged", area.toJson())
             insets
         }
         ViewCompat.requestApplyInsets(webView)
@@ -96,6 +107,12 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
     }
 
     private var imeVisible = false
+    private val safeAreaChanges = SafeAreaChanges()
+    /**
+     * Whether the page asked for the system bars to be hidden. Kept here because the system shows
+     * them again whenever another app has been in front; [onResume] hides them once more.
+     */
+    private var immersiveWanted = false
     private val fullRefresh = Runnable {
         inkWebView?.let { view ->
             runCatching { EpdController.invalidate(view, UpdateMode.GC) }
@@ -131,6 +148,10 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onResume() {
+        if (immersiveWanted) {
+            runCatching { applySystemBars() }
+                .onFailure { Log.w("OnyxInk", "system bars on resume: ${it.message}") }
+        }
         onyxInk?.onResume()
         inputDevicesChanged()
     }
@@ -387,39 +408,59 @@ class MobileSystemPlugin(private val activity: Activity) : Plugin(activity), Inp
             // A detached decor view never runs its posted work, so the caller
             // would wait forever instead of laying out with no insets.
             if (!decorView.isAttachedToWindow) {
-                val zero = JSObject()
-                for (edge in listOf("top", "right", "bottom", "left")) zero.put(edge, 0.0)
-                invoke.resolve(zero)
+                invoke.resolve(SafeArea.NONE.toJson())
                 return@runOnUiThread
             }
             ViewCompat.requestApplyInsets(decorView)
             decorView.post {
-                val density = activity.resources.displayMetrics.density
                 val rootInsets = ViewCompat.getRootWindowInsets(decorView)
-                val statusBars = rootInsets?.getInsets(WindowInsetsCompat.Type.statusBars())
-                val navigationBars =
-                    rootInsets?.getInsets(WindowInsetsCompat.Type.navigationBars())
-                val cutout = rootInsets?.getInsets(WindowInsetsCompat.Type.displayCutout())
-
-                val result = JSObject()
-                result.put(
-                    "top",
-                    (maxOf(statusBars?.top ?: 0, cutout?.top ?: 0) / density).toDouble(),
-                )
-                result.put(
-                    "right",
-                    (maxOf(navigationBars?.right ?: 0, cutout?.right ?: 0) / density).toDouble(),
-                )
-                result.put(
-                    "bottom",
-                    (maxOf(navigationBars?.bottom ?: 0, cutout?.bottom ?: 0) / density).toDouble(),
-                )
-                result.put(
-                    "left",
-                    (maxOf(navigationBars?.left ?: 0, cutout?.left ?: 0) / density).toDouble(),
-                )
-                invoke.resolve(result)
+                invoke.resolve((rootInsets?.let { safeAreaOf(it) } ?: SafeArea.NONE).toJson())
             }
+        }
+    }
+
+    private fun safeAreaOf(insets: WindowInsetsCompat): SafeArea =
+        SafeArea.of(
+            statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars()).edges(),
+            navigationBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).edges(),
+            cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).edges(),
+            density = activity.resources.displayMetrics.density,
+        )
+
+    private fun Insets.edges() = InsetEdges(top = top, right = right, bottom = bottom, left = left)
+
+    private fun SafeArea.toJson(): JSObject =
+        JSObject().put("top", top).put("right", right).put("bottom", bottom).put("left", left)
+
+    /**
+     * Hides or shows the status and navigation bars, as the stock notes app does for its whole
+     * editor. The activity is edge-to-edge, so the WebView keeps its size and position and only
+     * the insets change; the page hears about them through `safeAreaChanged`. A swipe from an
+     * edge shows the bars for a moment over the page without changing the insets.
+     */
+    @Command
+    fun setImmersiveMode(invoke: Invoke) {
+        val args = invoke.parseArgs(ImmersiveModeArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                immersiveWanted = args.enabled
+                applySystemBars()
+                invoke.resolve()
+            } catch (error: Throwable) {
+                invoke.reject("Could not change the system bars: ${error.message}")
+            }
+        }
+    }
+
+    private fun applySystemBars() {
+        val window = activity.window
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (immersiveWanted) {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
