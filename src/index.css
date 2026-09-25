@@ -1234,6 +1234,13 @@ html::before {
 [data-ink-tool-options] button {
   transition: none;
 }
+/* The icon inherits its colour from the button, and the e-ink profile's blanket transition would
+   let it follow one frame late: for that frame the newly pressed button is black on black and the
+   released one white on white, and the panel shows the gap for half a second. */
+[data-ink-editor] [role="toolbar"] button *,
+[data-ink-tool-options] button * {
+  transition-property: none !important;
+}
 [data-ink-editor] [role="toolbar"] button[aria-pressed="true"],
 [data-ink-tool-options] button[aria-pressed="true"] {
   background: #111;
