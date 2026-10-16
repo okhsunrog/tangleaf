@@ -134,8 +134,15 @@ TLS and public routing belong to the existing reverse proxy; the notes server bi
 
 ### Connecting an assistant over MCP
 
-The server serves MCP at `POST /mcp`, behind the same bearer token as the sync API. Two settings
-matter for a public deployment:
+The notes MCP endpoint runs in `notes-server` at `/mcp`, using Streamable HTTP. It accesses the
+authenticated user's server workspace; changes sync to connected devices. The desktop or Android
+app does not need to stay open, but local changes must sync before an assistant can read them.
+This endpoint works independently of the debug-only Tauri MCP bridge on port `9223`, which inspects
+the app UI and is absent from release builds.
+
+#### Server configuration
+
+Two settings matter for a public deployment:
 
 ```toml
 public_url = "https://notes.example.com"
@@ -147,27 +154,102 @@ rebinding; without it only loopback is accepted. `public_url` is the canonical o
 the OAuth endpoints. A workspace reachable under several names describes each of them in its
 discovery documents, so any listed name can be connected to; the canonical one stays the issuer.
 
-A client that can send a header carries the server token directly:
+The reverse proxy must forward `/mcp`, `/oauth/`, and `/.well-known/` to `notes-server`, preserving
+the `Host` header and allowing streaming responses without buffering. The sibling `cloud-forge`
+project configures this in its `notes_server` and `nginx` roles.
+
+#### Connect Codex with OAuth
+
+Add the server, replacing the example hostname with your deployment's hostname:
+
+```sh
+codex mcp add tangleaf --url https://notes.example.com/mcp
+```
+
+Codex detects OAuth and opens the authorization page. Enter the same **Server token** used for
+sync in Tangleaf Settings, then approve access. The tested setup completed sign-in from this
+command alone; a separate `login` command was unnecessary.
+
+For the `cloud-forge` deployment, the token is stored as `vault_notes_server_token` in encrypted
+`group_vars/all/vault.yml`. View it locally from that checkout:
+
+```sh
+ansible-vault view group_vars/all/vault.yml
+```
+
+Use the token on the authorization page; do not paste it into the assistant conversation. In other
+deployments, use the original token provisioned for the user in `[[users]]`. A `token_sha256` value
+is a digest for server-side verification, not a credential to enter at sign-in.
+
+If authorization was skipped or needs to be repeated:
+
+```sh
+codex mcp login tangleaf --scopes mcp,offline_access --oauth-client-registration dcr
+```
+
+OAuth issues client-specific access and rotating refresh tokens. The `mcp` scope grants both
+reading and writing within the authenticated user's workspace; there is no separate read-only
+scope.
+
+Use `/mcp` in Codex to check that `tangleaf` is connected, then ask the assistant to call
+`list_pages` with `limit: 3`. A successful list confirms authenticated tool access without changing
+notes. `codex mcp get tangleaf` checks the saved configuration, not whether a tool call succeeds.
+If the server is missing from the current session's tools, restart the client and check again.
+
+#### Other clients and bearer tokens
+
+For a client with a connector dialog, enter `https://notes.example.com/mcp`, enable OAuth sign-in,
+and leave optional client ID and secret fields empty. The server supports dynamic client
+registration; the consent page asks for the same server token.
+
+A client that can send an authorization header can also carry the server token directly:
 
 ```sh
 claude mcp add --transport http tangleaf https://notes.example.com/mcp \
   --header "Authorization: Bearer $TANGLEAF_TOKEN"
 ```
 
-Codex takes the same shape in `~/.codex/config.toml` under `[mcp_servers.tangleaf]`, with `url`
-and `bearer_token_env_var`.
+For Codex, the bearer-token alternative reads a named environment variable:
 
-A client that cannot — the Claude apps, whose connector dialog has a URL and an OAuth toggle and
-nowhere to paste a credential — goes through the authorization endpoints instead. Add the connector
-by URL with sign-in enabled and leave the client fields empty: it registers itself, and the consent
-screen asks for the same server token. Tokens are issued to that client alone, expire, and refresh
-without asking again.
+```sh
+codex mcp add tangleaf --url https://notes.example.com/mcp \
+  --bearer-token-env-var TANGLEAF_TOKEN
+```
+
+`TANGLEAF_TOKEN` must be present in the environment of the Codex process. Choose either OAuth or
+the bearer-token configuration for this server. See the
+[Codex MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) for client options.
+
+#### Available tools
+
+| Purpose             | Tools                                                                 |
+| ------------------- | --------------------------------------------------------------------- |
+| List and read notes | `list_pages`, `get_content`, `read_subtree`, `read_ancestors`         |
+| Search exact words  | `search_fulltext`                                                     |
+| Search by meaning   | `search` (requires a configured server AI provider and a built index) |
+| Explore links       | `find_backlinks`, `neighbors`                                         |
+| Create and append   | `create_note`, `append_to_journal`, `append_block`                    |
+| Edit existing text  | `set_block_content`, `rename_page`                                    |
+
+For example, ask the assistant to find notes about a topic, read a matching page and its blocks,
+or append a thought to today's journal. `create_note` reuses an existing page with the same title
+and appends the supplied Markdown. `append_to_journal` defaults to today in the server's timezone.
 
 Editing tools are guarded by revisions. Every page and block carries the revision of its editable
 field, and a write hands it back; an edit built on text that changed in the meantime is refused
 rather than applied, so an assistant working from what it read a minute ago cannot overwrite what
 was typed on another device since. See
 [Sync, storage, and AI](docs/architecture/sync-storage-ai.md) for the invariants behind that.
+
+#### Troubleshooting
+
+- `401` without credentials is expected. The response should include a `WWW-Authenticate` header
+  pointing to OAuth resource metadata. If sign-in fails, check the server token and repeat login.
+- If the transport rejects the hostname, add the exact public hostname to `mcp_allowed_hosts`.
+- If OAuth discovery fails, check `public_url` and proxy routing for `/.well-known/` and `/oauth/`.
+- If semantic search is unavailable, use `search_fulltext`; semantic search needs the server's AI
+  configuration and index.
+- If a recent local edit is missing, check sync in the app. MCP reads the server replica.
 
 ## Remaining work
 
