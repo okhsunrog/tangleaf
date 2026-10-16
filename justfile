@@ -45,9 +45,9 @@ package-server: build-server
     echo "Created {{ server_archive }}"
     tar -tzf {{ server_archive }}
 
-# Build, package and deploy the server and its complete public edge configuration.
+# Deploy the home backend and its Moscow reverse proxy from the home LAN.
 deploy-server: package-server
-    cd ../../cloud-forge && ansible-playbook site-moscow.yml --tags notes-server,haproxy,nginx,certbot,network
+    cd ../../cloud-forge && ansible-playbook site-notes.yml
 
 clean-server:
     rm -rf {{ server_release_dir }} {{ server_archive }}

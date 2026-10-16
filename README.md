@@ -132,6 +132,12 @@ just deploy-server
 
 TLS and public routing belong to the existing reverse proxy; the notes server binds privately and ships as one static binary plus its bootstrap TOML.
 
+In the `cloud-forge` deployment, the backend and persistent state run on the encrypted home server
+`mira`. Moscow keeps TLS termination and proxies both public notes domains over WireGuard to
+`10.66.66.2:8787`. Run `just deploy-server` from the home LAN; it uses `site-notes.yml` to update the
+home backend and the notes proxy. The complete migration and recovery procedure is documented in
+`cloud-forge/docs/NOTES.md`. The former Moscow backend stays disabled.
+
 ### Connecting an assistant over MCP
 
 The notes MCP endpoint runs in `notes-server` at `/mcp`, using Streamable HTTP. It accesses the
