@@ -24,7 +24,7 @@ export function PageConnectionMap({
     const element = viewport.current;
     if (!element) return;
     element.scrollTop = centerY * zoom - element.clientHeight / 2;
-    element.scrollLeft = 420 * zoom - element.clientWidth / 2;
+    element.scrollLeft = 330 * zoom - element.clientWidth / 2;
   }, [selected.uuid, centerY, zoom]);
   const rows = (items: GraphItem[], x: number) =>
     items.map((item, index) => ({
@@ -33,8 +33,8 @@ export function PageConnectionMap({
       y: (height - items.length * 86) / 2 + index * 86 + 10,
     }));
   const sources = rows(incoming, 20);
-  const targets = rows(outgoing, 590);
-  const center = { item: selected, x: 305, y: centerY - 32 };
+  const targets = rows(outgoing, 460);
+  const center = { item: selected, x: 240, y: centerY - 32 };
   return (
     <section aria-label="Connection map" className="rounded-xl border border-border bg-card">
       <div className="flex items-center gap-1 border-b border-border px-3 py-2">
@@ -69,9 +69,9 @@ export function PageConnectionMap({
         aria-label="Scrollable page connection map"
       >
         <svg
-          width={840 * zoom}
+          width={660 * zoom}
           height={height * zoom}
-          viewBox={`0 0 840 ${height}`}
+          viewBox={`0 0 660 ${height}`}
           role="group"
           aria-label={`Connections for ${selected.label}`}
         >
@@ -91,13 +91,13 @@ export function PageConnectionMap({
           <text x="20" y="25" className="fill-muted-foreground text-xs">
             Links from · {incoming.length}
           </text>
-          <text x="590" y="25" className="fill-muted-foreground text-xs">
+          <text x="460" y="25" className="fill-muted-foreground text-xs">
             Links to · {outgoing.length}
           </text>
           {sources.map((node) => (
             <path
               key={`from-${node.item.uuid}`}
-              d={`M 250 ${node.y + 32} C 278 ${node.y + 32}, 278 ${centerY}, 302 ${centerY}`}
+              d={`M 200 ${node.y + 32} C 220 ${node.y + 32}, 220 ${centerY}, 237 ${centerY}`}
               fill="none"
               className="stroke-primary/50"
               strokeWidth="1.5"
@@ -107,7 +107,7 @@ export function PageConnectionMap({
           {targets.map((node) => (
             <path
               key={`to-${node.item.uuid}`}
-              d={`M 535 ${centerY} C 563 ${centerY}, 563 ${node.y + 32}, 587 ${node.y + 32}`}
+              d={`M 420 ${centerY} C 440 ${centerY}, 440 ${node.y + 32}, 457 ${node.y + 32}`}
               fill="none"
               className="stroke-primary/50"
               strokeWidth="1.5"
@@ -119,7 +119,7 @@ export function PageConnectionMap({
               key={`${node.x}-${node.item.uuid}`}
               x={node.x}
               y={node.y}
-              width="230"
+              width="180"
               height="64"
             >
               <button
