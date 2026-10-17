@@ -346,12 +346,12 @@ describe("MarkdownRenderer", () => {
     expect(html).toContain(source);
   });
 
-  it("highlights bundled code languages and safely falls back for unknown languages", () => {
+  it("keeps code readable with a copy action before highlighting loads", () => {
     const known = render('```rust\nfn main() { println!("hello"); }\n```');
     const unknown = render("```made-up-language\n<img src=x onerror=alert(1)>\n```");
 
-    expect(known).toContain('data-code-language="rust"');
-    expect(known).toContain('data-code-highlighted="true"');
+    expect(known).toContain('data-code-language="text"');
+    expect(known).toContain('data-code-highlighted="false"');
     expect(known).toContain("markdown-code-token");
     expect(known).toContain('aria-label="Copy code"');
     expect(unknown).toContain('data-code-language="text"');

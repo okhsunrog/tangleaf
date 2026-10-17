@@ -10,6 +10,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type { ExtraProps } from "react-markdown";
 import {
@@ -20,8 +21,12 @@ import {
 import { MermaidDiagram } from "./mermaid-diagram";
 import { isMermaidFenceLanguage } from "./mermaid-policy";
 import {
+  cachedSyntaxHighlighter,
+  canHighlightMarkdownCode,
+  loadSyntaxHighlighter,
+  subscribeSyntaxHighlighter,
   extractMarkdownCodeLanguage,
-  highlightMarkdownCode,
+  plainMarkdownCode,
   resolveCodeTheme,
 } from "./syntax-highlighter";
 import { classifyMarkdownUrl } from "./url-policy";
@@ -234,9 +239,26 @@ export function MarkdownCode({
   const isBlock = !inlineRenderer && (requestedLanguage !== null || rawCode.includes("\n"));
   const code = isBlock && rawCode.endsWith("\n") ? rawCode.slice(0, -1) : rawCode;
   const codeTheme = resolveCodeTheme(useResolvedDisplay(), useResolvedInkColor());
+  const highlighter = useSyncExternalStore(
+    subscribeSyntaxHighlighter,
+    cachedSyntaxHighlighter,
+    () => null,
+  );
+  const needsHighlighter = isBlock && canHighlightMarkdownCode(code, requestedLanguage);
+  useEffect(() => {
+    if (needsHighlighter && !highlighter) {
+      void loadSyntaxHighlighter().catch(() => {
+        // Highlighting is optional. Preserve the code and copy action when loading fails.
+      });
+    }
+  }, [code, codeTheme, highlighter, needsHighlighter, requestedLanguage]);
   const highlighted = useMemo(
-    () => (isBlock ? highlightMarkdownCode(code, requestedLanguage, codeTheme) : null),
-    [code, isBlock, requestedLanguage, codeTheme],
+    () =>
+      isBlock
+        ? (highlighter?.highlightMarkdownCode(code, requestedLanguage, codeTheme) ??
+          plainMarkdownCode(code, requestedLanguage))
+        : null,
+    [code, isBlock, requestedLanguage, codeTheme, highlighter],
   );
   const [copied, setCopied] = useState(false);
 

@@ -1,51 +1,5 @@
-import c from "@shikijs/langs/c";
-import css from "@shikijs/langs/css";
-import diff from "@shikijs/langs/diff";
-import html from "@shikijs/langs/html";
-import javascript from "@shikijs/langs/javascript";
-import json from "@shikijs/langs/json";
-import markdown from "@shikijs/langs/markdown";
-import python from "@shikijs/langs/python";
-import rust from "@shikijs/langs/rust";
-import shellscript from "@shikijs/langs/shellscript";
-import sql from "@shikijs/langs/sql";
-import toml from "@shikijs/langs/toml";
-import typescript from "@shikijs/langs/typescript";
-import yaml from "@shikijs/langs/yaml";
-import githubDark from "@shikijs/themes/github-dark";
-import githubLight from "@shikijs/themes/github-light";
-import githubLightHighContrast from "@shikijs/themes/github-light-high-contrast";
-import { createHighlighterCoreSync, type ThemeRegistrationRaw } from "shiki/core";
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
-
-/**
- * E-ink with a grayscale panel has no hue to spend, so the mono theme carries meaning with
- * weight and slant only. @shikijs/themes ships no monochrome theme, hence this minimal one.
- */
-const EINK_MONO_THEME: ThemeRegistrationRaw = {
-  name: "eink-mono",
-  type: "light",
-  colors: { "editor.background": "#ffffff", "editor.foreground": "#000000" },
-  settings: [
-    { settings: { background: "#ffffff", foreground: "#000000" } },
-    {
-      scope: ["comment", "punctuation.definition.comment"],
-      settings: { foreground: "#555555" },
-    },
-    {
-      scope: ["keyword", "storage", "storage.type", "constant.language"],
-      settings: { fontStyle: "bold" },
-    },
-    { scope: ["string", "string.quoted"], settings: { fontStyle: "italic" } },
-  ],
-};
-
 /** Which Shiki theme pair a code block is tokenized with. */
 export type CodeTheme = "standard" | "eink" | "eink-mono";
-
-/** Shiki's FontStyle bitmask; only the two flags the mono theme uses are named. */
-const FONT_STYLE_ITALIC = 1;
-const FONT_STYLE_BOLD = 2;
 
 export function resolveCodeTheme(
   display: "standard" | "eink",
@@ -55,21 +9,9 @@ export function resolveCodeTheme(
   return inkColor === "mono" ? "eink-mono" : "eink";
 }
 
-/** The e-ink profile is light-only, so both variants resolve to the same theme there. */
-function themeNames(theme: CodeTheme): { light: string; dark: string } {
-  if (theme === "eink") {
-    return { light: "github-light-high-contrast", dark: "github-light-high-contrast" };
-  }
-  if (theme === "eink-mono") return { light: "eink-mono", dark: "eink-mono" };
-  return { light: "github-light", dark: "github-dark" };
-}
-
 const MAX_HIGHLIGHT_CHARS = 32_000;
 const MAX_HIGHLIGHT_LINES = 200;
 const MAX_HIGHLIGHT_LINE_CHARS = 4_096;
-const MAX_CACHEABLE_CHARS = 8_192;
-const MAX_CACHE_ENTRIES = 24;
-const TOKENIZE_TIME_LIMIT_MS = 5;
 
 const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
   bash: "shellscript",
@@ -107,10 +49,6 @@ const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
   zsh: "shellscript",
 };
 
-type MarkdownHighlighter = ReturnType<typeof createHighlighterCoreSync>;
-
-let highlighter: MarkdownHighlighter | null = null;
-
 export interface MarkdownCodeToken {
   content: string;
   darkColor?: string;
@@ -127,98 +65,72 @@ export interface MarkdownCodeHighlight {
   requestedLanguage: string | null;
 }
 
-const highlightCache = new Map<string, MarkdownCodeHighlight>();
+export type SyntaxHighlighterRuntime = typeof import("./syntax-highlighter-runtime");
+let runtime: SyntaxHighlighterRuntime | null = null;
+let loading: Promise<SyntaxHighlighterRuntime> | null = null;
+const listeners = new Set<() => void>();
+
+export function cachedSyntaxHighlighter(): SyntaxHighlighterRuntime | null {
+  return runtime;
+}
+
+export function subscribeSyntaxHighlighter(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function loadSyntaxHighlighter(): Promise<SyntaxHighlighterRuntime> {
+  if (runtime) return Promise.resolve(runtime);
+  loading ??= import("./syntax-highlighter-runtime").then(
+    (loaded) => {
+      runtime = loaded;
+      for (const listener of listeners) listener();
+      return loaded;
+    },
+    (error: unknown) => {
+      // A later eligible block or edit may retry; keep the current code readable on failure.
+      loading = null;
+      throw error;
+    },
+  );
+  return loading;
+}
+
+export function resolveMarkdownCodeLanguage(requestedLanguage: string | null): string {
+  const label = normalizeLanguageLabel(requestedLanguage);
+  return label && Object.prototype.hasOwnProperty.call(LANGUAGE_ALIASES, label)
+    ? LANGUAGE_ALIASES[label]
+    : "text";
+}
+
+export function canHighlightMarkdownCode(code: string, requestedLanguage: string | null): boolean {
+  return resolveMarkdownCodeLanguage(requestedLanguage) !== "text" && isHighlightableSource(code);
+}
+
+export function plainMarkdownCode(
+  code: string,
+  requestedLanguage: string | null,
+): MarkdownCodeHighlight {
+  return {
+    highlighted: false,
+    language: "text",
+    // Match the eventual line wrappers only for bounded, highlightable code.
+    lines: canHighlightMarkdownCode(code, requestedLanguage)
+      ? code.split("\n").map((content) => [{ content }])
+      : plainLines(code),
+    requestedLanguage: normalizeLanguageLabel(requestedLanguage),
+  };
+}
 
 export function highlightMarkdownCode(
   code: string,
   requestedLanguage: string | null,
   theme: CodeTheme = "standard",
 ): MarkdownCodeHighlight {
-  const cleanRequest = normalizeLanguageLabel(requestedLanguage);
-  const language = cleanRequest ? (LANGUAGE_ALIASES[cleanRequest] ?? "text") : "text";
-  const highlighted = language !== "text" && isHighlightableSource(code);
-  const cacheKey = `${language}\u0000${theme}\u0000${highlighted ? "highlight" : "plain"}\u0000${code}`;
-  const cached = code.length <= MAX_CACHEABLE_CHARS ? highlightCache.get(cacheKey) : undefined;
-  if (cached) return cached;
-
-  let result: MarkdownCodeHighlight;
-  if (!highlighted) {
-    result = {
-      highlighted: false,
-      language: "text",
-      lines: plainLines(code),
-      requestedLanguage: cleanRequest,
-    };
-  } else {
-    try {
-      const mono = theme === "eink-mono";
-      const lines = getHighlighter().codeToTokensWithThemes(code, {
-        lang: language,
-        themes: themeNames(theme),
-        tokenizeMaxLineLength: MAX_HIGHLIGHT_LINE_CHARS,
-        tokenizeTimeLimit: TOKENIZE_TIME_LIMIT_MS,
-      });
-      result = {
-        highlighted: true,
-        language,
-        lines: lines.map((line) =>
-          line.map((token) => {
-            // Weight and slant are only read from the mono theme; the color themes keep the
-            // plain rendering they have always had.
-            const style = mono ? (token.variants.light?.fontStyle ?? 0) : 0;
-            return {
-              content: token.content,
-              darkColor: token.variants.dark?.color,
-              lightColor: token.variants.light?.color,
-              bold: (style & FONT_STYLE_BOLD) !== 0 || undefined,
-              italic: (style & FONT_STYLE_ITALIC) !== 0 || undefined,
-            };
-          }),
-        ),
-        requestedLanguage: cleanRequest,
-      };
-    } catch {
-      result = {
-        highlighted: false,
-        language: "text",
-        lines: plainLines(code),
-        requestedLanguage: cleanRequest,
-      };
-    }
-  }
-
-  if (code.length <= MAX_CACHEABLE_CHARS) {
-    highlightCache.set(cacheKey, result);
-    if (highlightCache.size > MAX_CACHE_ENTRIES) {
-      const oldest = highlightCache.keys().next().value;
-      if (oldest !== undefined) highlightCache.delete(oldest);
-    }
-  }
-  return result;
-}
-
-function getHighlighter(): MarkdownHighlighter {
-  highlighter ??= createHighlighterCoreSync({
-    engine: createJavaScriptRegexEngine({ target: "ES2018" }),
-    langs: [
-      c,
-      css,
-      diff,
-      html,
-      javascript,
-      json,
-      markdown,
-      python,
-      rust,
-      shellscript,
-      sql,
-      toml,
-      typescript,
-      yaml,
-    ],
-    themes: [githubLight, githubDark, githubLightHighContrast, EINK_MONO_THEME],
-  });
-  return highlighter;
+  return (
+    runtime?.highlightMarkdownCode(code, requestedLanguage, theme) ??
+    plainMarkdownCode(code, requestedLanguage)
+  );
 }
 
 export function extractMarkdownCodeLanguage(className: string | undefined): string | null {
@@ -226,7 +138,7 @@ export function extractMarkdownCodeLanguage(className: string | undefined): stri
   return normalizeLanguageLabel(match?.[1] ?? null);
 }
 
-function normalizeLanguageLabel(value: string | null): string | null {
+export function normalizeLanguageLabel(value: string | null): string | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase().slice(0, 32);
   return /^[a-z0-9_+#.-]+$/.test(normalized) ? normalized : null;

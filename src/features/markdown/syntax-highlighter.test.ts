@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  extractMarkdownCodeLanguage,
-  highlightMarkdownCode,
-  resolveCodeTheme,
-} from "./syntax-highlighter";
+import { extractMarkdownCodeLanguage, resolveCodeTheme } from "./syntax-highlighter";
+import { highlightMarkdownCode } from "./syntax-highlighter-runtime";
 
 function flattenedCode(result: ReturnType<typeof highlightMarkdownCode>): string {
   return result.lines.map((line) => line.map((token) => token.content).join("")).join("\n");
