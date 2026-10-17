@@ -33,6 +33,7 @@ import {
   hasExactPageTitle,
   journalDateFromSearchQuery,
   movePaletteSelection,
+  normalizeSearchTitle,
   preservePaletteSelection,
   resolvePendingPaletteEnter,
 } from "./search-palette";
@@ -291,16 +292,8 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
         label: `Open journal ${journalDate}`,
       });
     }
-    if (displayedSearchSettled && !localError && exactTitleMatch) {
-      rows.push({
-        kind: "create_note",
-        key: `note:${queryValue}`,
-        query: queryValue,
-        label: `Open “${queryValue}”`,
-      });
-    }
     return rows;
-  }, [displayedSearchSettled, exactTitleMatch, journalDate, localError, queryValue]);
+  }, [journalDate, queryValue]);
   const trailingRows = useMemo<PaletteRow[]>(() => {
     if (
       !queryValue ||
@@ -320,10 +313,20 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       },
     ];
   }, [displayedHits.length, displayedSearchSettled, exactTitleMatch, localError, queryValue]);
-  const rows = useMemo(
-    () => [...leadingRows, ...primaryRows, ...localRows, ...trailingRows],
-    [leadingRows, localRows, primaryRows, trailingRows],
-  );
+  const rows = useMemo(() => {
+    const results = [...primaryRows, ...localRows];
+    if (queryValue) {
+      const rank = (row: ContentRow) =>
+        row.hit.content.kind === "block"
+          ? 2
+          : normalizeSearchTitle(pageDisplayTitle(row.hit.content.record)) ===
+              normalizeSearchTitle(queryValue)
+            ? 0
+            : 1;
+      results.sort((a, b) => rank(a) - rank(b));
+    }
+    return [...leadingRows, ...results, ...trailingRows];
+  }, [leadingRows, localRows, primaryRows, trailingRows, queryValue]);
   const rowKeys = rows.map((row) => row.key).join("\u0000");
 
   useEffect(() => {
@@ -507,9 +510,15 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
       {!queryValue && <SectionLabel>Recent</SectionLabel>}
       {rows.map((row, index) => (
         <Fragment key={row.key}>
-          {localRows.length > 0 && index === leadingRows.length + primaryRows.length && (
-            <SectionLabel>Found locally</SectionLabel>
-          )}
+          {queryValue &&
+            row.kind === "content" &&
+            (index === 0 ||
+              rows[index - 1].kind !== "content" ||
+              (rows[index - 1] as ContentRow).hit.content.kind !== row.hit.content.kind) && (
+              <SectionLabel>
+                {row.hit.content.kind === "page" ? "Pages" : "Matching blocks"}
+              </SectionLabel>
+            )}
           <PaletteResultRow
             row={row}
             optionId={`search-option-${index}`}
@@ -658,19 +667,22 @@ function PaletteResultRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
-          <span className="truncate font-medium">{rowTitle(row)}</span>
+          <span className="line-clamp-2 font-medium break-words">
+            {row.kind === "content" && row.hit.content.kind === "block"
+              ? parentPage
+                ? pageDisplayTitle(parentPage)
+                : "Matching block"
+              : rowTitle(row)}
+          </span>
           {row.kind === "content" && showSource && (
             <span className="ml-auto shrink-0 text-[10px] eink:text-xs text-muted-foreground">
               {row.source}
             </span>
           )}
         </span>
-        {row.kind === "content" && row.hit.content.kind === "block" && parentPage && (
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-            {pageDisplayTitle(parentPage)} · block
-          </span>
+        {row.kind === "content" && row.hit.content.kind === "block" && (
+          <ResultSnippet hit={row.hit} />
         )}
-        {row.kind === "content" && <ResultSnippet hit={row.hit} />}
       </span>
     </button>
   );

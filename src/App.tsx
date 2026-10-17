@@ -385,7 +385,7 @@ function App() {
           className={
             compact
               ? "search-dialog search-dialog-compact top-[var(--safe-area-inset-top)] left-0 h-[calc(100dvh-var(--safe-area-inset-top))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-0 surface-glass-strong p-0 shadow-floating sm:max-w-none"
-              : "search-dialog top-[18%] max-w-2xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 surface-glass-strong p-0 shadow-floating"
+              : "search-dialog top-[18%] max-w-[calc(100%-2rem)] sm:max-w-3xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 surface-glass-strong p-0 shadow-floating"
           }
         >
           <div className="sr-only">

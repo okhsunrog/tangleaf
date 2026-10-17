@@ -92,13 +92,25 @@ describe("SearchCard page-list refreshes", () => {
       score: 1,
       snippet: "<mark>Теорема</mark> Пифагора",
     };
-    api.searchResults = [block];
+    api.searchResults = [
+      block,
+      pageHit(page("partial", "Теорема и доказательство")),
+      pageHit(page("exact", "Теорема")),
+    ];
     const { container } = await renderSearchCard([containingPage], "sidebar");
 
     await enterQuery(container, "Теорема");
 
     expect(api.search).toHaveBeenCalledWith("fts", "Теорема", 20);
     expect(container.textContent).toContain("Теорема Пифагора");
+    const options = [...container.querySelectorAll('[role="option"]')];
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Теорема",
+      "Теорема и доказательство",
+      "Matching blockТеорема Пифагора",
+    ]);
+    expect(container.textContent).toContain("Pages");
+    expect(container.textContent).toContain("Matching blocks");
   });
 
   it("re-runs active local search after a page rename", async () => {
