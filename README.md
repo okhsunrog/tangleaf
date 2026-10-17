@@ -59,6 +59,21 @@ Run the desktop client:
 vp run desktop:dev
 ```
 
+Build the desktop release executable without installer packages:
+
+```sh
+vp run tauri build
+```
+
+Request Linux packages explicitly when needed:
+
+```sh
+vp run tauri build --bundles deb
+vp run tauri build --bundles rpm
+vp run tauri build --bundles appimage
+vp run tauri build --bundles deb,rpm,appimage
+```
+
 Initialize and build Android from the same client source:
 
 ```sh
