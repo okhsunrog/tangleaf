@@ -1,3 +1,4 @@
+import { PageConnectionMap } from "./page-connection-map";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, RefreshCw, Sparkles, Search } from "lucide-react";
@@ -50,6 +51,7 @@ export function GraphWorkspace({
 }: GraphProps & { onClose: () => void }) {
   const [selectedUuid, setSelectedUuid] = useState<string | null>(page?.uuid ?? null);
   const [filter, setFilter] = useState("");
+  const [view, setView] = useState<"list" | "map">("list");
   const graph = useQuery({
     queryKey: queryKeys.graph(null),
     queryFn: () => getGraphSnapshot(null),
@@ -221,10 +223,37 @@ export function GraphWorkspace({
                     <ArrowRight className="size-3.5" />
                   </Button>
                 </div>
-                <div className="flex flex-col gap-6 xl:flex-row">
-                  {connections("incoming")}
-                  {connections("outgoing")}
+                <div className="mb-3 flex gap-1" aria-label="Connection view">
+                  <Button
+                    variant={view === "list" ? "secondary" : "ghost"}
+                    size="sm"
+                    aria-pressed={view === "list"}
+                    onClick={() => setView("list")}
+                  >
+                    List
+                  </Button>
+                  <Button
+                    variant={view === "map" ? "secondary" : "ghost"}
+                    size="sm"
+                    aria-pressed={view === "map"}
+                    onClick={() => setView("map")}
+                  >
+                    Map
+                  </Button>
                 </div>
+                {view === "map" ? (
+                  <PageConnectionMap
+                    selected={selected}
+                    incoming={items.filter((item) => incoming.has(item.uuid))}
+                    outgoing={items.filter((item) => outgoing.has(item.uuid))}
+                    onSelect={setSelectedUuid}
+                  />
+                ) : (
+                  <div className="flex flex-col gap-6 xl:flex-row">
+                    {connections("incoming")}
+                    {connections("outgoing")}
+                  </div>
+                )}
                 <p className="mt-6 text-xs text-muted-foreground">
                   Select a linked title to explore its connections. Shift + Open page opens it
                   alongside your note.
