@@ -1,5 +1,16 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     `kotlin-dsl`
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
 }
 
 gradlePlugin {
@@ -18,5 +29,5 @@ repositories {
 
 dependencies {
     compileOnly(gradleApi())
-    implementation("com.android.tools.build:gradle:9.3.1")
+    implementation("com.android.tools.build:gradle:9.4.1")
 }

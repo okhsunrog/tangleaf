@@ -22,3 +22,12 @@
 -dontwarn org.slf4j.impl.StaticLoggerBinder
 -dontwarn org.slf4j.impl.StaticMDCBinder
 -dontwarn org.slf4j.impl.StaticMarkerBinder
+
+# Onyx's optional fingerprint and Wi-Fi UI helpers are not used by this plugin.
+-dontwarn android.hardware.fingerprint.FingerprintManager
+-dontwarn com.onyx.android.sdk.BR
+
+# Fastjson2 probes these optional Fastjson 1.x compatibility classes and catches
+# their absence. The pen SDK's Fastjson2 dependency does not bundle Fastjson 1.x.
+-dontwarn com.alibaba.fastjson.JSONArray
+-dontwarn com.alibaba.fastjson.JSONObject

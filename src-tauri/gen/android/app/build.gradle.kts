@@ -36,8 +36,9 @@ val rustlsPlatformVerifierAndroid by lazy {
 
 repositories {
     maven {
-        val manifestPath = file(rustlsPlatformVerifierAndroid.getValue("manifest_path") as String)
-        url = uri(File(manifestPath.parentFile, "maven"))
+        // Verifier 0.7.1 distributes its Android component via the upstream Maven archive.
+        url = uri("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/android-release-support/maven/")
+        content { includeGroup("org.rustls") }
     }
 }
 
@@ -108,17 +109,17 @@ rust {
 
 dependencies {
     implementation(
-        "rustls:rustls-platform-verifier:${rustlsPlatformVerifierAndroid.getValue("version")}",
+        "org.rustls:rustls-platform-verifier:${rustlsPlatformVerifierAndroid.getValue("version")}",
     )
-    implementation("androidx.webkit:webkit:1.14.0")
-    implementation("androidx.appcompat:appcompat:1.7.1")
-    implementation("androidx.activity:activity-ktx:1.10.1")
-    implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-process:2.10.0")
+    implementation("androidx.webkit:webkit:1.17.1")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("androidx.activity:activity-ktx:1.13.0")
+    implementation("com.google.android.material:material:1.14.0")
+    implementation("androidx.lifecycle:lifecycle-process:2.11.0")
     debugCompileOnly("io.github.libxposed:api:102.0.0")
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.4")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }
 
 apply(from = file("tauri.build.gradle.kts"))

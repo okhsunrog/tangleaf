@@ -1,3 +1,9 @@
 include ':app'
 
 apply from: 'tauri.settings.gradle'
+
+// android-fs 30.2.0 still uses kotlinOptions, removed by Kotlin 2.3.
+// Keep its source directory, replacing only the incompatible build script.
+def androidFs = project(':tauri-plugin-android-fs')
+androidFs.buildFileName = androidFs.projectDir.toPath()
+    .relativize(file('gradle/android-fs.gradle.kts').toPath()).toString()

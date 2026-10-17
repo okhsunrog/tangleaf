@@ -44,6 +44,8 @@ and historical technical investigations.
 
 ## Development
 
+Rust builds use the Rust 1.99.1 toolchain pinned in `rust-toolchain.toml`.
+
 Install the [Vite+ CLI](https://viteplus.dev/guide/), then let it provision the pinned Node.js and Bun versions:
 
 ```sh
@@ -68,12 +70,19 @@ The debug recipe applies `src-tauri/tauri.dev.conf.json`, which enables the glob
 relaxes `script-src` so the development-only MCP bridge can execute scripts in the WebView. Release
 builds keep the strict CSP from `tauri.conf.json`.
 
-The Rust Tauri crate family and tao currently track upstream `dev` through workspace patches;
-`Cargo.lock` pins their commits. The JavaScript API and CLI remain released packages. The checked-in
-Android project uses AGP 9.3.1, Gradle 9.6.1 and Kotlin 2.2.10; do not regenerate it with an older
+The Rust Tauri crate family and tao use released crates, with resolved versions pinned in
+`Cargo.lock`. Tauri 2.12 includes the Android activity lifecycle and Wayland decoration fixes that
+previously required upstream `dev` patches. The JavaScript API and CLI also use released packages. The checked-in
+Android project uses AGP 9.4.1, Gradle 9.8.0 and Kotlin 2.4.21; do not regenerate it with an older
 CLI template without reviewing the diff. Built-in Kotlin and the new Android DSL are disabled for
 compatibility with existing plugins, matching the upstream AGP 9 migration. Configuration cache is
 not enabled: our custom Rust build task still accesses its Project during execution.
+
+The Android settings use `gradle/android-fs.gradle.kts` for android-fs 30.2.0, whose upstream
+build script still uses the `kotlinOptions` DSL removed in Kotlin 2.3. The override keeps the
+plugin's original source directory and uses `compilerOptions`; remove it once upstream migrates.
+The build uses the JDK selected by `JAVA_HOME`; Gradle 9.8 supports JDK 25 and 27.
+Android modules and the `buildSrc` plugin target Java 17 bytecode.
 
 Desktop windows are created with their saved decoration mode. On Wayland, GTK negotiates the
 native frame with the compositor; borderless windows are created without decorations. Since tao
