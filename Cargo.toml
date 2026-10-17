@@ -23,16 +23,16 @@ repository = "https://github.com/okhsunrog/tangleaf"
 homepage = "https://github.com/okhsunrog/tangleaf"
 
 [workspace.dependencies]
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 async-channel = "2.5.0"
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.6.2", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 eventsource-stream = "0.2.3"
-futures = "0.3.32"
-fastembed = "5.17.3"
-llm-relay = { git = "https://github.com/okhsunrog/llm-relay", rev = "57b0cabe41ad5c161f486afa8980b51fa2383a83", features = [
+futures = "0.3.34"
+fastembed = "7.1.1"
+llm-relay = { git = "https://github.com/okhsunrog/llm-relay", rev = "8f9f1647ce199e2158b9d7e5cc88d5833d5d1260", version = "1.0.1", features = [
   "embeddings",
   "rig",
   "streaming",
@@ -44,52 +44,38 @@ notes-import = { path = "crates/notes-import" }
 notes-markdown = { path = "crates/notes-markdown" }
 notes-protocol = { path = "crates/notes-protocol" }
 notes-sync = { path = "crates/notes-sync" }
-proptest = "1.8.0"
+proptest = "1.12.0"
 pulldown-cmark = { version = "=0.13.4", default-features = false }
-reqwest = { version = "0.13.4", default-features = false }
-rig = { package = "rig-core", version = "0.40.0" }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "uuid", "trace"] }
+reqwest = { version = "0.13.5", default-features = false }
+rig = { package = "rig-core", version = "0.44.0", features = ["reqwest"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "uuid", "trace"] }
 rusqlite_migration = "2.6.0"
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs"] }
 rust-stemmers = "1.2.0"
-schemars = "1.2.1"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 specta = { version = "=2.0.0-rc.25", features = ["derive", "serde_json", "url", "uuid"] }
 specta-typescript = "0.0.12"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 subtle = "2.6.1"
 sqlite-vec = "0.1.9"
 tempfile = "3.27.0"
-thiserror = "2.0.18"
-tokio = { version = "1.52.4", features = ["full"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
   "connect",
   "rustls-tls-webpki-roots",
 ] }
-tokio-util = { version = "0.7.18", features = ["io", "rt"] }
-toml = "1.1.3"
+tokio-util = { version = "0.7.20", features = ["io", "rt"] }
+toml = "1.1.8"
 tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["limit", "trace"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-unicode-normalization = "0.1.25"
-uuid = { version = "1.24.0", features = ["v4", "v5", "v7", "serde"] }
+unicode-normalization = "0.1.26"
+uuid = { version = "1.28.0", features = ["v4", "v5", "v7", "serde"] }
 url = { version = "2.5.8", features = ["serde"] }
-
-# Keep the Tauri crate family on the same upstream development source, including
-# transitive plugin dependencies. Cargo.lock pins the resolved dev commits.
-# tao dev includes the Wayland CSD/SSD negotiation fix (tao#1218).
-[patch.crates-io]
-tauri = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-build = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-runtime = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-utils = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-macros = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-codegen = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tauri-plugin = { git = "https://github.com/tauri-apps/tauri", branch = "dev" }
-tao = { git = "https://github.com/tauri-apps/tao", branch = "dev" }
 
 [profile.release]
 strip = "symbols"

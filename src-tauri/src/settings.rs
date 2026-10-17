@@ -533,8 +533,10 @@ mod tests {
     fn stored_settings_contain_only_device_and_server_connection_state() {
         let value = serde_json::to_value(StoredSettings::default()).expect("serialize settings");
         let object = value.as_object().expect("settings object");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            keys,
             vec![
                 "aiSearchEnabled",
                 "aiSearchRerank",

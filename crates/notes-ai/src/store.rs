@@ -1517,7 +1517,7 @@ fn index_document(text: String, header: String, kind: IndexedContentKind) -> Ind
     digest.update(INPUT_FORMAT_VERSION.to_le_bytes());
     digest.update(text.as_bytes());
     IndexDocument {
-        input_hash: format!("{:x}", digest.finalize()),
+        input_hash: hex::encode(digest.finalize()),
         text,
         header,
         kind,
@@ -1627,7 +1627,7 @@ fn extraction_input(title: Option<&str>, content: &str) -> IndexDocument {
     IndexDocument {
         text,
         header: String::new(),
-        input_hash: format!("{:x}", digest.finalize()),
+        input_hash: hex::encode(digest.finalize()),
         kind: IndexedContentKind::Block,
     }
 }
@@ -1801,7 +1801,7 @@ pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: u
     digest.update(dimensions.to_le_bytes());
     digest.update([0]);
     digest.update(b"cosine:provider-normalized:input-v1");
-    format!("sha256:{:x}", digest.finalize())
+    format!("sha256:{}", hex::encode(digest.finalize()))
 }
 
 #[cfg(test)]

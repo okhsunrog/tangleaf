@@ -1,7 +1,7 @@
 use crate::config::AiConfig;
 use crate::state::{UserRegistry, UserState};
 use anyhow::{Context, Result, bail};
-use llm_relay::{ChatOptions, LlmClient};
+use llm_relay::{WireChatOptions, WireClient};
 use notes_ai::agent;
 use notes_ai::embed::{EmbedderBackend, RerankBackend};
 use notes_ai::retrieval::RetrievalPipeline;
@@ -532,13 +532,13 @@ fn persist_config(path: &Path, config: &AiConfig) -> Result<()> {
 
 async fn probe_completion(config: llm_relay::ClientConfig, label: &str) -> AiProbeCheck {
     let result = async {
-        let client = LlmClient::new(config.max_tokens(16))?;
+        let client = WireClient::new(config.max_tokens(16))?;
         let response = client
             .complete(
                 "Reply with exactly OK.",
-                ChatOptions {
+                WireChatOptions {
                     temperature: Some(0.0),
-                    ..ChatOptions::default()
+                    ..WireChatOptions::default()
                 },
             )
             .await?;

@@ -5,11 +5,11 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 #[cfg(feature = "local-models")]
 use fastembed::{
-    EmbeddingModel as FeModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding,
+    EmbeddingModel as FeModel, RerankInitOptions, RerankerModel, TextEmbedding, TextInitOptions,
     TextRerank,
 };
 use notes_core::Connection;
-use rig::embeddings::EmbeddingModel;
+use rig::{DynModel, operation::Embedding};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,7 +86,6 @@ pub fn make_embedder(config: &EmbedderConfig) -> Result<Arc<dyn EmbedderBackend>
             }))
         }
         EmbeddingProvider::Openrouter => {
-            use rig::providers::openrouter;
             let model = config.model.clone();
             let ndims = config
                 .ndims
@@ -100,13 +99,10 @@ pub fn make_embedder(config: &EmbedderConfig) -> Result<Arc<dyn EmbedderBackend>
                 .as_deref()
                 .unwrap_or(crate::config::DEFAULT_OPENROUTER_BASE_URL);
             let client = crate::config::openrouter_client_from(api_key, base_url)?;
-            let m = <openrouter::EmbeddingModel as EmbeddingModel>::make(
-                &client,
-                model.clone(),
-                Some(ndims),
-            );
+            let m = client.embedding(model.clone(), Some(ndims));
             Ok(Arc::new(RigEmbedder {
-                model: m,
+                model: m.erase(),
+                ndims,
                 id: format!("openrouter:{model}"),
             }))
         }
@@ -114,12 +110,15 @@ pub fn make_embedder(config: &EmbedderConfig) -> Result<Arc<dyn EmbedderBackend>
             use rig::providers::cohere;
             let model = config.model.clone();
             let api_key = required_key(config.api_key.as_deref(), "Cohere")?;
-            let client = cohere::Client::new(api_key).context("building Cohere client")?;
-            let passages = client.embedding_model(&model, "search_document");
-            let query = client.embedding_model(&model, "search_query");
+            let client = cohere::Cohere::new(api_key);
+            let passages = client.embedding(&model, config.ndims);
+            let ndims = passages.wire.ndims;
+            let mut query = client.embedding(&model, config.ndims);
+            query.wire = query.wire.with_input_type("search_query");
             Ok(Arc::new(AsymmetricRigEmbedder {
-                passages,
-                query,
+                passages: passages.erase(),
+                query: query.erase(),
+                ndims,
                 id: format!("cohere:{model}"),
             }))
         }
@@ -137,14 +136,12 @@ pub fn make_embedder(config: &EmbedderConfig) -> Result<Arc<dyn EmbedderBackend>
             use rig::providers::gemini;
             let model = config.model.clone();
             let api_key = required_key(config.api_key.as_deref(), "Gemini")?;
-            let client = gemini::Client::new(api_key).context("building Gemini client")?;
-            let m = <gemini::embedding::EmbeddingModel as EmbeddingModel>::make(
-                &client,
-                model.clone(),
-                config.ndims,
-            );
+            let client = gemini::Gemini::new(api_key);
+            let m = client.embedding(model.clone(), config.ndims);
+            let ndims = m.wire.ndims;
             Ok(Arc::new(RigEmbedder {
-                model: m,
+                model: m.erase(),
+                ndims,
                 id: format!("gemini:{model}"),
             }))
         }
@@ -203,7 +200,7 @@ pub struct LocalBgeM3 {
 impl LocalBgeM3 {
     pub fn new() -> Result<Self> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(FeModel::BGEM3).with_show_download_progress(true),
+            TextInitOptions::new(FeModel::BGEM3).with_show_download_progress(true),
         )
         .context("loading bge-m3 model")?;
         Ok(Self {
@@ -234,8 +231,9 @@ impl EmbedderBackend for LocalBgeM3 {
 
 // ───────────────────────── rig adapter ─────────────────────────
 
-pub struct RigEmbedder<M: EmbeddingModel> {
-    model: M,
+pub struct RigEmbedder {
+    model: DynModel<Embedding>,
+    ndims: usize,
     id: String,
 }
 
@@ -270,19 +268,17 @@ impl EmbedderBackend for RelayEmbedder {
     }
 }
 
-pub struct AsymmetricRigEmbedder<M: EmbeddingModel> {
-    passages: M,
-    query: M,
+pub struct AsymmetricRigEmbedder {
+    passages: DynModel<Embedding>,
+    query: DynModel<Embedding>,
+    ndims: usize,
     id: String,
 }
 
 #[async_trait]
-impl<M> EmbedderBackend for AsymmetricRigEmbedder<M>
-where
-    M: EmbeddingModel + Send + Sync + 'static,
-{
+impl EmbedderBackend for AsymmetricRigEmbedder {
     fn ndims(&self) -> usize {
-        self.passages.ndims()
+        self.ndims
     }
 
     fn id(&self) -> String {
@@ -292,9 +288,10 @@ where
     async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         embeddings_to_f32(
             self.passages
-                .embed_texts(texts)
+                .call(texts)
                 .await
-                .context("rig embed_texts")?,
+                .context("rig embed_texts")?
+                .embeddings,
         )
     }
 
@@ -422,23 +419,17 @@ impl EmbedderBackend for VoyageEmbedder {
 }
 
 #[async_trait]
-impl<M> EmbedderBackend for RigEmbedder<M>
-where
-    M: EmbeddingModel + Send + Sync + 'static,
-{
+impl EmbedderBackend for RigEmbedder {
     fn ndims(&self) -> usize {
-        self.model.ndims()
+        self.ndims
     }
     fn id(&self) -> String {
         self.id.clone()
     }
     async fn embed_passages(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        let out = self
-            .model
-            .embed_texts(texts)
-            .await
-            .context("rig embed_texts")?;
+        let out = self.model.call(texts).await.context("rig embed_texts")?;
         Ok(out
+            .embeddings
             .into_iter()
             .map(|e| e.vec.into_iter().map(|x| x as f32).collect())
             .collect())

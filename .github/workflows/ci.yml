@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99.1"
           components: clippy, rustfmt
       - name: Install Tauri system dependencies
         run: |
@@ -52,6 +53,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99.1"
           components: clippy, rustfmt
       - name: Extract format crate without application workspace
         run: cp -R crates/ink-format "$RUNNER_TEMP/ink-format"

@@ -18,15 +18,15 @@ name = "tangleaf_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
 notes-blob.workspace = true
 notes-core.workspace = true
 notes-protocol.workspace = true
 notes-sync.workspace = true
-tauri = { version = "2.11.5", features = [] }
-tauri-plugin-opener = "2.5.4"
+tauri = { version = "2.12.4", features = [] }
+tauri-plugin-opener = "2.7.2"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
@@ -64,13 +64,13 @@ tauri-plugin-mcp-bridge = { git = "https://github.com/okhsunrog/mcp-server-tauri
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # Direct filesystem importers (Logseq today, Obsidian later) are desktop-only.
 notes-import.workspace = true
-tauri-plugin-dialog = "2.7.1"
+tauri-plugin-dialog = "2.8.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22.4", default-features = false }
-rustls-platform-verifier = "0.7.0"
+rustls-platform-verifier = "0.7.1"
 tauri-plugin-mobile-system = { path = "../plugins/tauri-plugin-mobile-system" }
-tauri-plugin-android-fs = "28.4.0"
+tauri-plugin-android-fs = "30.2.0"
 tracing-logcat = "0.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

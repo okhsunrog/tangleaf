@@ -89,13 +89,14 @@ pub fn validate_http_base_url(value: &str) -> Result<()> {
 pub fn openrouter_client_from(
     api_key: String,
     base_url: &str,
-) -> Result<rig::providers::openrouter::Client> {
+) -> Result<rig::providers::openai::OpenAI> {
     validate_http_base_url(base_url)?;
-    rig::providers::openrouter::Client::builder()
-        .base_url(base_url.trim_end_matches('/'))
-        .api_key(api_key)
-        .build()
-        .context("building OpenRouter client")
+    Ok(rig::providers::openai::OpenAIConfig::with_key(
+        &rig::providers::openai::wire::OPENROUTER,
+        api_key,
+    )
+    .with_base_url(base_url.trim_end_matches('/'))
+    .client())
 }
 
 pub fn uses_openrouter_endpoint(protocol: CompletionProtocol, base_url: Option<&str>) -> bool {
@@ -146,7 +147,7 @@ mod tests {
     fn openrouter_client_honors_custom_base_url() {
         let client = openrouter_client_from("test-key".into(), "http://127.0.0.1:11434/custom/v1/")
             .expect("build custom client");
-        assert_eq!(client.base_url(), "http://127.0.0.1:11434/custom/v1");
+        assert_eq!(client.config().base_url, "http://127.0.0.1:11434/custom/v1");
     }
 
     #[test]

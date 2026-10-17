@@ -80,7 +80,9 @@ async fn journal_capture_cost_does_not_grow_with_the_workspace() {
             db::append_to_journal(
                 &connection,
                 date.clone(),
-                BlockContent { markdown: format!("filler {round}-{index}") },
+                BlockContent {
+                    markdown: format!("filler {round}-{index}"),
+                },
                 BlockStyle::Paragraph,
             )
             .await
@@ -90,7 +92,9 @@ async fn journal_capture_cost_does_not_grow_with_the_workspace() {
         db::append_to_journal(
             &connection,
             date.clone(),
-            BlockContent { markdown: format!("measured {round}") },
+            BlockContent {
+                markdown: format!("measured {round}"),
+            },
             BlockStyle::Paragraph,
         )
         .await

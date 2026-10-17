@@ -9,7 +9,7 @@ homepage.workspace = true
 [dependencies]
 anyhow.workspace = true
 ink-format = { version = "0.1.0", path = "../../crates/ink-format" }
-libc = "0.2.189"
+libc = "0.2.191"
 notes-core = { version = "0.1.0", path = "../../crates/notes-core" }
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }

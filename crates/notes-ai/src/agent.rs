@@ -5,11 +5,10 @@ use llm_relay::RigClient;
 use notes_core::db::{self, Content, Page, SearchHit};
 use notes_core::{Connection, PageListFilter};
 use notes_protocol::{ChatEvent, ChatTurn};
-use rig::agent::MultiTurnStreamItem;
-use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, Message, Prompt};
-use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
-use rig::tool::{Tool, ToolError};
+use rig::completion::Message;
+use rig::streaming::{Item, StreamEvent};
+use rig::tool::{PortableTool as Tool, ToolExecutionError as ToolError};
+use rig_agent::agent::MultiTurnStreamItem;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -54,7 +53,7 @@ impl From<anyhow::Error> for AgentError {
 }
 
 fn into_tool_err(e: anyhow::Error) -> ToolError {
-    ToolError::ToolCallError(format!("{e:#}").into())
+    ToolError::other(format!("{e:#}"))
 }
 
 // ───────────────────────── query rewriter ─────────────────────────
@@ -136,24 +135,24 @@ impl QueryRewriter {
             .context("query rewriting client is not configured")?;
         match config.rig_client()? {
             RigClient::OpenAi(client) => {
-                rewrite_with_model(client.completion_model(&config.model), prompt).await
+                rewrite_with_model(client.completion(&config.model), prompt).await
             }
             RigClient::Anthropic(client) => {
-                rewrite_with_model(client.completion_model(&config.model), prompt).await
+                rewrite_with_model(client.completion(&config.model), prompt).await
             }
         }
     }
 }
 
-async fn rewrite_with_model<M: CompletionModel + 'static>(
-    model: M,
+async fn rewrite_with_model(
+    model: impl Into<rig::DynModel<rig::operation::Completion>>,
     prompt: String,
 ) -> anyhow::Result<String> {
-    let agent = rig::agent::AgentBuilder::new(model)
+    let agent = rig_agent::AgentBuilder::new(model)
         .preamble("You rewrite search queries to be self-contained.")
         .max_tokens(120)
         .build();
-    let raw: String = agent.prompt(prompt).await?;
+    let raw = agent.prompt(prompt).await?.output();
     Ok(raw
         .trim()
         .trim_start_matches("Rewritten query:")
@@ -225,14 +224,14 @@ const MAX_QUERY_CHARS: usize = 4_096;
 
 fn validate_search_args(args: &SearchArgs) -> Result<(), ToolError> {
     if args.query.trim().is_empty() || args.query.chars().count() > MAX_QUERY_CHARS {
-        return Err(ToolError::ToolCallError(
-            format!("query must contain 1 to {MAX_QUERY_CHARS} characters").into(),
-        ));
+        return Err(ToolError::other(format!(
+            "query must contain 1 to {MAX_QUERY_CHARS} characters"
+        )));
     }
     if args.limit == 0 || args.limit > MAX_SEARCH_LIMIT {
-        return Err(ToolError::ToolCallError(
-            format!("limit must be between 1 and {MAX_SEARCH_LIMIT}").into(),
-        ));
+        return Err(ToolError::other(format!(
+            "limit must be between 1 and {MAX_SEARCH_LIMIT}"
+        )));
     }
     Ok(())
 }
@@ -406,9 +405,7 @@ impl Tool for ListPages {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if !(1..=200).contains(&args.limit) {
-            return Err(ToolError::ToolCallError(
-                "limit must be between 1 and 200".into(),
-            ));
+            return Err(ToolError::other("limit must be between 1 and 200"));
         }
         db::list_pages_filtered(&self.conn, PageListFilter::All, args.limit)
             .await
@@ -457,9 +454,9 @@ impl Tool for Neighbors {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if args.depth == 0 || args.depth > MAX_GRAPH_DEPTH {
-            return Err(ToolError::ToolCallError(
-                format!("depth must be between 1 and {MAX_GRAPH_DEPTH}").into(),
-            ));
+            return Err(ToolError::other(format!(
+                "depth must be between 1 and {MAX_GRAPH_DEPTH}"
+            )));
         }
         db::neighbors(&self.conn, args.uuid, args.depth)
             .await
@@ -584,9 +581,9 @@ impl Tool for ReadSubtree {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if args.depth == 0 || args.depth > MAX_SUBTREE_DEPTH {
-            return Err(ToolError::ToolCallError(
-                format!("depth must be between 1 and {MAX_SUBTREE_DEPTH}").into(),
-            ));
+            return Err(ToolError::other(format!(
+                "depth must be between 1 and {MAX_SUBTREE_DEPTH}"
+            )));
         }
         db::read_subtree(&self.conn, args.uuid, args.depth)
             .await
@@ -683,8 +680,8 @@ impl Tool for CreatePage {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         if args.markdown.len() > 100_000 || args.title.trim().is_empty() || args.title.len() > 500 {
-            return Err(ToolError::ToolCallError(
-                "page title or content exceeds the allowed size".into(),
+            return Err(ToolError::other(
+                "page title or content exceeds the allowed size",
             ));
         }
         self.writer
@@ -696,13 +693,13 @@ impl Tool for CreatePage {
 
 // ───────────────────────── runner ─────────────────────────
 
-fn build_agent<M: CompletionModel + 'static>(
-    model: M,
+fn build_agent(
+    model: impl Into<rig::DynModel<rig::operation::Completion>>,
     retrieval: RetrievalPipeline,
     rewriter: QueryRewriter,
     writer: Option<Arc<dyn GraphWriter>>,
     active_content_uuid: Option<uuid::Uuid>,
-) -> Result<rig::agent::Agent<M>, AgentError> {
+) -> Result<rig_agent::Agent, AgentError> {
     let conn = retrieval.notes().clone();
     let preamble = active_content_uuid.map_or_else(
         || SYSTEM_PROMPT.to_string(),
@@ -713,7 +710,7 @@ fn build_agent<M: CompletionModel + 'static>(
             )
         },
     );
-    let mut builder = rig::agent::AgentBuilder::new(model)
+    let mut builder = rig_agent::AgentBuilder::new(model)
         .preamble(&preamble)
         .max_tokens(2048)
         .tool(SearchAndExpand {
@@ -779,7 +776,7 @@ pub async fn run_chat_stream_with_config(
     {
         RigClient::OpenAi(client) => {
             run_chat_stream_with_model(
-                client.completion_model(&config.model),
+                client.completion(&config.model),
                 retrieval,
                 history,
                 message,
@@ -794,7 +791,7 @@ pub async fn run_chat_stream_with_config(
         }
         RigClient::Anthropic(client) => {
             run_chat_stream_with_model(
-                client.completion_model(&config.model),
+                client.completion(&config.model),
                 retrieval,
                 history,
                 message,
@@ -811,8 +808,8 @@ pub async fn run_chat_stream_with_config(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
-    model: M,
+async fn run_chat_stream_with_model(
+    model: impl Into<rig::DynModel<rig::operation::Completion>>,
     retrieval: RetrievalPipeline,
     history: Vec<ChatTurn>,
     message: String,
@@ -827,11 +824,7 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
     let agent = build_agent(model, retrieval, rewriter, writer, active_content_uuid)?;
     let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
 
-    let mut stream = agent
-        .stream_prompt(message)
-        .history(history)
-        .max_turns(8)
-        .await;
+    let mut stream = agent.prompt(message).history(history).max_turns(8).stream();
 
     let mut full = String::new();
 
@@ -847,54 +840,39 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
             break;
         };
         match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
-                StreamedAssistantContent::Text(t) => {
-                    full.push_str(&t.text);
-                    emit(ChatEvent::TextDelta { text: t.text });
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(event))) => match event {
+                StreamEvent::Text { text, .. } => {
+                    full.push_str(&text);
+                    emit(ChatEvent::TextDelta { text });
                 }
-                StreamedAssistantContent::Reasoning(r) => {
-                    let text = r
-                        .content
-                        .into_iter()
-                        .map(|c| match c {
-                            rig::message::ReasoningContent::Text { text, .. } => text,
-                            rig::message::ReasoningContent::Summary(s) => s,
-                            _ => String::new(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
+                StreamEvent::Reasoning { text, .. } => {
                     emit(ChatEvent::Reasoning { text });
                 }
-                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                    emit(ChatEvent::Reasoning { text: reasoning });
-                }
-                StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                StreamEvent::End {
+                    content: rig::message::AssistantContent::ToolCall(tool_call),
+                    ..
+                } => {
                     emit(ChatEvent::ToolStart {
-                        id: tool_call.id.clone(),
-                        name: tool_call.function.name,
-                        args: tool_call.function.arguments,
+                        id: tool_call.id.to_string(),
+                        name: tool_call.function.name.to_string(),
+                        args: serde_json::Value::Object(tool_call.function.arguments),
                     });
                 }
-                StreamedAssistantContent::ToolCallDelta { .. } => {}
-                StreamedAssistantContent::Final(_) => {}
-                StreamedAssistantContent::Unknown(_) => {}
+                _ => {}
             },
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                tool_result,
-                ..
-            })) => {
+            Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
                 let result = serde_json::to_string(&tool_result.content).unwrap_or_default();
                 emit(ChatEvent::ToolEnd {
-                    id: tool_result.id,
+                    id: tool_result.call.to_string(),
                     result,
                 });
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 let usage = response.usage;
                 emit(ChatEvent::Usage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
+                    input_tokens: usage.input_tokens.unwrap_or_default(),
+                    output_tokens: usage.output_tokens.unwrap_or_default(),
+                    total_tokens: usage.total_tokens.unwrap_or_default(),
                 });
             }
             Ok(_) => {}
@@ -915,6 +893,144 @@ async fn run_chat_stream_with_model<M: CompletionModel + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnusedRetrieval;
+
+    #[async_trait::async_trait]
+    impl crate::embed::EmbedderBackend for UnusedRetrieval {
+        fn ndims(&self) -> usize {
+            1
+        }
+        fn id(&self) -> String {
+            "unused".into()
+        }
+        async fn embed_passages(&self, _: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+            panic!("inventory must not embed")
+        }
+        async fn embed_query(&self, _: String) -> anyhow::Result<Vec<f32>> {
+            panic!("inventory must not embed")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::embed::RerankBackend for UnusedRetrieval {
+        async fn rerank(&self, _: String, _: Vec<String>) -> anyhow::Result<Vec<(usize, f32)>> {
+            panic!("inventory must not rerank")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::VectorStore for UnusedRetrieval {
+        async fn search(
+            &self,
+            _: Vec<f32>,
+            _: u32,
+        ) -> anyhow::Result<Vec<crate::store::VectorMatch>> {
+            panic!("inventory must not query vectors")
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_agent_executes_tools_and_reports_text_and_usage() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for turn in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let body = loop {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        assert!(headers.starts_with("post /v1/chat/completions "));
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &request[end + 4..end + 4 + length],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(body["stream"], true);
+                if turn == 1 {
+                    let messages = body["messages"].as_array().unwrap();
+                    let result = messages
+                        .iter()
+                        .find(|message| message["role"] == "tool")
+                        .expect("tool result sent to model");
+                    assert_eq!(result["tool_call_id"], "call_list");
+                    assert!(
+                        result["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Migration test")
+                    );
+                }
+                let delta = if turn == 0 {
+                    json!({"role":"assistant", "tool_calls":[{"index":0,"id":"call_list","type":"function","function":{"name":"list_pages","arguments":"{\"limit\":10}"}}]})
+                } else {
+                    json!({"role":"assistant", "content":"Notes ready."})
+                };
+                let first = json!({"id":"test","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+                let last = json!({"id":"test","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":if turn == 0 {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}});
+                let body = format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let notes = db::open(directory.path().join("notes.db")).await.unwrap();
+        db::create_page(&notes, "Migration test".into())
+            .await
+            .unwrap();
+        let unused = Arc::new(UnusedRetrieval);
+        let retrieval = RetrievalPipeline::new(notes, unused.clone(), unused.clone(), unused);
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let run = run_chat_stream_with_config(
+            retrieval,
+            Vec::new(),
+            "List my notes".into(),
+            None,
+            None,
+            CancellationToken::new(),
+            move |event| captured.lock().unwrap().push(event),
+            llm_relay::ClientConfig::openai_compatible(base, "test-key", "test-model"),
+            false,
+        );
+        let text = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(text, "Notes ready.");
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(event, ChatEvent::ToolStart { id, name, .. } if id == "call_list" && name == "list_pages")));
+        assert!(events.iter().any(|event| matches!(event, ChatEvent::ToolEnd { id, result } if id == "call_list" && result.contains("Migration test"))));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ChatEvent::TextDelta { text } if text == "Notes ready.")
+            )
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatEvent::Usage {
+                input_tokens: 22,
+                output_tokens: 6,
+                total_tokens: 28
+            }
+        )));
+        assert!(matches!(events.last(), Some(ChatEvent::Done { text }) if text == "Notes ready."));
+    }
 
     #[test]
     fn contextual_query_heuristic_avoids_unneeded_calls() {

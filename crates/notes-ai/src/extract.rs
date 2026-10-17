@@ -58,7 +58,7 @@ impl EntityExtractor {
     }
 
     pub async fn extract(&self, text: String) -> Result<ExtractionResult> {
-        let client = llm_relay::LlmClient::new(self.config.clone().max_tokens(2_048))?;
+        let client = llm_relay::WireClient::new(self.config.clone().max_tokens(2_048))?;
         let response = client
             .complete_structured::<ExtractionResult>(&text, "entity_extraction", Some(PREAMBLE))
             .await?;
