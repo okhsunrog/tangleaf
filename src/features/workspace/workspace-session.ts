@@ -65,6 +65,9 @@ function isWorkspaceState(value: unknown): value is WorkspaceState {
     (pane) =>
       isRecord(pane) &&
       typeof pane.id === "string" &&
+      (pane.navigationRequest === undefined ||
+        (Number.isSafeInteger(pane.navigationRequest) &&
+          (pane.navigationRequest as number) >= 0)) &&
       isPaneContent(pane.content) &&
       Array.isArray(pane.back) &&
       pane.back.every(isPaneContent) &&

@@ -50,6 +50,7 @@ type Props = {
   onOpenJournalDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
   journalBusy: boolean;
   initialBlockUuid?: string | null;
+  navigationRequest?: number;
   autoFocusTitle?: boolean;
   presentation: PagePresentation;
   onPresentationChange: (presentation: PagePresentation) => void;
@@ -69,6 +70,7 @@ export function PageView({
   onOpenJournalDate,
   journalBusy,
   initialBlockUuid = null,
+  navigationRequest = 0,
   autoFocusTitle = false,
   presentation,
   onPresentationChange,
@@ -485,6 +487,8 @@ export function PageView({
           <DocumentPage
             key={page.uuid}
             pageUuid={page.uuid}
+            targetBlockUuid={initialBlockUuid}
+            navigationRequest={navigationRequest}
             editing={presentation === PagePresentation.Editing}
             canEdit={canEdit}
             authoringMode={documentAuthoringMode}
@@ -496,7 +500,8 @@ export function PageView({
           <Outliner
             key={page.uuid}
             page={page}
-            initialEditingUuid={initialBlockUuid}
+            targetBlockUuid={initialBlockUuid}
+            navigationRequest={navigationRequest}
             focusRequest={bodyFocusRequest}
             onOpenMarkdownLink={onOpenMarkdownLink}
             presentation={presentation}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MarkdownRenderer, type MarkdownOpenHandler } from "@/features/markdown";
 import { useAttachmentImageResolver } from "@/features/markdown";
@@ -20,6 +20,8 @@ import { DocumentCodec } from "./document-codec";
 import { ContinuousDocumentEditor, type DocumentAuthoringMode } from "./continuous-document-editor";
 import { documentUnitsForSave } from "./document-save-model";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
+import type { BlockAnchor } from "@/features/markdown/rehype-block-anchors";
+import type { DocumentRange } from "./document-codec";
 
 type Props = {
   pageUuid: string;
@@ -27,6 +29,8 @@ type Props = {
   canEdit: boolean;
   authoringMode: DocumentAuthoringMode;
   focusRequest: number;
+  targetBlockUuid?: string | null;
+  navigationRequest?: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   onFlushReady?: (flush: (() => Promise<boolean>) | null) => void;
 };
@@ -58,6 +62,8 @@ export function DocumentPage({
   canEdit,
   authoringMode,
   focusRequest,
+  targetBlockUuid,
+  navigationRequest,
   onOpenMarkdownLink,
   onFlushReady,
 }: Props) {
@@ -90,6 +96,8 @@ export function DocumentPage({
       canEdit={canEdit}
       authoringMode={authoringMode}
       focusRequest={focusRequest}
+      targetBlockUuid={targetBlockUuid}
+      navigationRequest={navigationRequest}
       onOpenMarkdownLink={onOpenMarkdownLink}
       onFlushReady={onFlushReady}
       queryClient={queryClient}
@@ -109,6 +117,8 @@ function LoadedDocumentPage({
   canEdit,
   authoringMode,
   focusRequest,
+  targetBlockUuid = null,
+  navigationRequest = 0,
   onOpenMarkdownLink,
   onFlushReady,
   queryClient,
@@ -116,6 +126,22 @@ function LoadedDocumentPage({
   const sessions = usePageSessionRegistry();
   const overlay = useDocumentDraftOverlay(pageUuid);
   const buffer = overlay?.draft ?? persisted.buffer;
+  const units = useMemo(
+    () => DocumentCodec.reconcile(buffer, persisted.sourceMap).units,
+    [buffer, persisted.sourceMap],
+  );
+  const target = units.find((unit) => unit.previousUuid === targetBlockUuid);
+  const navigation =
+    targetBlockUuid && target
+      ? { uuid: targetBlockUuid, request: navigationRequest, ...target.contentRange }
+      : null;
+  const blockAnchors = useMemo(
+    () =>
+      units.flatMap((unit) =>
+        unit.previousUuid ? [{ uuid: unit.previousUuid, offset: unit.contentRange.from }] : [],
+      ),
+    [units],
+  );
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const autosave = useRef(new DebouncedAction()).current;
   const saveInFlight = useRef<Promise<boolean> | null>(null);
@@ -220,6 +246,8 @@ function LoadedDocumentPage({
       <DocumentReadingSurface
         pageUuid={pageUuid}
         markdown={buffer}
+        blockAnchors={blockAnchors}
+        navigation={navigation}
         onOpenMarkdownLink={onOpenMarkdownLink}
       />
     );
@@ -267,6 +295,7 @@ function LoadedDocumentPage({
           value={buffer}
           readOnly={!canEdit}
           focusRequest={focusRequest}
+          navigation={navigation}
           mode={authoringMode}
           pageUuid={pageUuid}
           onChange={updateDraft}
@@ -287,12 +316,32 @@ export function DocumentReadingSurface({
   pageUuid,
   markdown,
   onOpenMarkdownLink,
+  blockAnchors,
+  navigation,
 }: {
   pageUuid: string;
   markdown: string;
   onOpenMarkdownLink?: MarkdownOpenHandler;
+  blockAnchors?: readonly BlockAnchor[];
+  navigation?: (DocumentRange & { uuid: string; request: number }) | null;
 }) {
   const resolveImage = useAttachmentImageResolver(markdown);
+  const root = useRef<HTMLDivElement>(null);
+  const revealed = useRef<{ uuid: string; request: number } | null>(null);
+  useLayoutEffect(() => {
+    if (
+      !navigation ||
+      (revealed.current?.uuid === navigation.uuid &&
+        revealed.current.request === navigation.request)
+    )
+      return;
+    const element = root.current?.querySelector<HTMLElement>(
+      `[data-block-uuid="${CSS.escape(navigation.uuid)}"]`,
+    );
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "instant" });
+    revealed.current = navigation;
+  }, [navigation, markdown]);
   if (!markdown.trim()) {
     return (
       <div className="rounded-2xl border border-dashed border-border/60 px-5 py-12 text-center text-sm text-muted-foreground">
@@ -301,13 +350,16 @@ export function DocumentReadingSurface({
     );
   }
   return (
-    <MarkdownRenderer
-      className="document-reading-surface"
-      context={{ kind: "note", presentation: "reading", pageUuid }}
-      markdown={markdown}
-      onOpenLink={onOpenMarkdownLink}
-      resolveImage={resolveImage}
-    />
+    <div ref={root}>
+      <MarkdownRenderer
+        className="document-reading-surface"
+        context={{ kind: "note", presentation: "reading", pageUuid }}
+        markdown={markdown}
+        onOpenLink={onOpenMarkdownLink}
+        resolveImage={resolveImage}
+        blockAnchors={blockAnchors}
+      />
+    </div>
   );
 }
 

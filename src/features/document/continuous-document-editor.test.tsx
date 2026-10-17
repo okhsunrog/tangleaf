@@ -36,6 +36,41 @@ afterEach(() => {
 });
 
 describe("ContinuousDocumentEditor", () => {
+  it("reveals a block in a read-only editor without changing text, selection, or focus", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    cleanup.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    cleanup.push(() => scroll.mockRestore());
+    const onChange = vi.fn();
+    const render = (request: number) => (
+      <ContinuousDocumentEditor
+        value={"First\n\nTarget"}
+        readOnly
+        focusRequest={0}
+        navigation={{ uuid: "target", request, from: 7, to: 13 }}
+        onChange={onChange}
+        onCompositionEnd={() => undefined}
+        onBlur={() => undefined}
+      />
+    );
+    await act(async () => root.render(render(0)));
+    expect(scroll).toHaveBeenCalledWith(7, { y: "center" });
+    const view = editorView(container);
+    expect(view.state.doc.toString()).toBe("First\n\nTarget");
+    expect(view.state.selection.main.from).toBe(0);
+    expect(view.hasFocus).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    const count = scroll.mock.calls.length;
+    await act(async () => root.render(render(0)));
+    expect(scroll.mock.calls).toHaveLength(count);
+    await act(async () => root.render(render(1)));
+    expect(scroll.mock.calls).toHaveLength(count + 1);
+  });
   it("stops Mod-z before the app-level backend history boundary", async () => {
     const container = document.createElement("div");
     document.body.append(container);

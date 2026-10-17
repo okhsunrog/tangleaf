@@ -21,6 +21,19 @@ import {
 } from "./workspace-model";
 
 describe("window-local workspace model", () => {
+  it("reissues a block reveal without duplicating history when the target is already open", () => {
+    const action = {
+      type: "open_target",
+      target: pageTarget("page", { blockUuid: "block" }),
+      disposition: { kind: OpenDispositionKind.Current },
+    } as const;
+    const first = workspaceReducer(createInitialWorkspaceState(), action);
+    const second = workspaceReducer(first, action);
+    expect(getActivePane(second).back).toEqual(getActivePane(first).back);
+    expect(getActivePane(second).navigationRequest).toBe(
+      (getActivePane(first).navigationRequest ?? 0) + 1,
+    );
+  });
   it("creates one valid primary leaf", () => {
     const state = createInitialWorkspaceState();
 

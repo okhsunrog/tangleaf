@@ -30,6 +30,7 @@ import { remarkMathLimits } from "./remark-math-limits";
 import { remarkNotesLinks } from "./remark-notes-links";
 import type { MarkdownOpenHandler, MarkdownRenderContext } from "./types";
 import { safeMarkdownUrlTransform } from "./url-policy";
+import { rehypeBlockAnchors, type BlockAnchor } from "./rehype-block-anchors";
 
 const INLINE_BLOCK_ELEMENTS = [
   "blockquote",
@@ -80,6 +81,7 @@ export interface MarkdownRendererProps {
   mode?: MarkdownRenderMode;
   onOpenLink?: MarkdownOpenHandler;
   resolveImage?: MarkdownImageResolver;
+  blockAnchors?: readonly BlockAnchor[];
 }
 
 /** Secure semantic renderer shared by notes, previews, and assistant output. */
@@ -90,6 +92,7 @@ export function MarkdownRenderer({
   mode = "flow",
   onOpenLink,
   resolveImage,
+  blockAnchors,
 }: MarkdownRendererProps) {
   const mathRuntime = useSyncExternalStore(
     subscribeMathRuntime,
@@ -137,6 +140,7 @@ export function MarkdownRenderer({
   const rehypePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
     [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
   ];
+  if (blockAnchors) rehypePlugins.push([rehypeBlockAnchors, blockAnchors]);
   const remarkPlugins: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [remarkGfm];
   if (mathRuntime) {
     rehypePlugins.push([

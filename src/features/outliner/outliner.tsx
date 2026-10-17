@@ -13,8 +13,9 @@ import { OutlinerProvider, useOutliner } from "./outliner-store";
 
 type Props = {
   page: Page;
-  initialEditingUuid?: string | null;
+  targetBlockUuid?: string | null;
   focusRequest?: number;
+  navigationRequest?: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   presentation?: PagePresentation;
   readOnly?: boolean;
@@ -29,8 +30,9 @@ const NON_VIRTUAL_MAX = 400;
 
 export function Outliner({
   page,
-  initialEditingUuid = null,
+  targetBlockUuid = null,
   focusRequest = 0,
+  navigationRequest = 0,
   onOpenMarkdownLink,
   presentation = PagePresentation.Editing,
   readOnly = presentation === PagePresentation.Reading,
@@ -58,8 +60,9 @@ export function Outliner({
     <OutlinerProvider
       key={page.uuid}
       blocks={snapshot.document.blocks}
-      initialEditingUuid={initialEditingUuid}
       initialEditingRequest={focusRequest}
+      navigationTargetUuid={targetBlockUuid}
+      navigationRequest={navigationRequest}
       layout={page.layout}
       onOpenMarkdownLink={onOpenMarkdownLink}
       readOnly={readOnly}
@@ -68,7 +71,9 @@ export function Outliner({
       <VirtualOutline
         blocks={snapshot.document.blocks}
         page={page}
-        focusFirstBlockRequest={initialEditingUuid === null ? focusRequest : 0}
+        targetBlockUuid={targetBlockUuid}
+        navigationRequest={navigationRequest}
+        focusFirstBlockRequest={focusRequest}
       />
     </OutlinerProvider>
   );
@@ -78,10 +83,14 @@ function VirtualOutline({
   blocks,
   page,
   focusFirstBlockRequest,
+  targetBlockUuid,
+  navigationRequest,
 }: {
   blocks: readonly Block[];
   page: Page;
   focusFirstBlockRequest: number;
+  targetBlockUuid: string | null;
+  navigationRequest: number;
 }) {
   const store = useOutliner();
   const queryClient = useQueryClient();
@@ -134,7 +143,8 @@ function VirtualOutline({
   );
   // Navigation to a specific block must never wait behind the background batches.
   const editingIndex = rows.findIndex((row) => row.block.uuid === store.editingUuid);
-  const visibleCount = Math.max(progressiveCount, editingIndex + 1);
+  const targetIndex = rows.findIndex((row) => row.block.uuid === targetBlockUuid);
+  const visibleCount = Math.max(progressiveCount, editingIndex + 1, targetIndex + 1);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -147,6 +157,31 @@ function VirtualOutline({
     overscan: 4,
     scrollMargin,
   });
+  const virtualItems = virtualizer.getVirtualItems();
+  const revealed = useRef<{ uuid: string; request: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!targetBlockUuid || targetIndex < 0 || !scrollElement) return;
+    if (
+      revealed.current?.uuid === targetBlockUuid &&
+      revealed.current.request === navigationRequest
+    )
+      return;
+    if (virtualize) virtualizer.scrollToIndex(targetIndex, { align: "center" });
+    const element = rootRef.current?.querySelector<HTMLElement>(
+      `[data-block-uuid="${CSS.escape(targetBlockUuid)}"]`,
+    );
+    if (!element) return;
+    if (!virtualize) element.scrollIntoView({ block: "center", behavior: "instant" });
+    revealed.current = { uuid: targetBlockUuid, request: navigationRequest };
+  }, [
+    targetBlockUuid,
+    targetIndex,
+    navigationRequest,
+    scrollElement,
+    virtualize,
+    virtualizer,
+    virtualItems,
+  ]);
 
   useEffect(() => {
     if (

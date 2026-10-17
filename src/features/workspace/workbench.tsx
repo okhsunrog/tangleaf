@@ -354,6 +354,9 @@ function PagePane({
   content: Extract<PaneContent, { kind: PaneContentKind.Page }>;
 }) {
   const pageSessions = usePageSessionRegistry();
+  const navigationRequest = useWorkspaceStore(
+    (state) => state.panes[paneId]?.navigationRequest ?? 0,
+  );
   const controller = useWorkspaceController();
   const active = useWorkspaceStore((state) => state.activePaneId === paneId);
   const dispatch = useWorkspaceStore((state) => state.dispatch);
@@ -397,10 +400,12 @@ function PagePane({
   return (
     <PageView
       key={page.uuid}
+      navigationRequest={navigationRequest}
       paneId={paneId}
       page={page}
       initialBlockUuid={
-        props.newNote?.pageUuid === page.uuid ? props.newNote.blockUuid : content.blockUuid
+        content.blockUuid ??
+        (props.newNote?.pageUuid === page.uuid ? props.newNote.blockUuid : null)
       }
       autoFocusTitle={
         active && props.newNote?.pageUuid === page.uuid && props.newNote.autoFocusTitle

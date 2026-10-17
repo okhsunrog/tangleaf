@@ -676,6 +676,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
       // it dynamic rows keep their estimates, producing gaps or overlaps.
       data-index={virtualIndex}
       data-block-depth={depth}
+      data-block-uuid={block.uuid}
       data-block-style={block.style.kind}
       data-task-state={block.style.kind === "task" ? block.style.state : undefined}
     >

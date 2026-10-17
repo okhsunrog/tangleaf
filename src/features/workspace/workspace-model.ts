@@ -88,6 +88,8 @@ export type WorkspaceNode =
 
 export type PaneRecord = Readonly<{
   id: PaneId;
+  /** Repeated navigation to the same target still requests a reveal, without adding history. */
+  navigationRequest?: number;
   content: PaneContent;
   back: readonly PaneContent[];
   forward: readonly PaneContent[];
@@ -360,7 +362,15 @@ function navigatePane(
   const pane = getPane(state, destination);
   const target = enforceSingleWritablePage(state, destination, requestedTarget);
   if (paneContentEquals(pane.content, target)) {
-    return { ...state, activePaneId: destination, compactVisiblePaneId: destination };
+    return {
+      ...state,
+      panes: {
+        ...state.panes,
+        [destination]: { ...pane, navigationRequest: (pane.navigationRequest ?? 0) + 1 },
+      },
+      activePaneId: destination,
+      compactVisiblePaneId: destination,
+    };
   }
   return {
     ...state,
@@ -369,6 +379,7 @@ function navigatePane(
       [destination]: {
         ...pane,
         content: target,
+        navigationRequest: (pane.navigationRequest ?? 0) + 1,
         back: [...pane.back, pane.content],
         forward: [],
       },
@@ -486,12 +497,14 @@ function moveHistory(
       ? {
           ...pane,
           content: normalized,
+          navigationRequest: (pane.navigationRequest ?? 0) + 1,
           back: source.slice(0, -1),
           forward: [...pane.forward, pane.content],
         }
       : {
           ...pane,
           content: normalized,
+          navigationRequest: (pane.navigationRequest ?? 0) + 1,
           back: [...pane.back, pane.content],
           forward: source.slice(0, -1),
         };

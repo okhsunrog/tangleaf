@@ -31,6 +31,7 @@ type Props = {
   onCompositionEnd: (value: string) => void;
   onBlur: () => void;
   onOpenMarkdownLink?: MarkdownOpenHandler;
+  navigation?: { uuid: string; request: number; from: number; to: number } | null;
 };
 
 const externalDocumentUpdate = Annotation.define<boolean>();
@@ -122,10 +123,12 @@ export function ContinuousDocumentEditor({
   onCompositionEnd,
   onBlur,
   onOpenMarkdownLink,
+  navigation,
 }: Props) {
   const display = useResolvedDisplay();
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const revealed = useRef<{ uuid: string; request: number } | null>(null);
   const initialValueRef = useRef(value);
   const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur, onOpenMarkdownLink, pageUuid });
   const modeCompartmentRef = useRef(new Compartment());
@@ -322,6 +325,20 @@ export function ContinuousDocumentEditor({
   useEffect(() => {
     if (focusRequest > 0 && !readOnly) viewRef.current?.focus();
   }, [focusRequest, readOnly]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      !view ||
+      !navigation ||
+      (revealed.current?.uuid === navigation.uuid &&
+        revealed.current.request === navigation.request)
+    )
+      return;
+    const from = Math.min(navigation.from, view.state.doc.length);
+    view.dispatch({ effects: EditorView.scrollIntoView(from, { y: "center" }) });
+    revealed.current = navigation;
+  }, [navigation]);
 
   return <div ref={mountRef} className="continuous-document-editor min-h-96 w-full" />;
 }

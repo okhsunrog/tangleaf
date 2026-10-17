@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { MarkdownImageResolver, MarkdownOpenHandler } from "@/features/markdown";
 import type { Block, PageLayout } from "@/lib/api";
 
@@ -28,6 +28,8 @@ export function OutlinerProvider({
   children,
   initialEditingUuid = null,
   initialEditingRequest = 0,
+  navigationRequest = 0,
+  navigationTargetUuid = null,
   layout,
   onOpenMarkdownLink,
   resolveImage,
@@ -37,6 +39,8 @@ export function OutlinerProvider({
   children: React.ReactNode;
   initialEditingUuid?: string | null;
   initialEditingRequest?: number;
+  navigationRequest?: number;
+  navigationTargetUuid?: string | null;
   layout: PageLayout;
   onOpenMarkdownLink: MarkdownOpenHandler;
   resolveImage?: MarkdownImageResolver;
@@ -59,6 +63,31 @@ export function OutlinerProvider({
     () => new Set(blocks.flatMap((block) => (block.parentUuid ? [block.parentUuid] : []))),
     [blocks],
   );
+
+  const revealed = useRef<{ uuid: string | null; request: number } | null>(null);
+  useEffect(() => {
+    if (
+      revealed.current?.uuid === navigationTargetUuid &&
+      revealed.current.request === navigationRequest
+    )
+      return;
+    revealed.current = { uuid: navigationTargetUuid, request: navigationRequest };
+    const parents = new Map(blocks.map((block) => [block.uuid, block.parentUuid]));
+    const ancestors = new Set<string>();
+    let parent = navigationTargetUuid ? parents.get(navigationTargetUuid) : null;
+    while (parent && !ancestors.has(parent)) {
+      ancestors.add(parent);
+      parent = parents.get(parent);
+    }
+    setCollapsedUuids((current) => {
+      const next = new Set(current);
+      for (const uuid of ancestors) {
+        next.delete(uuid);
+        localStorage.removeItem(`outliner.collapsed.${uuid}`);
+      }
+      return next;
+    });
+  }, [blocks, navigationTargetUuid, navigationRequest]);
 
   useEffect(() => {
     if (initialEditingRequest > 0 && initialEditingUuid !== null) {

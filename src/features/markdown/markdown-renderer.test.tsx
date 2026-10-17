@@ -25,6 +25,26 @@ function render(markdown: string, resolveImage?: MarkdownImageResolver): string 
 }
 
 describe("MarkdownRenderer", () => {
+  it("anchors duplicate paragraphs and nested list items by source position, not text", () => {
+    const markdown = "same\n\nsame\n\n- parent\n  - child";
+    const html = renderToStaticMarkup(
+      <MarkdownRenderer
+        context={CONTEXT}
+        markdown={markdown}
+        blockAnchors={[
+          { uuid: "first", offset: 0 },
+          { uuid: "second", offset: 6 },
+          { uuid: "parent", offset: 14 },
+          { uuid: "child", offset: 25 },
+        ]}
+      />,
+    );
+    expect(html).toContain('<p data-block-uuid="first">same</p>');
+    expect(html).toContain('<p data-block-uuid="second">same</p>');
+    expect(html).toContain('data-block-uuid="parent"');
+    expect(html).toContain('data-block-uuid="child"');
+    expect(html.match(/data-block-uuid=/g)).toHaveLength(4);
+  });
   it("renders CommonMark and GFM as semantic HTML", () => {
     const html = render(
       "# Heading\n\n~~old~~ and **new**\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n- [x] done",
