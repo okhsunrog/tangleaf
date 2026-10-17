@@ -20,8 +20,8 @@ Comparison rows are: **old** (our states S1–S4, `c8657b9`…`3e0036e`), **HEAD
 
 | tag      | root                                                                                                                       |
 | -------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `kt/`    | `/home/okhsunrog/code/rust/notes-rs/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
-| `ts/`    | `/home/okhsunrog/code/rust/notes-rs/src/`                                                                                  |
+| `kt/`    | `/home/okhsunrog/code/rust/tangleaf/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
+| `ts/`    | `/home/okhsunrog/code/rust/tangleaf/src/`                                                                                  |
 | `pen/`   | `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src/onyxsdk-pen-1.5.4.3/sources/com/onyx/android/sdk/pen/`                    |
 | `dev/`   | `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src/onyxsdk-device-1.3.5.2/sources/com/onyx/android/sdk/device/`              |
 | `fw/`    | `/home/okhsunrog/tmp_zfs/onyx_framework/out/sources/android/onyx/`                                                         |

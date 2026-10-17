@@ -17,7 +17,7 @@ rectangle when nothing else does, what the cycle costs, and how to use it in a l
 | `native/` | `/home/okhsunrog/tmp_zfs/onyx_framework/native/*.so`                                                                       |
 | `stock/`  | `/home/okhsunrog/tmp_zfs/reversed_onyx_notes_app/src/`                                                                     |
 | `ref/`    | `/home/okhsunrog/tmp_zfs/reference_notes_apps/`                                                                            |
-| `ours/`   | `/home/okhsunrog/code/rust/notes-rs/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
+| `ours/`   | `/home/okhsunrog/code/rust/tangleaf/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
 
 Everything marked **[inference]** is reasoning, not something read out of a file.
 

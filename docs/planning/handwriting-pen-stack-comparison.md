@@ -8,7 +8,7 @@ brings back. Everything here is evidence, not recollection: every claim carries 
 
 | shorthand | root                                                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------------- |
-| `ours/`   | `/home/okhsunrog/code/rust/notes-rs/`                                                                   |
+| `ours/`   | `/home/okhsunrog/code/rust/tangleaf/`                                                                   |
 | `kt/`     | `ours/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`            |
 | `stock/`  | `/home/okhsunrog/tmp_zfs/boox-notes-inspect/decoded/sources/com/onyx/android/`                          |
 | `pen/`    | `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src/onyxsdk-pen-1.5.4.3/sources/com/onyx/android/sdk/pen/` |

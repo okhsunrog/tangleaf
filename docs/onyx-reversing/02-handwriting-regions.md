@@ -16,7 +16,7 @@ Path shorthands:
 | `kcb/`    | `/home/okhsunrog/tmp_zfs/onyx_framework/out-kcb/sources/` (decompiled `com.onyx` system app)                               |
 | `sdk/`    | `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src/`                                                                         |
 | `nat/`    | `/home/okhsunrog/tmp_zfs/onyx_framework/native/libonyx_pen_touch_reader.so` (arm64, file offset = vaddr)                   |
-| `kt/`     | `/home/okhsunrog/code/rust/notes-rs/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
+| `kt/`     | `/home/okhsunrog/code/rust/tangleaf/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/` |
 
 Everything marked **inference** is a reading of behaviour the available binaries do not prove, because
 `/system/bin/surfaceflinger` — the process that actually holds the SF-side region tables — is not

@@ -17,7 +17,7 @@ Sources cited by `path:line`, relative to these roots:
 | `svc/` | `/home/okhsunrog/tmp_zfs/onyx_framework/out-services/sources` (services.jar)                           |
 | `kcb/` | `/home/okhsunrog/tmp_zfs/onyx_framework/out-kcb/sources` (com.onyx system app + bundled `onyxsdk-eac`) |
 | `sdk/` | `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src` (the AARs we link against)                           |
-| `app/` | `/home/okhsunrog/code/rust/notes-rs`                                                                   |
+| `app/` | `/home/okhsunrog/code/rust/tangleaf`                                                                   |
 
 Everything below is read from decompiled code. Statements marked **[inference]** are not directly
 witnessed in code.

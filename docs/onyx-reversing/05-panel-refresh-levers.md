@@ -17,7 +17,7 @@ Evidence roots (all paths absolute):
 - `com.onyx` system app: `/home/okhsunrog/tmp_zfs/onyx_framework/out-kcb/sources/`
 - Onyx SDK: `/home/okhsunrog/tmp_zfs/onyx_sdk_decompiled/src/onyxsdk-device-1.3.5.2/sources/`
 - Native: `/home/okhsunrog/tmp_zfs/onyx_framework/native/`
-- Ours: `/home/okhsunrog/code/rust/notes-rs/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`
+- Ours: `/home/okhsunrog/code/rust/tangleaf/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`
 
 Statements marked **[inference]** are not directly attested by code.
 
@@ -697,7 +697,7 @@ GLR16 GLD16 GCC16 DU4 A2 REGAL HLC mxcfb EPDC waveform kaleido turbo` across all
 ## 5. What we currently do that the evidence says is pointless
 
 Referring to
-`/home/okhsunrog/code/rust/notes-rs/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`.
+`/home/okhsunrog/code/rust/tangleaf/plugins/tauri-plugin-mobile-system/android/src/main/java/dev/okhsunrog/mobile_system/`.
 
 0. **`ensureSpeedRefreshProfile()` writes the value that was already there.**
    `kcb.apk!/res/raw/eac_noteair4c.json` sets `refreshModeIndexDefault: "refresh_mode_2"` and all three
@@ -801,7 +801,7 @@ SF-global and transient, so it is the one speed knob that does not persist. Noth
 EAC profile to be Speed.
 
 **Also adopt the render-flag cycle** described in
-`/home/okhsunrog/code/rust/notes-rs/docs/planning/handwriting-pen-stack-comparison.md` §11 — stock,
+`/home/okhsunrog/code/rust/tangleaf/docs/planning/handwriting-pen-stack-comparison.md` §11 — stock,
 notable, saber, PngNote and mokke all tear down and rebuild the firmware scribble state around every
 menu/tool/refresh event, and we only do it on a named pause. That is a pen-stack change, not a
 refresh lever, but it is the single most-attested de-ghosting behaviour in the corpus.

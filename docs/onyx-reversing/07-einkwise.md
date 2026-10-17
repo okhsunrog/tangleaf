@@ -3,7 +3,7 @@
 > Written 2026-09-07 against the decompiled `com.onyx` system app (`out-kcb`), `framework.jar`
 > (`out`), `services.jar` (`out-services`), the `kcb.apk` and `framework-res.apk` raw resources, and
 > `/system/bin/surfaceflinger`. It builds on, and does not repeat,
-> `/home/okhsunrog/code/rust/notes-rs/docs/onyx-reversing/05-panel-refresh-levers.md` (the lever
+> `/home/okhsunrog/code/rust/tangleaf/docs/onyx-reversing/05-panel-refresh-levers.md` (the lever
 > inventory) and `…/04-system-screennote-pipeline.md` (the note pipeline). Where this report
 > contradicts those, the contradiction is called out explicitly.
 >
