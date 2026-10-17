@@ -1282,3 +1282,7 @@ html::before {
   outline-offset: 3px;
   border-radius: 4px;
 }
+
+[data-workspace-scroll] {
+  container-type: inline-size;
+}

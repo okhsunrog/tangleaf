@@ -30,7 +30,11 @@ describe("RecentJournals", () => {
     }).format(new Date(2026, 6, 17));
 
     expect(html).toContain('disabled=""');
-    expect(html).toContain(">17</span>");
+    expect(html).toContain(
+      new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" }).format(
+        new Date(2026, 6, 17),
+      ),
+    );
     expect(html).toContain(`title="${expectedTitle}"`);
     expect(html).not.toContain("17.07");
   });
@@ -46,7 +50,8 @@ describe("RecentJournals", () => {
     );
 
     expect(html).not.toContain("overflow-x-auto");
-    expect(html).toContain("grid-cols-7");
+    expect(html).toContain("Recent entries");
+    expect(html).toContain("flex-wrap");
     expect(html.match(/aria-label="Open journal /g)).toHaveLength(7);
   });
 });

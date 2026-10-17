@@ -310,10 +310,10 @@ export function PageView({
   return (
     <article
       ref={articleRef}
-      className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-8 pt-12 pb-24 sm:px-12 lg:px-16"
+      className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-[clamp(1rem,4cqi,2.5rem)] pt-6 pb-16"
     >
       {find.bar}
-      <div className="mb-8 flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
+      <div className="mb-4 flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
         <button type="button" onClick={onOpenAllNotes} className="transition hover:text-foreground">
           All notes
         </button>
@@ -371,7 +371,7 @@ export function PageView({
             }}
             placeholder="Untitled note"
             aria-label="Note title"
-            className="min-h-14 w-full min-w-0 flex-1 resize-none appearance-none overflow-hidden border-0 bg-transparent px-0 py-2 text-[clamp(1.75rem,3vw,2.25rem)] leading-[1.15] font-semibold tracking-[-0.035em] text-foreground shadow-none outline-none transition-colors placeholder:text-muted-foreground/30 read-only:cursor-default selection:bg-primary/25"
+            className="min-h-14 w-full min-w-0 flex-1 resize-none appearance-none overflow-hidden border-0 bg-transparent px-0 py-2 text-[clamp(1.75rem,4cqi,2.25rem)] leading-[1.15] font-semibold tracking-[-0.035em] text-foreground shadow-none outline-none transition-colors placeholder:text-muted-foreground/30 read-only:cursor-default selection:bg-primary/25"
           />
         )}
         <div className="mt-2 flex items-center gap-1">
@@ -421,7 +421,7 @@ export function PageView({
         </div>
       )}
 
-      <div className="mt-4 mb-9 flex items-center gap-2">
+      <div className="mt-3 mb-5 flex items-center gap-2">
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] eink:text-xs font-semibold tracking-wide text-primary">
           {page.layout.toUpperCase()}
         </span>
