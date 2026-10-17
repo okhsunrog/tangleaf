@@ -462,9 +462,7 @@ reflected handles we already hold (`EACReflectUtils.sMethodGetAppConfigFromServi
   "supportEAC": true, // must already be true
   "enable": true, // must already be true
   "globalActivityConfig": {
-    "refreshConfig": {
-      /* leave our Speed profile exactly as-is */
-    },
+    "refreshConfig": {/* leave our Speed profile exactly as-is */},
     "noteConfig": {
       "enable": true, // + was false
       "supportNoteConfig": true, // + was false  <-- the "optimization block"

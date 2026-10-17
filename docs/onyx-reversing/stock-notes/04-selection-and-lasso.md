@@ -500,7 +500,7 @@ Additional release/cancel conditions not listed above [code, `EEH`]:
   down exactly at the 5 s mark is unknown].
 - `onRawPenDownEvent` cancels a pending release timer (`c()`); only a following `RawPenUpEvent`
   restarts it. `RawPenDownEvent/RawPenUpEvent` are posted by `ScribbleHandler.onBeginRawErasing /
-onEndRawErasing` (`ScH:931-936, 962-967`), `EraseHandler` (`:72, :92`) and `EpdShapeHandler`
+  onEndRawErasing` (`ScH:931-936, 962-967`), `EraseHandler` (`:72, :92`) and `EpdShapeHandler`
   (`:324, :390`) — i.e. eraser strokes and shape-tool strokes, not plain pen strokes [code: grep].
 - `onBeforePageChangeEvent` and `onCloseDocumentEvent` call `d()` **immediately** (no 5 s delay)
   when fast mode is on [code].
@@ -650,14 +650,14 @@ Pen-state values in rows 3b–6 are derived from the predicates (§3, §5.5) [in
 
 ### 6.3 Update modes used in the selection flow
 
-| Situation                              | Mode                                                                                                                   | Source                                                         |
+| Situation | Mode | Source |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------- |
-| TRANSFORM phase (and rectangle drag)   | transient `UI_A2_QUALITY_MODE` 2308 = `ANIM                                                                            | DITHER                                                         | Y1` for all app frames [inferred scope from SF name] | `EEH:109-116, 176-179`; `SDM:392, 477`; `05-panel-refresh-levers.md` §1.2 |
-| Fast-mode dither                       | threshold 160 on colour devices (255 mono), back to 128 on release                                                     | `EEH:81, 136-143`                                              |
-| Turbo                                  | `setEpdTurbo(deviceConfig.epdTurbo)` = 5 on NA4C, never restored by the release path                                   | `EEH:109-116`, `res/raw/note_noteair4c.json`                   |
-| App invalidates                        | default `DisplayArgs` → no per-view mode; `REGAL_PLUS` once only if `enableRegalModeOnce` (not used in selection code) | `InkRenderManager.java:79-128`                                 |
-| Selection-menu GC cadence              | `applyGCOnce()` + `byPass(0)` every N clicks                                                                           | `EpdDeviceManager.java:16-40`, `SelectionMenuHandler.java:346` |
-| After rectangle lasso / every lasso up | `resetViewUpdateMode(view)`                                                                                            | `req/ClearSelectionPathRequest.java:19`                        |
+| TRANSFORM phase (and rectangle drag) | transient `UI_A2_QUALITY_MODE` 2308 = `ANIM                                                                            | DITHER                                                         | Y1` for all app frames [inferred scope from SF name] | `EEH:109-116, 176-179`; `SDM:392, 477`; `05-panel-refresh-levers.md` §1.2 |
+| Fast-mode dither | threshold 160 on colour devices (255 mono), back to 128 on release | `EEH:81, 136-143` |
+| Turbo | `setEpdTurbo(deviceConfig.epdTurbo)` = 5 on NA4C, never restored by the release path | `EEH:109-116`, `res/raw/note_noteair4c.json` |
+| App invalidates | default `DisplayArgs` → no per-view mode; `REGAL_PLUS` once only if `enableRegalModeOnce` (not used in selection code) | `InkRenderManager.java:79-128` |
+| Selection-menu GC cadence | `applyGCOnce()` + `byPass(0)` every N clicks | `EpdDeviceManager.java:16-40`, `SelectionMenuHandler.java:346` |
+| After rectangle lasso / every lasso up | `resetViewUpdateMode(view)` | `req/ClearSelectionPathRequest.java:19` |
 
 No `HAND_WRITING_REPAINT_MODE`, `handwritingRepaint`, full-screen `invalidate(view, GC)` or
 `applyGCOnce` appears in `SelectionHandler`, the selection actions or requests [code: grep over

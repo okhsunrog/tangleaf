@@ -307,7 +307,7 @@ If schema is not 7 it does nothing (debug log `### not in handwriting schema.`).
   `ResumeRawDrawingRequest.execute()` → `o()` → `n()` → `k()` and `h()`
   (`note/note/request/pen/ResumeRawDrawingRequest.java:48-65,86-104,117-131`), which sends
   `setErasePathDrawing(isEraseTrackByRawRender(eraserType) || provider == SELECTION,
-isMoveStrokeErase(eraserType) ? 8 : 5)` and `setBrushRawDrawing(resumePenBean.i)` **before**
+  isMoveStrokeErase(eraserType) ? 8 : 5)` and `setBrushRawDrawing(resumePenBean.i)` **before**
   re-enabling input and render. `EraseUtils.isEraseTrackByRawRender` is true for eraser types 0, 1, 2
   and `isMoveStrokeErase` for 0, 1 (`sdk/scribble/utils/EraseUtils.java:23-29`) [code]. It also sets
   `setStrokeParameters(5, {5.0})` and `(8, {width, 0.5, 0.1})` (`:52-55`). So with a stroke, move or
@@ -395,7 +395,7 @@ Lambda `0x5644cc` (from `handleClearTransientScopeUpdate`) [code]:
 
 1. if `FixedUpdateEntryManager::inTransientFastMode()` is false → return (nothing at all);
 2. `EpdcManager::clearTransientUpdateMode(clearFlag)@0x5599e4` → `apply(slot 1, …, clearFlag, mode
--1)` → `applyUpdateAction` → `setFBSchema(none, …, clearType)` → `setEbcUpdateScheme(2, 0)` (sleeps
+   -1)` → `applyUpdateAction` → `setFBSchema(none, …, clearType)` → `setEbcUpdateScheme(2, 0)` (sleeps
    100 ms because prev = 4) → `clearScreen(clearType)`. For the transient slot on an HW-Tcon device
    the fast→none action value is 8 (`FixedUpdateEntryManager` ctor `0x556f84`: `mov w9,#0x8` in the
    `vendor.onyx.htcon` branch; table in `07-einkwise.md` §5.4.6) [code]. With `clearFlag = 1`
@@ -403,7 +403,7 @@ Lambda `0x5644cc` (from `handleClearTransientScopeUpdate`) [code]:
    = GC. The scheme is already 2, so 98 is used rather than `*(0xaca250)` [code]. With `clearFlag = 0`,
    no GC here [code, per `07-einkwise.md` §5.4.6];
 3. **unconditionally** (still inside the "was fast" branch): `EpdcWrapper::addEpdc(EPDC+0xb8, 0, 0,
-width, height, 5)` (PLT `0xa21530`, `_ZN7android11EpdcWrapper7addEpdcEiiiii`; the two size
+   width, height, 5)` (PLT `0xa21530`, `_ZN7android11EpdcWrapper7addEpdcEiiiii`; the two size
    arguments are the returns of provider vtable `+0x20` and `+0x18`, read as width/height
    [inferred]) and provider `+0x28`
    (`refresh`) → a **full-screen update in mode 5 (AUTO)** on the next composition [code].

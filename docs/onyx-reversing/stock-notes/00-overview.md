@@ -338,7 +338,7 @@ Per gesture (03 §3.3–§3.4, §4.1) [code]:
 1. `BasePageAction` → display of the new page with `pauseArgs` (PR, no resume), then
    `PenEvent.resumeRawDrawing(max(600 − elapsed, 500))`.
 2. `EpdDeviceManager.applyGCWithInterval()`: every 10th tick (default `enableFullRefresh =
-isColorDevice()`, count 10; stored value **[unknown]**) `byPass(0)`, `applyGCOnce()` (one-shot 98,
+   isColorDevice()`, count 10; stored value **[unknown]**) `byPass(0)`, `applyGCOnce()` (one-shot 98,
    or `[0xaca250]` while scheme 4) and an INV. The GC lands on whichever app frame composes next
    [inferred].
 3. If fast mode is on: `onBeforePageChangeEvent` clears it immediately (dither 128,

@@ -59,7 +59,7 @@ generation than both Tangleaf's (`pen 1.5.4.3` / `device 1.3.5.2`) and the SDK b
    tablet PngNote sends **zero** SF pen, region or refresh transactions [inferred from code].
 2. A second, independent reason: even `device-1.2.9`'s `SDMDevice` looks the pen methods up as static
    methods on `android.view.View` (`dev129/device/SDMDevice.java:438-473`, e.g. `r0 =
-View.setScreenHandWritingPenState(int)`). The 4.2 framework has them on
+   View.setScreenHandWritingPenState(int)`). The 4.2 framework has them on
    `android.onyx.ViewUpdateHelper` (`fw/ViewUpdateHelper.java:602, 1195-1272`) and `fwv/View.java`
    contains no `HandWriting` method at all (grep count 0) [code]. This framework.jar is byte-identical
    to the tablet's (§0). The reflection would resolve to null and do nothing even if the board were
@@ -226,7 +226,7 @@ is just `f()`: a buffer post with no SF transaction [code].
    - Region mode, exclude, brush/eraser flags and `ENABLE_POST(0)` are never sent.
 4. Later triggers with the same size send only `SET_SCREEN_HANDWRITING_REGION_LIMIT` (`:201-203`). A
    size change while open runs `ensureCloseRawRendering` (close sequence) and reopens (`:163-164,
-:187-189`) [code]. The focus-gain path also runs one cycle + frame first (`onRestart`, `:284-291`).
+   :187-189`) [code]. The focus-gain path also runs one cycle + frame first (`onRestart`, `:284-291`).
 5. No GC, update mode or fast mode [code].
 
 The −40 px offset is empirical ("I don't know the reason", `:157-158`). It shifts the limit
@@ -244,7 +244,7 @@ The −40 px offset is empirical ("I don't know the reason", `:157-158`). It shi
 3. Up: `onRawDrawingTouchPointListReceived` → `endDrawing`, draws the path into the bitmap with a
    fixed 3 px anti-aliased `Paint` (no pressure), pushes undo, notifies the lazy saver
    (`:110-119`, `BitmapBackend.kt:96-144`). `onEndRawDrawing` → `requestDelaySync()` (`:103-105,
-:385-388`) [code]. The reader's 500 ms pen-up refresh fires into the empty base
+   :385-388`) [code]. The reader's 500 ms pen-up refresh fires into the empty base
    `onPenUpRefresh` [code].
 4. +2000 ms: `maySyncBack` (`:395-418`) re-arms itself while pen activity continues (postponed within
    the last 1.9 s) or a sync ran within 100 ms. Otherwise, if render is on, it runs
@@ -269,7 +269,7 @@ The only eraser mode is a hard-edged 30 px pixel eraser (`eraserPaint`, white, n
   (schema 7, `EUS s 3` on the first sample). This is a live firmware "erase" trace built from the
   normal pen reader [inferred; that SF honours white on the Kaleido panel is [unknown]]. The app's
   point list at lift draws the white path into the bitmap (`:110-114`), then `if (isEraser)
-syncBackendToSurface()` (`:117-118`) → **cycle + frame immediately after every erase stroke**
+  syncBackendToSurface()` (`:117-118`) → **cycle + frame immediately after every erase stroke**
   [code]. `onEndRawDrawing` also arms the 2 s check, which then finds a recent sync and re-arms
   or returns (`:397-405`).
 - The white trace also paints over the page template (`background`) until the frame restores it
@@ -284,7 +284,7 @@ syncBackendToSurface()` (`:117-118`) → **cycle + frame immediately after every
    and does not enter schema 7 for the eraser end** [inferred]. If the previous app left it on, SF draws
    an eraser trace in that app's style [inferred].
 2. App: the in-process reader reports `isErasing`. `onBeginRawErasing` → `EpdController.enablePost(view,
-1)` (`:121-126`) → `ENABLE_POST(1)`. If an earlier tip stroke left SF in schema 7 (likely: pen
+   1)` (`:121-126`) → `ENABLE_POST(1)`. If an earlier tip stroke left SF in schema 7 (likely: pen
    strokes wait 2 s), this exits it (`Post enabled!`, `EUS s 2`, 150 ms blocking) **while pen state
    stays 2** [inferred via 07 §4.4].
 3. During: erase points are accumulated and applied to the bitmap every 100 points or once 300 ms

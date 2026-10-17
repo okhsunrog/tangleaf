@@ -68,7 +68,7 @@ function firstRgbaPixel(png: Buffer): [number, number, number, number] {
   assert.equal(png.readUInt8(24), 8, "fixture PNG must use 8-bit channels");
   assert.equal(png.readUInt8(25), 6, "fixture PNG must be RGBA");
   const chunks: Buffer[] = [];
-  for (let offset = 8; offset < png.byteLength; ) {
+  for (let offset = 8; offset < png.byteLength;) {
     const length = png.readUInt32BE(offset);
     const kind = png.toString("ascii", offset + 4, offset + 8);
     if (kind === "IDAT") {

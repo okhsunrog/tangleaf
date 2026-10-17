@@ -494,13 +494,7 @@
     @apply text-foreground;
     background: transparent;
     font-family:
-      Inter,
-      "SF Pro Text",
-      "Segoe UI Variable",
-      "Segoe UI",
-      system-ui,
-      -apple-system,
-      sans-serif;
+      Inter, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 }

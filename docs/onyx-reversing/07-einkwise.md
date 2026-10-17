@@ -1291,7 +1291,7 @@ Each is one testable action.
 11. In EinkWise, press **reset** on our app and observe whether the WebView reloads — confirms the
     `args_operation_flag = 2` → `onResetConfig` → `reloadAllWebView` path (collision #8).
 12. Send `am broadcast -a com.onyx.EAC_FETCH_FROM_CLOUD --es args_action REQUEST_UPDATE_APP_CONFIG
---es args_pkg dev.okhsunrog.tangleaf` on Wi-Fi and re-read our stored config — establishes
+    --es args_pkg dev.okhsunrog.tangleaf` on Wi-Fi and re-read our stored config — establishes
     whether the Onyx cloud has an entry for us and whether it silently replaces what we wrote
     (collision #10).
 13. Read `/onyxconfig/mmkv/onyx_config` (root, or `dumpsys oec_service`) and grep for

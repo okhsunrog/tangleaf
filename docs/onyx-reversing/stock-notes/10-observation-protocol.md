@@ -89,7 +89,7 @@ also a state change. Neither is needed for the first pass.
 - `X` = `Post enabled!` then, ~150 ms later, `EUS, s 2 c 0` (or `s 4` if a fast mode is in a fixed
   slot).
 - `F` = the observed flash signature: `EUS, s 2 c 0` followed by `onyx_tcon_send_cmd … waveform[2]
-update_mode[1] flags[0x1000]` (handoff).
+  update_mode[1] flags[0x1000]` (handoff).
 - `A2` = `EUS, s 4 c 0` followed by `waveform[4]` updates.
 - "partial" = an `onyx_tcon_send_cmd` with `update_mode[0]`.
 

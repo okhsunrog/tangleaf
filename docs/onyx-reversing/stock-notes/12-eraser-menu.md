@@ -49,7 +49,7 @@ The second decompilation (`~/tmp_zfs/reversed_onyx_notes_app/src`) matches on th
 - **mm → px:** `px = mm × densityDpi / 25.4`, with `densityDpi` from the app's `DisplayMetrics`
   [code, `NA/sdk/extension/DimensKt.java:11-16`]. On this tablet `densityDpi = 300` [inferred, §6.4], so
   1 mm = 11.811024 px. The same px value is the SurfaceFlinger soft-eraser width (`SET_STROKE_PARAMETERS(8, [px,
-0.5, 0.1])`) and the hit-test diameter in screen pixels [code, §6.5].
+  0.5, 0.1])`) and the hit-test diameter in screen pixels [code, §6.5].
 - **Correction to the brief.** 80.314964 px is **6.80 mm**, not 5.00 mm. 5.00 mm is 59.05512 px, and A7 records
   that value after the user picked the 5.00 mm eraser [log, `A7:445`]. 5.905512 px is 0.50 mm [log, `A7:250`].
 - **"Do Not Erase Shapes"** (default OFF) makes every erase path skip geometric shapes: line, circle,
@@ -100,7 +100,7 @@ The second decompilation (`~/tmp_zfs/reversed_onyx_notes_app/src`) matches on th
 - No `values-en*` file overrides any eraser string or dimension. The English strings come from
   `RES/values/strings.xml` [code].
 - Every size is multiplied by the popup's `getFixScale()`. That is 1.0 unless it is set (`BaseNotePopWindow.java:35,
-80-86`), and the screenshot measurements fit 1.0 [code + shot].
+  80-86`), and the screenshot measurements fit 1.0 [code + shot].
 
 ---
 
@@ -385,7 +385,7 @@ through `widthPercentage` (§5.2) [code]. The truncating `(int)` is corrected by
 
 - Defaults: `DeviceConfig.defaultEraserMoveWidthWithMM = 5.0` and `defaultEraserStrokeWidthWithMM = 0.5`
   (`DeviceConfig.java:96-97`). At config load they become `EraseConstant.DEFAULT_ERASER_MOVE_WIDTH =
-mmToPx(5.0)` and `DEFAULT_ERASER_STROKE_WIDTH = mmToPx(0.5)` (`DeviceConfig.java:205, 226-233`,
+  mmToPx(5.0)` and `DEFAULT_ERASER_STROKE_WIDTH = mmToPx(0.5)` (`DeviceConfig.java:205, 226-233`,
   `ConfigManager.java:29-31`). `getDefaultEraserWidth(type)` returns the move width for type 1 and the stroke
   width for every other type, including 2 (`EraseConstant.java:33-38`) [code]. `note_noteair4c.json` does not
   override them [code].
@@ -422,7 +422,7 @@ EinkWise per-app DPI), stored widths would show as different mm values [inferred
 ### 6.5 Where the width goes
 
 - **SurfaceFlinger trace:** `ResumeRawDrawingRequest` sends `setStrokeParameters(8, [activeEraserArgs.width, 0.5,
-0.1])` on every resume [code, `ResumeRawDrawingRequest.java:54`]. A diameter change while the menu is open
+  0.1])` on every resume [code, `ResumeRawDrawingRequest.java:54`]. A diameter change while the menu is open
   reaches SF only at the resume after the menu closes. The popup keeps the pen paused, and
   `EraseWidthChangedEvent` has one subscriber, which saves the float menu (`FragmentFloatMenu.java:372-375`)
   [code + inferred].
@@ -447,7 +447,7 @@ The label text has no click listener [code]. The two rows appear in the view mod
 ### 7.1 "Do Not Erase Shapes"
 
 - MMKV `ERASE_GRAPHICS_SWITCH_KEY`, default **false**, global (`NoteMMKVHelper.java:143, 1089-1090,
-1931-1932`) [code].
+  1931-1932`) [code].
 - When ON, "graphical" shapes are excluded from erasing. The list is `ShapeFactory.isGraphicalShape`: line (7),
   polyline (31), polygon (17), wave line (25), triangle (8), circle (0), rectangle (1), trapezoid (26), regular
   polygon (24), regular hexagon (27), arrow line (28), rhombus (18), curve (39), universal shape (40)
@@ -462,7 +462,7 @@ The label text has no click listener [code]. The two rows appear in the view mod
 ### 7.2 "Auto-deselect Eraser"
 
 - MMKV `AUTO_DESELECT_ERASER_KEY`, default **false**, global (`NoteMMKVHelper.java:77, 1071-1072,
-1358-1359`) [code].
+  1358-1359`) [code].
 - When ON, `EraseHandler.onEraseFinished` → `y0()` → `switchToPreviousProvider()` runs after **every finished
   erase gesture with the eraser tool**. It activates the tool that was active before the eraser, unless that
   was `NONE` or the eraser (`EraseHandler.java:29-32, 99-101`, `ScribbleHandler.java:1277-1283`) [code]. Only

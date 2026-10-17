@@ -291,7 +291,7 @@ Decision: **no column**. All our tools fit in one bar.
 
 - **Contain, top-aligned, horizontally centred**, with a uniform gutter `g` (6 CSS in compact,
   16 CSS from 1000 CSS up). This is stock's `FitScreenRequest`, `scale = min(viewW/pageW,
-viewH/pageH)`, except that stock centres vertically. We align to the top because when the sheet is
+  viewH/pageH)`, except that stock centres vertically. We align to the top because when the sheet is
   width-limited (phones) it then stays put if the viewport height changes. On the tablet the sheet is
   height-limited, so the two are the same.
 - Width cap 900 CSS (as today, bounding the canvas buffer on large desktops). Width floor 280 CSS

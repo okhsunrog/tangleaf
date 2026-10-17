@@ -300,7 +300,7 @@ partial or pixel eraser.
 - **Per gesture:** the tip is a brush touch → SF reader 2 inks a marker (or dash) stroke with the
   current colour; schema 7 / `EUS s 3`. Pen state **2** throughout [code + doc 07 §4.2]. Up:
   `onRawDrawingList` → `Mode.Erase` → `onRawErasingList` → `commitErase(dirty, areaErase = type ==
-SELECT)` — as §5.3 step 5 with **150 ms** (PEN) or **500 ms** (SELECT)
+  SELECT)` — as §5.3 step 5 with **150 ms** (PEN) or **500 ms** (SELECT)
   (`OnyxInputHandler.kt:234-235, 385-387`) [code]. The SDK arms its pen-up timer for this drawing
   gesture; Notable ignores it [code].
 - Unlike stock, the tip trace is a brush style (marker 2 / dash 5), not SF's eraser style 8 [code].
@@ -456,7 +456,7 @@ the in-process reader is paused, not closed [inferred]. Stock: close (3, 0), `re
 - **Return:** `onRestart` → `reinitSignal` → `drawCanvas.init()` (new callback) + a post that fails
   until the surface exists; `surfaceCreated` → full `setupSurface` (3, 0, 1, 2, re-push) + post + F;
   `onResume` / focus → `updatePenAndStroke`, post, `updateDrawingState` (`MainActivity.kt:237-243,
-264-270`, `CanvasObserverRegistry.kt:151-164, 204-212`) [code]. `setupSurface` enables drawing even
+  264-270`, `CanvasObserverRegistry.kt:151-164, 204-212`) [code]. `setupSurface` enables drawing even
   if `isDrawing` is false at that moment [code].
 - **Dialog-like windows over the app** (system dialogs, notification shade): focus loss → P; regain
   → resume [code].

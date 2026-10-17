@@ -1183,7 +1183,7 @@ plus the `status()` counters.
   device-wide setting means our app behaves like every other app on the device — which is what a
   BOOX owner expects.
 - A post-input settle repaint in AUTO after every interaction burst (`debouncer(true, epdMode 5,
-shortDelay 80, longDelay 400…1200, gcInterval)`), which is why HD removed our accumulated
+  shortDelay 80, longDelay 400…1200, gcInterval)`), which is why HD removed our accumulated
   ghosting in the first place.
 - Per-app DPI, forced full-screen and the rest of §4.1 keep working — including anything the user
   has already configured for us in EinkWise.

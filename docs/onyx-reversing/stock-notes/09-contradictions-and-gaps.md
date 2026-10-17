@@ -103,7 +103,7 @@ Path prefixes: `N/` = `~/tmp_zfs/boox-notes-inspect/decoded/sources/com/onyx/and
   is entered by scroll, pinch, drags for any handler.
 - Source: `EpdEventHandler.onApplyFastModeEvent` enters fast mode on `enable` without checking the
   handler; only `k()` (the exit request) checks `renderInFastMode()` (`EpdEventHandler.java:185-190,
-203-217`) [code].
+  203-217`) [code].
 - **Resolved: fast mode can be on with any tool** (for 5 s after a scroll or pinch). With the pen or
   eraser tool active, a raw pen-up inside that window re-arms the exit and marks the extra
   pause/resume.
@@ -170,7 +170,7 @@ Path prefixes: `N/` = `~/tmp_zfs/boox-notes-inspect/decoded/sources/com/onyx/and
 - Reconciliation: `handleEnablePost(v)` calls `stopHandwriting` if `v >= 0 && androidDrawing != v`
   (02 and 07 agree at `SF@0x560c18-0x560c30`). With `v = 0` that happens only when
   `androidDrawing == 1`, i.e. outside schema 7, where `stopHandwriting` returns (`### not in
-handwriting schema.`). **Resolved: no effect** [code]. The per-pid suppression reading of the older
+  handwriting schema.`). **Resolved: no effect** [code]. The per-pid suppression reading of the older
   document has no support in the handler.
 
 ### C14. `REPAINT_EVERY_THING` and `stopHandwriting`

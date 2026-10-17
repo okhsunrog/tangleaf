@@ -275,7 +275,7 @@ selectPenShape(pen, false);                    // ShapeChangeAction(type).setPen
 - **Global:** MMKV instance `"NOTE"`, key **`QUICK_PEN_KEY`** (`NoteMMKVHelper.java:257, 964`), value the
   `QuickPenList` JSON of §3.1. `QuickPenManager` writes it on select, add, edit (every popup change,
   `updateSaveQuickData`), delete, and when it strips invalid entries (`QuickPenManager.java:31-36, 42-55, 125-128,
-141-175`) [code].
+  141-175`) [code].
 - **Per notebook:** `NoteModel.notePenInfo` → `NotePenInfo.quickPenList`, stored as JSON in the notebook's
   `notePenInfo` field (`NoteInfoPBDocument.java:48, 95`). On save the notebook gets `QuickPenManager`'s current list
   (`GlobalNoteBundle.java:130-135`, `SaveDocumentAction.java:350-351`) [code]. The same `NotePenInfo` also holds
@@ -687,7 +687,7 @@ MMKV, rebuild the toolbar (new bar colour), update the label, re-tint the sub-ty
 ### 9.3 Label, custom colours, colour vs mono
 
 - Label: `format_color_string` = `%1s(%2s)` (`strings.xml:1203`) with the name and `"#" +
-Integer.toHexString(argb)` upper-cased (`PenPopup.java:272-274`, `ColorUtils.java:211-213`): **`Red(#FFFF6163)`**,
+  Integer.toHexString(argb)` upper-cased (`PenPopup.java:272-274`, `ColorUtils.java:211-213`): **`Red(#FFFF6163)`**,
   no space, 8 hex digits including alpha [code + shot].
 - **No custom colours.** `StrokeColor.addStrokeColor` / `setList` are never called and `StrokeColorPopup` is never
   constructed [code, grep]. A slot colour outside the list would show `(#FF……)` with an empty name [inferred].

@@ -51,7 +51,7 @@ identity-transform (`storage.rs:346, 405`) [факт].
 ### 0.2 Синхронизация: что есть и чего нет [факт]
 
 - Есть. Публикация = неизменяемый корень документа + операция `OpKind::InkPublish(Publish {
-version_uuid, page_uuid, parents, root_hash, device_name })` в общий outbox
+  version_uuid, page_uuid, parents, root_hash, device_name })` в общий outbox
   (`crates/notes-core/src/operation.rs:77`, `crates/notes-core/src/ink/versions.rs:10-17`). Блобы
   ходят через `/v1/ink/missing|upload|download` (`server/src/api.rs:216-232`,
   `crates/notes-sync/src/transport/ink.rs`). Причинный DAG версий; `heads.length > 1` — конфликт;
@@ -64,7 +64,7 @@ version_uuid, page_uuid, parents, root_hash, device_name })` в общий outbo
   сервер хранит на пользователя только настройки ИИ (`server/src/api.rs:220, 284-327`); перенос
   конфигурации — ручной JSON-экспорт, окно и локальные вещи в него не входят
   (`docs/architecture/configuration-transfer.md`). Блокнотов/папок нет: `PageKind = Note |
-Handwriting | Journal` (`crates/notes-core/src/model.rs:351-355`); многостраничные заметки отложены
+  Handwriting | Journal` (`crates/notes-core/src/model.rs:351-355`); многостраничные заметки отложены
   (`handwriting-integration.md:74`). Шаблонов нет: фон только `plain | grid` (`input.rs:35-39`).
 
 ### 0.3 Что устройство знает о своём экране [факт, если не сказано иное]

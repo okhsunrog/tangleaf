@@ -50,7 +50,7 @@ The device class is `SDMDevice` (`lito`) as for stock and Tangleaf (`../stock-no
 1. **One SF-only `TouchHelper` on a `SurfaceView`.** `OnyxCanvasView` is a `SurfaceView`
    (`nt/ui/OnyxCanvasView.kt:46-53`) and creates `TouchHelper.create(this, true, penInputHandler)`
    (`:876`), i.e. feature 2 = `SFTouchRender` only, no `AppTouchRender` (`pen/TouchHelper.java:377-379,
-358-375`) [code]. Callbacks reach the app on the main thread through `SFTouchRender`'s `post`
+   358-375`) [code]. Callbacks reach the app on the main thread through `SFTouchRender`'s `post`
    wrapper (`pen/touch/SFTouchRender.java:44-134`) [code].
 2. **The render flag follows the tool.** Pen tool and the two lasso tools (lasso select, lasso
    eraser): render on (pen state 2). Stroke eraser, pixel ("standard") eraser, rectangle select, text

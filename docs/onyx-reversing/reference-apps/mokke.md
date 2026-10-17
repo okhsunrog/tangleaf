@@ -119,7 +119,7 @@ coordinator, 2026-09-25). Mokke has no branch on firmware or Android version bey
    [code].
 6. **Per stroke: nothing reaches SF.** At pen-up the app paints the stroke into its bitmap and posts a
    whole-surface SurfaceView frame straight away (`mk/view/HandwritingCanvasView.kt:597-601,
-1822-1856`). SF is in schema 7 at that moment, so that frame is dropped (07 §4.5) and the panel
+   1822-1856`). SF is in schema 7 at that moment, so that frame is dropped (07 §4.5) and the panel
    keeps SF's ink until the next pause [inferred]. No `HAND_WRITING_REPAINT_MODE`, no pen-up refresh
    consumer (`RawInputCallback.onPenUpRefresh` not overridden) [code].
 7. **Session lifetime is short.** The session is closed (`closeRawDrawing`) and re-created on every
@@ -233,7 +233,7 @@ session close.
 1. Down: SF reader 2 inks; first sample since the last pause → `HandlePenTrigger`, schema 7,
    `EUS s 3 c 0` (07 §4.2) [doc]. In-process: the SDK reader posts `onBeginRawDrawing` to the main
    thread (`pen/touch/SFTouchRender.java:40-47`) → `beginStroke` (`HandwritingCanvasView.kt:510-520,
-553-556`): `touchFilter.penActive = true`, dwell timer (500 ms). No transaction [code].
+   553-556`): `touchFilter.penActive = true`, dwell timer (500 ms). No transaction [code].
 2. Moves: model points only (`:558-560`). If the pen dwells still for 500 ms, `drawToSurface()`
    paints a dwell dot → FRAME in schema 7 → dropped [code for the call; drop inferred from 07 §4.5].
 3. Up: `onEndRawDrawing` → `endStroke` → `finishStroke` → classify
@@ -281,7 +281,7 @@ Per scratch-out gesture:
 2. Pen-up, main thread: `checkPostStrokeScratchOut()` → PR → SF `ENABLE_POST(1)` (leaves schema 7 →
    `Post enabled!`, 150 ms sleep, `EUS s 2 c 0`), pen 3 (`State change to: toPause`), brush 1,
    eraser (0,5) → `onScratchOut` → `removeStrokes(ids)` → `commitMutationImmediate(bbox of removed
-strokes + 4 dp)` (only scheduled) → RS → pen 2 (`running`), brush 1, eraser (0,5)
+   strokes + 4 dp)` (only scheduled) → RS → pen 2 (`running`), brush 1, eraser (0,5)
    (`HandwritingCanvasView.kt:1438-1440, 2299-2322`) [code; log lines per 07 §4].
 3. Next vsync: `doCommitMutation` → region rebuild of the bitmap → `composeSurface()` → whole-surface
    post (no live stroke, so `lockCanvas()` without a dirty rect, `:1836-1840, 1862-1869`) → committed
@@ -516,7 +516,7 @@ Stock references are 00 §3 and §5 [doc].
 
 - _Scratch-out erase:_ during the gesture `HandlePenTrigger…`, `### EUS, s 3 c 0` if it is the first
   sample since a pause. Within a few ms of lift: `Pid N State change to: toPause`, `Control state:
-toPause -> paused`, `Post enabled!`, `### EUS, s 2 c 0`, then `State change to: toResume` /
+  toPause -> paused`, `Post enabled!`, `### EUS, s 2 c 0`, then `State change to: toResume` /
   `running`. One partial update of the canvas area follows. One vsync later a second
   `toPause`/`running` pair with no `EUS` line. **No `EUS s 4`, no A2 waveform, no delayed
   full-screen GC16.**

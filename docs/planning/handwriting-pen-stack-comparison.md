@@ -94,7 +94,7 @@ rectangle".
 Notes.
 
 - The 4-argument overload is `TouchHelper(View, int feature, RawInputCallback, boolean
-enableTouchListener)` (`pen/TouchHelper.java:358`, public factory `:404`). The 2-argument
+  enableTouchListener)` (`pen/TouchHelper.java:358`, public factory `:404`). The 2-argument
   `create(view, cb)` routes through the private constructor at `pen/TouchHelper.java:44-46`, which
   passes `enableTouchListener = true` and picks the feature itself:
   `DeviceFeatureUtil.hasStylus(ctx) ? 2 : 1`. `hasStylus` matches the input-device names `onyx_emp`,
@@ -635,7 +635,7 @@ Notes.
   turns that into `applyTransientUpdate(ANIMATION_QUALITY)` with a 5 s auto-exit (recorded in
   `ours/docs/planning/handwriting-lasso-notes.md:107-117`). S2–S4 requested it for _any_ interaction,
   eraser or erasing gesture (`b9e3342:OnyxInk.kt` `displayPolicy.begin((args.interaction || args.eraser
-|| erasing) && !fastPreview)`); `34dc906` narrowed it to a selection drag (`kt/OnyxInk.kt:724-726`).
+  || erasing) && !fastPreview)`); `34dc906` narrowed it to a selection drag (`kt/OnyxInk.kt:724-726`).
 - `EpdController.applyTransientUpdate` discards the firmware's success boolean, so we call
   `Device.currentDevice().clearTransientUpdate(false)` directly to retain it
   (`kt/OnyxInk.kt:150-155`), and clear any transient mode a crashed session left behind at
@@ -716,8 +716,8 @@ Notes.
   (`kt/OnyxInk.kt:587-589`) was added in `34dc906` for exactly that reason.
 - Stock's delay constants, all from `stock/sdk/notecore/editor/data/RawPenArgs.java:68-70` and
   `stock/note/note/event/PenEvent.java:8-21`: `DELAY_ENABLE_RAW_DRAWING_MILLS = isColorDevice() ? 500
-: 150`, `POPUP_RESUME_PEN_TIME_MS = isColorDevice() ? 500 : 300`, `SELECTION_RESUME_PEN_TIME_MS =
-500` and `SHAPE_CHANGE_RESUME_PEN_TIME_MS = 100` — the last two currently have no callers. The
+  : 150`, `POPUP_RESUME_PEN_TIME_MS = isColorDevice() ? 500 : 300`, `SELECTION_RESUME_PEN_TIME_MS =
+  500` and `SHAPE_CHANGE_RESUME_PEN_TIME_MS = 100` — the last two currently have no callers. The
   delay is applied as a blocking `ThreadUtils.mySleep(delay)` on a dedicated pen scheduler before the
   rects are re-pushed (`stock/note/note/request/pen/ResumeRawDrawingRequest.java:127`); ours is a
   `postDelayed` on the main looper, which is the right shape for a single-threaded adapter but means

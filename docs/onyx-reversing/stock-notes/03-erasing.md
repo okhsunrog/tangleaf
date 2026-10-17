@@ -357,7 +357,7 @@ returns before `q()` when the list is empty (`ScribbleHandler.java:377-387`) [co
    - `render()` (`:343-…`): returns without any display call when `changedShapeList` is empty or no changed page
      is visible, so an erase stroke that hits nothing sends **no** `ENABLE_POST` here (the pause/resume below
      still runs) [code]. Otherwise `forceRenderVisibleDirtyScreenRectToDisplay(changedShapes,
-DisplayArgs{invalidate=false, enablePost=true})`, which renders the dirty slices and then calls
+     DisplayArgs{invalidate=false, enablePost=true})`, which renders the dirty slices and then calls
      `InkRenderManager.invalidate(displayArgs)` (shape-list overload `ForceRenderSliceListActionsKt.java:267-287`,
      which delegates to the box-list overload `:541-566`; the invalidate is its `doOnNext` `p()`, `:428-432`) →
      `enablePost()` → `EpdController.enablePost(view, 1)` → `ViewUpdateHelper.enablePost(1)` →
@@ -688,7 +688,7 @@ What stock does instead, all **[code]** unless marked:
    tag `HWEpdcManager`) [code]. `afterStopHandwriting` (`SF@0x562ec0`) calls vtable slot `+0x70` =
    `HWEpdcManager::clearHandwritingFBSchema` (`SF@0x566134`). That function selects scheme **4** when a mode
    it reads through `SF@0x559ab0`/`0x559304` is one of `1, 4, 0x901, 0x904, 0x908, 0x1000001, 0x1000004,
-0x2000004`, otherwise scheme **2** [code]. `HWEpdcManager::syncFBSchema` (`SF@0x565f74`, slot `+0x60`) has
+   0x2000004`, otherwise scheme **2** [code]. `HWEpdcManager::syncFBSchema` (`SF@0x565f74`, slot `+0x60`) has
    the same selection [code]. Two things are **[inferred]**: that the mode read there is the current
    app/transient update mode, and that those values are the A2/fast family. On that reading, a correctly
    running stock erase should log `EUS, s 3` at pen-down and `EUS, s 2` after the post-erase pause. What

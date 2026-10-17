@@ -1061,7 +1061,7 @@ Risks:
   the target.
 - **R5** SF globals: the eraser flag `(1, 8|5)` outlives our session unless S2.7 is kept. The style slot does not:
   `closeRawDrawing()` already sends `setStrokeStyle(0)` from both renders (`PUB/touch/SFTouchRender.java:170-173,
-271-275`; `PUB/touch/AppTouchRender.java:99-102, 193-197`) [code]. The `(8, [w, 0.5, 0.1])` parameters stay in
+  271-275`; `PUB/touch/AppTouchRender.java:99-102, 193-197`) [code]. The `(8, [w, 0.5, 0.1])` parameters stay in
   SF after close; stock re-sends its own on every resume (`A4:52-53`) [log]. None of this runs when the process
   dies without `close()` [inferred].
 - **R8** The main thread blocks for about 150 ms inside the hand-back's `enablePost` (§2.1), once per erase. Stock
@@ -1308,7 +1308,7 @@ and today's `OnyxInk.kt` / `RawDrawingGate.kt`. Static only; the tablet was not 
   colour → style order (S2.2 corrected).
 - `EpdController.enablePost(view, 1)` → `SDMDevice.enablePost` → `ViewUpdateHelper.enablePost(1)`, a synchronous
   transaction; `enableColorCU` / `disableColorCU` exist in the linked SDK (`DEV/api/device/epd/EpdController.java:234-237,
-331-338`; `DEV/device/SDMDevice.java:1769-1776, 2792-2794`) [code].
+  331-338`; `DEV/device/SDMDevice.java:1769-1776, 2792-2794`) [code].
 - The frame fence, the reconcile gate and the JS commit path (`kt/InkFrameFence.kt`, `kt/InkReconcileGate.kt`,
   `hw/onyx-ink.ts:228-370`, `hw/ink-canvas.tsx:365-444`) [code].
 

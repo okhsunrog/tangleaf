@@ -577,7 +577,7 @@ it because its `EditorView` _is_ the writing surface, and on this device its per
 out entirely (§3.1). So:
 
 - **Keep** the mode-marked frame as the handover: `setViewDefaultUpdateMode(view,
-HAND_WRITING_REPAINT_MODE)` -> `invalidate()` -> reset in the frame-commit callback
+  HAND_WRITING_REPAINT_MODE)` -> `invalidate()` -> reset in the frame-commit callback
   (`ours/OnyxInk.kt:491-537`). That is `GrayscaleRefreshAction`'s shape and it is correct.
 - **Keep** the two-sided rendezvous (`InkReconcileGate`) and the stroke-union region from
   `onPenUpRefresh` (`ours/InkReconcileRegion.kt:48-64`) — the SDK's union with the previous stroke

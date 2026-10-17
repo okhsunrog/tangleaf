@@ -742,7 +742,7 @@ a user-visible setting they can change once, in one place, for every app.
 Ordered by value. Each item names the file and how it would be checked on the device.
 
 1. **Fix the exclude reset so it actually resets.** `kt/OnyxInk.kt:198` — `EXCLUDE_RESET =
-arrayOf(Rect(0,0,0,0))` → `emptyArray<Rect>()`, and update the comment at `:185-197` (it currently
+   arrayOf(Rect(0,0,0,0))` → `emptyArray<Rect>()`, and update the comment at `:185-197` (it currently
    states the opposite of what the binary does). _Why:_ `PenManager::setExcludeRegion` clears only on
    `n <= 0` (SF `0x52ea88`); the current payload stores a corner rect the pen gate then inflates by
    `strokeWidth/2`. _Verify:_ on a device with a known dead band, call

@@ -75,7 +75,7 @@ Tags: **[code]** read in the cited source; **[inferred]** reasoned from code tha
    the app is drawn by Flutter into its own `FlutterSurfaceView` (default `RenderMode.surface`,
    `fl/…/embedding/android/FlutterActivity.java:1248-1249`) [code]. SF sees the app as a buffer layer;
    no Onyx per-view update mode ever describes it [inferred]. Every `EpdController.invalidate(view,
-GC)` Saber issues targets the invisible virtual-display `SurfaceView`, so none of them is a GC of
+   GC)` Saber issues targets the invisible virtual-display `SurfaceView`, so none of them is a GC of
    the visible content [inferred from the framework path, `fw/view/ViewGroup.java:4762-4768`,
    `fw/onyx/ViewUpdateHelper.java:1477-1485`].
 3. **The SF limit rect is at the screen origin and covers roughly the whole screen.** The limit is
@@ -94,7 +94,7 @@ GC)` Saber issues targets the invisible virtual-display `SurfaceView`, so none o
    (07 §4.5) [inferred]. One second after the **last** pen-up (every pen-down cancels the timer),
    `forceRefresh()` runs on a `java.util.Timer` thread: render off (`ENABLE_POST(1)`, pen 3), a GC
    invalidate of the dummy view, render on (pen 2) (`kt/OnyxsdkPenArea.kt:163-171, 179-183,
-235-239`) [code]. That pause is the only thing that takes SF out of schema 7; after it Flutter's
+   235-239`) [code]. That pause is the only thing that takes SF out of schema 7; after it Flutter's
    frames reach the panel in whatever mode SF picks for the layer [inferred].
 5. **Erasing is always app-drawn with the session paused.** The eraser tool, the shape pen, text
    editing and any unmapped tool map to `OnyxStrokeStyle.disabled` (`lib/components/canvas/canvas.dart:47-69`)

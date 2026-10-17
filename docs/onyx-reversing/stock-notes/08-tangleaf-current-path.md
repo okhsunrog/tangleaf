@@ -376,7 +376,7 @@ device, while ours marks every reconcile with it [doc].
    `begin(point, true)` (`pen/RawInputReader.java:427-436, 762-773`; `kt/OnyxInk.kt:858`) [code].
 2. `begin`: `eraserRenderGate.begin(true)` → `setRender(false)` → SF `ENABLE_POST(1)`, pen **3**,
    `ENABLE_POST(1)`; `active = true` (`kt/InkEraserRenderGate.kt:8-15`) [code]. log: `State change to:
-toPause` [doc]. `reconcile.began(true)` → `expecting = false`. Emits `begin` with `erasing:true`.
+   toPause` [doc]. `reconcile.began(true)` → `expecting = false`. Emits `begin` with `erasing:true`.
    - Timing: the PAUSE is sent only after the event has crossed from the reader thread to the main
      thread; eraser contact before that happens with pen state 2 [inferred].
 3. JS `begin` → `beginGesture(point, erasing=true)` → action `erase`, draws the eraser circle into
@@ -390,7 +390,7 @@ toPause` [doc]. `reconcile.began(true)` → `expecting = false`. Emits `begin` w
    inferred that eraser-end motion counts as "pen writes"].
 5. Up: `onRawErasingTouchPointListReceived` → `stroke(..., erasing=true)` → JS `finishGesture` →
    `eraseGesture` over all points, `onSelectionChange([])`, `publish`, `onChange` (`hw/ink-canvas.tsx:399-424,
-439-444`); `onEndRawErasing` → `end()`. **No pen-up timer** for an erase
+   439-444`); `onEndRawErasing` → `end()`. **No pen-up timer** for an erase
    (`pen/RawInputReader.java:613-615`) [code].
 6. JS commit → `commit` → `canvasReady()` → `SOON` → `refreshFrame()` after 120 ms (reconcile mode 524290) [code].
 7. When that frame is committed: `eraserRenderGate.framePresented()` → `restoreToolRendering()` →
@@ -411,7 +411,7 @@ Eraser end with the **lasso** tool (added in verification) [code, `kt/OnyxInk.kt
   pen **2** returns after the reconcile frame.
 - Selection present (render already off): no pen-state transaction. If the contact point is inside
   the selection grab box (`movingSelection`, :762-763), `displayPolicy.begin(args.interaction &&
-movingSelection)` has no erasing guard, so an eraser touch there also sends
+  movingSelection)` has no erasing guard, so an eraser touch there also sends
   `APPLY_TRANSIENT_UPDATE(2308)` and arms the 5 s settle, exactly as a selection drag does. JS
   treats the gesture as `erase` (`hw/ink-canvas.tsx:339-340`), and `finishGesture` clears the
   selection (`:411-413`), so a `configure` (pause/resume, limit re-push) follows the lift [code].
@@ -455,7 +455,7 @@ Freehand lasso, no selection (`toolRendering` true, render on, style DASH width 
    [code]. SF: none. The firmware draws the dashed trace [inferred from the recipe comment,
    `:356-358`].
 2. No preview events (`fastPreview` suppresses them, `:845`) [code]. JS `beginGesture(...,
-nativeFast=true)` records points without drawing (`hw/ink-canvas.tsx:375`); `traceRef` holds the
+   nativeFast=true)` records points without drawing (`hw/ink-canvas.tsx:375`); `traceRef` holds the
    commit effect back while the trace is on screen (`hw/onyx-ink.ts:247, 339`) [code].
 3. Up: `stroke` → JS `finishGesture` → `onSelectionChange(selectLasso(...))`; `end` → `setFrame` →
    commit. Pen-up refresh is armed and delivered (drawing gesture) [code].
@@ -597,7 +597,7 @@ keyboard appearance inferred].
    WebView acknowledges (`kt/OnyxInk.kt:316-374`) [code].
 4. The SDK's host-view scroll listener is disabled (no-op anyway) and the reader's screen offset
    (`getLocationOnScreen`) is refreshed on `start`/`resume` (`pen/RawInputReader.java:226-233,
-319-333`) [code].
+   319-333`) [code].
 5. If the sheet is scrolled completely out of the viewport, `limit` becomes empty (`:325-327`) and
    `resume()` returns at its first line (`limit.isEmpty`, `:572`), so after the reconfigure pause the
    session stays with render and input off (pen state 3 if render had been on) and `canPresent()` is
@@ -612,7 +612,7 @@ keyboard appearance inferred].
    `InkCanvas.disabled` true (`:798`) → `useOnyxInk.enabled` false → effect cleanup → queued
    `configure_onyx_ink {enabled:false}` (`hw/onyx-ink.ts:300-315`) [code].
 2. Native `configure` with `enabled:false` and matching session → `close()` (`kt/OnyxInk.kt:281-284,
-702-725`) [code]:
+   702-725`) [code]:
    - `pause()` (full): SESSION cleared (WebView mode falls back to BASE GU), render off (SF
      `ENABLE_POST(1)`, pen **3**, `ENABLE_POST(1)` if on), input off, `cycleScribbleSession()` (SF
      `ENABLE_POST(1)`, pen **3**).
@@ -643,7 +643,7 @@ keyboard appearance inferred].
 Background (Home, app switch) [code]:
 
 1. JS `visibilitychange` → both `configure()` (now `enabled:false` because `visibilityState ===
-"hidden"`, `hw/onyx-ink.ts:180, 299`) and `suspend()` → `suspended` → `disabled`
+   "hidden"`, `hw/onyx-ink.ts:180, 299`) and `suspend()` → `suspended` → `disabled`
    (`hw/handwriting-note-view.tsx:326-363`) → `close()` as §5.12 step 2.
 2. Native (order vs. step 1 [unknown]): window focus lost → `onWindowFocusChanged(false)` → `pause()`
    (full, with teardown); Activity `onPause` → plugin → `OnyxInk.onPause()` → `resumed=false`,
@@ -895,7 +895,7 @@ Checked and confirmed as written:
 - All pen-state sequences in §6.1 except the corrected cells; `cycleScribbleSession` bypassing the
   guard; the close-refresh not being cancelled by a reopen; `DisplayModeStack` layering;
   `View.invalidate(int)` / `setDefaultUpdateMode` / `resetUpdateMode` (`fwv/View.java:10788-10820,
-13718-13719, 14577-14579`); `SDMDevice.invalidate` preferring `View.invalidate(int)`
+  13718-13719, 14577-14579`); `SDMDevice.invalidate` preferring `View.invalidate(int)`
   (`SDMDevice.java:1124-1128, 1365-1370`); the popover's `onOpenChange` wiring.
 - Call-site coverage: a grep of `kt/` for `EpdController.`, `Device.currentDevice()` and `helper`
   found no pen/panel call missing from §3 other than the reads now added (touch range, view-mode

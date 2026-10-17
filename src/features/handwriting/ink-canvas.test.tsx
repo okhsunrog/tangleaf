@@ -42,33 +42,33 @@ beforeEach(() => {
     },
   );
   contexts = new WeakMap();
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    function (this: HTMLCanvasElement) {
-      let context = contexts.get(this);
-      if (context) return context;
-      context = {
-        canvas: this,
-        getTransform: () => ({ a: 1, d: 1 }),
-        save: vi.fn(),
-        restore: vi.fn(),
-        rect: vi.fn(),
-        clip: vi.fn(),
-        setLineDash: vi.fn(),
-        beginPath: vi.fn(),
-        arc: vi.fn(),
-        fill: vi.fn(),
-        moveTo: vi.fn(),
-        lineTo: vi.fn(),
-        stroke: vi.fn(),
-        clearRect: vi.fn(),
-        fillRect: vi.fn(),
-        setTransform: vi.fn(),
-        drawImage: vi.fn(),
-      } as unknown as CanvasRenderingContext2D;
-      contexts.set(this, context);
-      return context;
-    },
-  );
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (
+    this: HTMLCanvasElement,
+  ) {
+    let context = contexts.get(this);
+    if (context) return context;
+    context = {
+      canvas: this,
+      getTransform: () => ({ a: 1, d: 1 }),
+      save: vi.fn(),
+      restore: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      setLineDash: vi.fn(),
+      beginPath: vi.fn(),
+      arc: vi.fn(),
+      fill: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      stroke: vi.fn(),
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      setTransform: vi.fn(),
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    contexts.set(this, context);
+    return context;
+  });
   container = document.createElement("div");
   root = createRoot(container);
   changed.mockClear();
