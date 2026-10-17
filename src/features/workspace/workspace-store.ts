@@ -16,6 +16,9 @@ export type WorkspaceStore = WorkspaceState & {
 
 export const useWorkspaceStore = create<WorkspaceStore>()((set) => ({
   ...createInitialWorkspaceState(),
+  // Dock preferences apply even when startup opens Dashboard instead of the last session.
+  assistantDock:
+    loadWorkspaceSession()?.assistantDock ?? createInitialWorkspaceState().assistantDock,
   dispatch: (action: WorkspaceAction) =>
     set((state: WorkspaceStore) => {
       const next = workspaceReducer(state, action);

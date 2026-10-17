@@ -28,6 +28,7 @@ import {
 } from "./workspace-model";
 import { useWorkspaceController } from "./workspace-controller";
 import { useWorkspaceStore } from "./workspace-store";
+import { usePaneScroll } from "./use-pane-scroll";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type WorkbenchProps = {
@@ -219,6 +220,7 @@ function PaneFrame({
   const dispatch = useWorkspaceStore((state) => state.dispatch);
   const backToHome = useCompactBackToHome();
   const goBack = usePaneBack(paneId);
+  const scrollRef = usePaneScroll(pane?.content ?? { kind: PaneContentKind.Home });
   if (!pane) return null;
   // The sheet has the screen: no pane bar, and no active ring painting over its letterbox.
   const sheet = compact && props.sheetPaneId === paneId;
@@ -298,7 +300,7 @@ function PaneFrame({
           )}
         </div>
       )}
-      <div data-workspace-scroll className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} data-workspace-scroll className="min-h-0 flex-1 overflow-y-auto">
         <PaneSurface paneId={paneId} content={pane.content} {...props} />
       </div>
     </section>

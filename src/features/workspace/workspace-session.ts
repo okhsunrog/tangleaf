@@ -34,9 +34,12 @@ export function decodeWorkspaceSession(value: string): WorkspaceState | null {
 }
 
 export function loadWorkspaceSession(): WorkspaceState | null {
-  const storage = localStorageOrNull();
-  const value = storage?.getItem(SESSION_KEY);
-  return value ? decodeWorkspaceSession(value) : null;
+  try {
+    const value = localStorageOrNull()?.getItem(SESSION_KEY);
+    return value ? decodeWorkspaceSession(value) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function persistWorkspaceSession(state: WorkspaceState) {

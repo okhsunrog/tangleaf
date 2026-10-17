@@ -1,8 +1,20 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
-import { createInitialWorkspaceState, currentDisposition, pageTarget } from "./workspace-model";
+import {
+  createInitialWorkspaceState,
+  currentDisposition,
+  pageTarget,
+  DockVisibility,
+} from "./workspace-model";
 import { useWorkspaceStore } from "./workspace-store";
 
 describe("workspace-store", () => {
+  it("keeps the assistant preference when navigation is reset", () => {
+    useWorkspaceStore
+      .getState()
+      .dispatch({ type: "set_dock_visibility", visibility: DockVisibility.Rail });
+    useWorkspaceStore.getState().dispatch({ type: "reset" });
+    expect(useWorkspaceStore.getState().assistantDock.visibility).toBe(DockVisibility.Rail);
+  });
   beforeEach(() => {
     // setState shallow-merges, so this resets the workspace fields while keeping dispatch.
     useWorkspaceStore.setState(createInitialWorkspaceState());

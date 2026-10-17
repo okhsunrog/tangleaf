@@ -186,7 +186,7 @@ export function createInitialWorkspaceState(): WorkspaceState {
     nextPaneOrdinal: 2,
     nextSplitOrdinal: 1,
     assistantDock: {
-      visibility: DockVisibility.Open,
+      visibility: DockVisibility.Hidden,
       width: 360,
     },
   };
@@ -230,7 +230,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         assistantDock: { ...state.assistantDock, width: clampDockWidth(action.width) },
       };
     case "reset":
-      return createInitialWorkspaceState();
+      return { ...createInitialWorkspaceState(), assistantDock: state.assistantDock };
   }
 }
 
