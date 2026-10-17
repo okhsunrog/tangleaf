@@ -33,6 +33,7 @@ type Props = {
   navigationRequest?: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   onFlushReady?: (flush: (() => Promise<boolean>) | null) => void;
+  findRange?: { from: number; to: number; request: number } | null;
 };
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
@@ -66,6 +67,7 @@ export function DocumentPage({
   navigationRequest,
   onOpenMarkdownLink,
   onFlushReady,
+  findRange,
 }: Props) {
   const queryClient = useQueryClient();
   const sessions = usePageSessionRegistry();
@@ -100,6 +102,7 @@ export function DocumentPage({
       navigationRequest={navigationRequest}
       onOpenMarkdownLink={onOpenMarkdownLink}
       onFlushReady={onFlushReady}
+      findRange={findRange}
       queryClient={queryClient}
     />
   );
@@ -122,6 +125,7 @@ function LoadedDocumentPage({
   onOpenMarkdownLink,
   onFlushReady,
   queryClient,
+  findRange,
 }: LoadedProps) {
   const sessions = usePageSessionRegistry();
   const overlay = useDocumentDraftOverlay(pageUuid);
@@ -296,6 +300,7 @@ function LoadedDocumentPage({
           readOnly={!canEdit}
           focusRequest={focusRequest}
           navigation={navigation}
+          findRange={findRange}
           mode={authoringMode}
           pageUuid={pageUuid}
           onChange={updateDraft}

@@ -1276,3 +1276,9 @@ html::before {
 [data-display="eink"] [data-ink-toolbar-separator] {
   background: oklch(0 0 0);
 }
+
+[data-find-current] {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}

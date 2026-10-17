@@ -32,6 +32,7 @@ type Props = {
   onBlur: () => void;
   onOpenMarkdownLink?: MarkdownOpenHandler;
   navigation?: { uuid: string; request: number; from: number; to: number } | null;
+  findRange?: { from: number; to: number; request: number } | null;
 };
 
 const externalDocumentUpdate = Annotation.define<boolean>();
@@ -124,6 +125,7 @@ export function ContinuousDocumentEditor({
   onBlur,
   onOpenMarkdownLink,
   navigation,
+  findRange,
 }: Props) {
   const display = useResolvedDisplay();
   const mountRef = useRef<HTMLDivElement>(null);
@@ -339,6 +341,17 @@ export function ContinuousDocumentEditor({
     view.dispatch({ effects: EditorView.scrollIntoView(from, { y: "center" }) });
     revealed.current = navigation;
   }, [navigation]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !findRange) return;
+    const from = Math.min(findRange.from, view.state.doc.length);
+    const to = Math.min(findRange.to, view.state.doc.length);
+    view.dispatch({
+      selection: { anchor: from, head: to },
+      effects: EditorView.scrollIntoView(from, { y: "center" }),
+    });
+  }, [findRange]);
 
   return <div ref={mountRef} className="continuous-document-editor min-h-96 w-full" />;
 }

@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CalendarDays, Check, Clock3, FileText, ListTree, Star, Trash2 } from "lucide-react";
+import {
+  CalendarDays,
+  Check,
+  Clock3,
+  FileText,
+  ListTree,
+  Search,
+  Star,
+  Trash2,
+} from "lucide-react";
+import { usePageFind } from "./page-find";
 import { Button } from "@/components/ui/button";
 import { DocumentPage } from "@/features/document/document-page";
 import { DocumentAuthoringControls } from "@/features/document/document-authoring-controls";
@@ -75,6 +85,8 @@ export function PageView({
   presentation,
   onPresentationChange,
 }: Props) {
+  const articleRef = useRef<HTMLElement>(null);
+  const find = usePageFind(page, paneId, articleRef, navigationRequest);
   const sessions = usePageSessionRegistry();
   const titleOverlay = useTitleDraftOverlay(page.uuid);
   const writerPaneId = usePageWriterPaneId(page.uuid);
@@ -295,7 +307,11 @@ export function PageView({
   const journalDate = page.kind.kind === "journal" ? page.kind.date : null;
 
   return (
-    <article className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-8 pt-12 pb-24 sm:px-12 lg:px-16">
+    <article
+      ref={articleRef}
+      className="editor-page mx-auto flex min-h-full max-w-[52rem] flex-col px-8 pt-12 pb-24 sm:px-12 lg:px-16"
+    >
+      {find.bar}
       <div className="mb-8 flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
         <button type="button" onClick={onOpenAllNotes} className="transition hover:text-foreground">
           All notes
@@ -472,6 +488,14 @@ export function PageView({
         />
         <Button
           variant="ghost"
+          size="icon-sm"
+          aria-label="Find in note (Ctrl+F)"
+          onClick={find.show}
+        >
+          <Search className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
           size="xs"
           className="ml-auto rounded-lg text-muted-foreground opacity-60 hover:text-destructive hover:opacity-100"
           aria-label="Delete page"
@@ -487,8 +511,13 @@ export function PageView({
           <DocumentPage
             key={page.uuid}
             pageUuid={page.uuid}
-            targetBlockUuid={initialBlockUuid}
-            navigationRequest={navigationRequest}
+            targetBlockUuid={find.navigation ? find.navigation.match.blockUuid : initialBlockUuid}
+            navigationRequest={
+              find.navigation ? navigationRequest + find.navigation.request + 1 : navigationRequest
+            }
+            findRange={
+              find.open && find.current ? { ...find.current, request: find.request } : null
+            }
             editing={presentation === PagePresentation.Editing}
             canEdit={canEdit}
             authoringMode={documentAuthoringMode}
@@ -500,8 +529,10 @@ export function PageView({
           <Outliner
             key={page.uuid}
             page={page}
-            targetBlockUuid={initialBlockUuid}
-            navigationRequest={navigationRequest}
+            targetBlockUuid={find.navigation ? find.navigation.match.blockUuid : initialBlockUuid}
+            navigationRequest={
+              find.navigation ? navigationRequest + find.navigation.request + 1 : navigationRequest
+            }
             focusRequest={bodyFocusRequest}
             onOpenMarkdownLink={onOpenMarkdownLink}
             presentation={presentation}
