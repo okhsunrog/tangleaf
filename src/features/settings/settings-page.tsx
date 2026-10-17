@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { TangleafMark } from "@/brand/TangleafMark";
@@ -56,6 +56,8 @@ export function SettingsPage({
   onDataChanged,
 }: Props) {
   const compact = useCompactLayout();
+  const [category, setCategory] = useState("appearance");
+  const formRef = useRef<HTMLFormElement>(null);
   const confirm = useConfirmation();
   const { theme, setTheme } = useTheme();
   const {
@@ -249,11 +251,11 @@ export function SettingsPage({
     settings.capabilities.windowDecorations && settings.activeWindowDecorationMode === "borderless";
 
   return (
-    <div className="app-shell h-full overflow-y-auto text-foreground">
+    <div className="app-shell flex h-full min-h-0 flex-col overflow-hidden text-foreground">
       <header
         data-tauri-drag-region
         className={cn(
-          "app-chrome sticky top-0 z-20 flex items-center justify-between border-b border-border/50",
+          "app-chrome relative z-20 flex shrink-0 items-center justify-between border-b border-border/50",
           compact ? "h-14 px-3" : "h-16 px-5",
         )}
       >
@@ -279,414 +281,451 @@ export function SettingsPage({
         {borderless && <WindowControls side="right" />}
       </header>
 
-      <form
-        onSubmit={submit}
-        className="mx-auto max-w-4xl space-y-7 px-4 py-5 pb-[calc(6rem+var(--safe-area-inset-bottom))] sm:p-10"
+      <nav
+        aria-label="Settings categories"
+        className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/50 px-4 py-2"
       >
-        <ConfigurationTransferSection
-          appearance={{
-            theme: theme === "light" || theme === "dark" ? theme : "system",
-            palette,
-            displayProfile,
-            inkColor,
-          }}
-          disabled={busy}
-          onBusyChange={setBusy}
-          onImported={(result) => {
-            setSettings(result.settings);
-            queryClient.setQueryData(queryKeys.settings, result.settings);
-            setSecrets({});
-            setClearKeys([]);
-            if (result.appearance) {
-              setTheme(result.appearance.theme);
-              setPalette(result.appearance.palette);
-              setDisplayProfile(result.appearance.displayProfile ?? "auto");
-              setInkColor(result.appearance.inkColor ?? "auto");
-            }
-          }}
-        />
-        <SettingsSection
-          title="Appearance"
-          description="Choose a brightness mode and a color atmosphere. Every palette has a tuned light and dark version."
-        >
-          <FieldGroup label="Brightness">
-            <div className="grid grid-cols-3 gap-2 rounded-2xl bg-muted/70 p-1.5">
-              <ModeButton
-                active={theme === "system"}
-                icon={<Laptop className="size-4" />}
-                label="System"
-                onClick={() => setTheme("system")}
-              />
-              <ModeButton
-                active={theme === "light"}
-                icon={<Sun className="size-4" />}
-                label="Light"
-                onClick={() => setTheme("light")}
-              />
-              <ModeButton
-                active={theme === "dark"}
-                icon={<Moon className="size-4" />}
-                label="Dark"
-                onClick={() => setTheme("dark")}
-              />
-            </div>
-          </FieldGroup>
-          <FieldGroup label="Color palette" hint="Applied instantly and saved on this device.">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {PALETTES.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  aria-pressed={palette === item.id}
-                  onClick={() => setPalette(item.id)}
-                  className={cn(
-                    "group rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md",
-                    palette === item.id
-                      ? "border-primary/50 bg-primary/8 ring-3 ring-primary/10"
-                      : "border-border/60 surface-base hover:border-primary/25",
-                  )}
-                >
-                  <span className="mb-3 flex h-8 overflow-hidden rounded-xl ring-1 ring-black/5">
-                    {item.swatches.map((color) => (
-                      <span key={color} className="flex-1" style={{ backgroundColor: color }} />
-                    ))}
-                  </span>
-                  <span className="flex items-center gap-2 text-sm font-semibold">
-                    {item.name}
-                    {palette === item.id && <Check className="ml-auto size-3.5 text-primary" />}
-                  </span>
-                  <span className="mt-1 block text-[11px] text-muted-foreground">
-                    {item.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </FieldGroup>
-          <Field
-            label="Display"
-            hint="E-ink drops shadows, blur and animation and raises contrast. Auto follows the panel the device reports."
+        {[
+          ["appearance", "Appearance"],
+          ["editor", "Editing & startup"],
+          ["search", "Search"],
+          ["server", "Server & sync"],
+          ["data", "Data & transfer"],
+        ].map(([value, label]) => (
+          <Button
+            key={value}
+            type="button"
+            variant={category === value ? "secondary" : "ghost"}
+            size="sm"
+            aria-pressed={category === value}
+            onClick={() => {
+              setCategory(value);
+              if (formRef.current) formRef.current.scrollTop = 0;
+            }}
           >
-            <SettingsSelect
-              label="Display"
-              value={displayProfile}
-              options={[...DISPLAY_PROFILE_OPTIONS]}
-              onValueChange={setDisplayProfile}
-            />
-            {panelMode && (
-              <p className="mt-2 text-xs text-muted-foreground">Panel mode: {panelMode}</p>
-            )}
-          </Field>
-          <Field
-            label="E-ink color"
-            hint={
-              display === "eink"
-                ? "Monochrome removes the palette accent from buttons and handwriting."
-                : "Available while the e-ink display profile is in effect."
-            }
-          >
-            <SettingsSelect
-              label="E-ink color"
-              value={inkColor}
-              disabled={display !== "eink"}
-              options={[...INK_COLOR_OPTIONS]}
-              onValueChange={setInkColor}
-            />
-          </Field>
-          <EinkWiseField />
-        </SettingsSection>
-
-        {settings.capabilities.windowDecorations && (
+            {label}
+          </Button>
+        ))}
+      </nav>
+      <form
+        id="device-settings-form"
+        ref={formRef}
+        onSubmit={submit}
+        className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-7 overflow-y-auto px-4 py-5 sm:px-8"
+      >
+        <div hidden={category !== "appearance"} className="space-y-7">
           <SettingsSection
-            title="Window"
-            description="Choose the native window frame or a borderless Tangleaf frame."
+            title="Appearance"
+            description="Choose a brightness mode and a color atmosphere. Every palette has a tuned light and dark version."
           >
-            <Field label="Decoration mode">
-              <SettingsSelect
-                label="Decoration mode"
-                value={settings.windowDecorationMode}
-                onValueChange={(value) => update("windowDecorationMode", value)}
-                options={[
-                  { value: "native", label: "Native (system decorations)" },
-                  { value: "borderless", label: "Borderless (Tangleaf controls)" },
-                ]}
-              />
-            </Field>
-            <p className="text-xs text-muted-foreground">
-              Native mode uses system decorations. On Wayland, save your choice and restart the app
-              to change the frame; the current window keeps its existing controls.
-            </p>
-            <Field label="Window buttons">
-              <SettingsSelect
-                label="Window buttons"
-                value={settings.windowControlsStyle}
-                disabled={settings.windowDecorationMode !== "borderless"}
-                onValueChange={(value) => update("windowControlsStyle", value)}
-                options={WINDOW_CONTROLS_STYLES.map((style) => ({
-                  value: style,
-                  label:
-                    style === "auto"
-                      ? `Match the desktop (${WINDOW_CONTROLS_STYLE_NAMES[settings.systemWindowControls.style]})`
-                      : WINDOW_CONTROLS_STYLE_NAMES[style],
-                }))}
-              />
-            </Field>
-            <div
-              className="flex h-11 items-center justify-between rounded-lg border bg-background px-3"
-              aria-label="Window buttons preview"
-            >
-              <WindowControls side="left" style={settings.windowControlsStyle} preview />
-              <span className="text-xs text-muted-foreground">Preview</span>
-              <WindowControls side="right" style={settings.windowControlsStyle} preview />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Shapes follow the chosen desktop; colours follow the active palette. Match the desktop
-              also takes the button order and side from its settings. Borderless mode only.
-            </p>
-            <Field label="Borderless corner radius">
-              <SettingsSelect
-                label="Borderless corner radius"
-                value={settings.windowCornerRadius}
-                disabled={
-                  !settings.capabilities.windowCornerRounding ||
-                  settings.windowDecorationMode !== "borderless"
-                }
-                onValueChange={(value) => update("windowCornerRadius", value)}
-                options={[0, 6, 10, 16, 24].map((radius) => ({
-                  value: radius,
-                  label:
-                    radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`,
-                }))}
-              />
-            </Field>
-            <p className="text-xs text-muted-foreground">
-              Applies after saving on Linux and Windows, only in borderless mode. Maximized and
-              fullscreen windows stay square.
-            </p>
-            {settings.windowDecorationsRequireRestart &&
-              settingsQuery.data?.windowDecorationMode !== settings.activeWindowDecorationMode && (
-                <p role="status" className="text-sm text-muted-foreground">
-                  Saved window frame change will apply after restarting the app.
-                </p>
-              )}
-          </SettingsSection>
-        )}
-
-        <HandwritingPreferenceField />
-
-        <SettingsSection
-          title="Startup"
-          description="Choose what this device shows when Tangleaf opens. Dashboard is the calm default; your notes are never changed by this choice."
-        >
-          <Field label="Open on launch">
-            <SettingsSelect<SettingsSnapshot["startupView"]>
-              label="Open on launch"
-              value={settings.startupView}
-              onValueChange={(startupView) => {
-                setSettings((current) =>
-                  current
-                    ? {
-                        ...current,
-                        startupView,
-                        startupPageUuid:
-                          startupView === "specific_page"
-                            ? (current.startupPageUuid ?? startupPagesQuery.data?.[0]?.uuid ?? null)
-                            : current.startupPageUuid,
-                      }
-                    : current,
-                );
-                setMessage("");
-              }}
-              options={[
-                { value: "dashboard", label: "Dashboard" },
-                { value: "last_session", label: "Restore last session" },
-                { value: "today", label: "Today's journal" },
-                { value: "specific_page", label: "A specific note" },
-              ]}
-            />
-          </Field>
-          {settings.startupView === "specific_page" && (
+            <FieldGroup label="Brightness">
+              <div className="grid grid-cols-3 gap-2 rounded-2xl bg-muted/70 p-1.5">
+                <ModeButton
+                  active={theme === "system"}
+                  icon={<Laptop className="size-4" />}
+                  label="System"
+                  onClick={() => setTheme("system")}
+                />
+                <ModeButton
+                  active={theme === "light"}
+                  icon={<Sun className="size-4" />}
+                  label="Light"
+                  onClick={() => setTheme("light")}
+                />
+                <ModeButton
+                  active={theme === "dark"}
+                  icon={<Moon className="size-4" />}
+                  label="Dark"
+                  onClick={() => setTheme("dark")}
+                />
+              </div>
+            </FieldGroup>
+            <FieldGroup label="Color palette" hint="Applied instantly and saved on this device.">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {PALETTES.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    aria-pressed={palette === item.id}
+                    onClick={() => setPalette(item.id)}
+                    className={cn(
+                      "group rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md",
+                      palette === item.id
+                        ? "border-primary/50 bg-primary/8 ring-3 ring-primary/10"
+                        : "border-border/60 surface-base hover:border-primary/25",
+                    )}
+                  >
+                    <span className="mb-3 flex h-8 overflow-hidden rounded-xl ring-1 ring-black/5">
+                      {item.swatches.map((color) => (
+                        <span key={color} className="flex-1" style={{ backgroundColor: color }} />
+                      ))}
+                    </span>
+                    <span className="flex items-center gap-2 text-sm font-semibold">
+                      {item.name}
+                      {palette === item.id && <Check className="ml-auto size-3.5 text-primary" />}
+                    </span>
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
+                      {item.description}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </FieldGroup>
             <Field
-              label="Startup note"
+              label="Display"
+              hint="E-ink drops shadows, blur and animation and raises contrast. Auto follows the panel the device reports."
+            >
+              <SettingsSelect
+                label="Display"
+                value={displayProfile}
+                options={[...DISPLAY_PROFILE_OPTIONS]}
+                onValueChange={setDisplayProfile}
+              />
+              {panelMode && (
+                <p className="mt-2 text-xs text-muted-foreground">Panel mode: {panelMode}</p>
+              )}
+            </Field>
+            <Field
+              label="E-ink color"
               hint={
-                startupPagesQuery.data?.length
-                  ? "If this note is deleted, Tangleaf safely falls back to Dashboard."
-                  : "Create a note before choosing it as your startup page."
+                display === "eink"
+                  ? "Monochrome removes the palette accent from buttons and handwriting."
+                  : "Available while the e-ink display profile is in effect."
               }
             >
               <SettingsSelect
-                label="Startup note"
-                value={settings.startupPageUuid}
-                disabled={!startupPagesQuery.data?.length}
-                placeholder={
-                  startupPagesQuery.data?.length ? "Choose a note" : "No notes available"
-                }
-                onValueChange={(value) => update("startupPageUuid", value)}
-                options={(startupPagesQuery.data ?? []).map((page) => ({
-                  value: page.uuid,
-                  label: page.title ?? "Untitled note",
-                }))}
+                label="E-ink color"
+                value={inkColor}
+                disabled={display !== "eink"}
+                options={[...INK_COLOR_OPTIONS]}
+                onValueChange={setInkColor}
               />
             </Field>
+            <EinkWiseField />
+          </SettingsSection>
+
+          {settings.capabilities.windowDecorations && (
+            <SettingsSection
+              title="Window"
+              description="Choose the native window frame or a borderless Tangleaf frame."
+            >
+              <Field label="Decoration mode">
+                <SettingsSelect
+                  label="Decoration mode"
+                  value={settings.windowDecorationMode}
+                  onValueChange={(value) => update("windowDecorationMode", value)}
+                  options={[
+                    { value: "native", label: "Native (system decorations)" },
+                    { value: "borderless", label: "Borderless (Tangleaf controls)" },
+                  ]}
+                />
+              </Field>
+              <p className="text-xs text-muted-foreground">
+                Native mode uses system decorations. On Wayland, save your choice and restart the
+                app to change the frame; the current window keeps its existing controls.
+              </p>
+              <Field label="Window buttons">
+                <SettingsSelect
+                  label="Window buttons"
+                  value={settings.windowControlsStyle}
+                  disabled={settings.windowDecorationMode !== "borderless"}
+                  onValueChange={(value) => update("windowControlsStyle", value)}
+                  options={WINDOW_CONTROLS_STYLES.map((style) => ({
+                    value: style,
+                    label:
+                      style === "auto"
+                        ? `Match the desktop (${WINDOW_CONTROLS_STYLE_NAMES[settings.systemWindowControls.style]})`
+                        : WINDOW_CONTROLS_STYLE_NAMES[style],
+                  }))}
+                />
+              </Field>
+              <div
+                className="flex h-11 items-center justify-between rounded-lg border bg-background px-3"
+                aria-label="Window buttons preview"
+              >
+                <WindowControls side="left" style={settings.windowControlsStyle} preview />
+                <span className="text-xs text-muted-foreground">Preview</span>
+                <WindowControls side="right" style={settings.windowControlsStyle} preview />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Shapes follow the chosen desktop; colours follow the active palette. Match the
+                desktop also takes the button order and side from its settings. Borderless mode
+                only.
+              </p>
+              <Field label="Borderless corner radius">
+                <SettingsSelect
+                  label="Borderless corner radius"
+                  value={settings.windowCornerRadius}
+                  disabled={
+                    !settings.capabilities.windowCornerRounding ||
+                    settings.windowDecorationMode !== "borderless"
+                  }
+                  onValueChange={(value) => update("windowCornerRadius", value)}
+                  options={[0, 6, 10, 16, 24].map((radius) => ({
+                    value: radius,
+                    label:
+                      radius === 0 ? "Square" : `${radius} px${radius === 10 ? " (default)" : ""}`,
+                  }))}
+                />
+              </Field>
+              <p className="text-xs text-muted-foreground">
+                Applies after saving on Linux and Windows, only in borderless mode. Maximized and
+                fullscreen windows stay square.
+              </p>
+              {settings.windowDecorationsRequireRestart &&
+                settingsQuery.data?.windowDecorationMode !==
+                  settings.activeWindowDecorationMode && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Saved window frame change will apply after restarting the app.
+                  </p>
+                )}
+            </SettingsSection>
           )}
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Favorites, recent notes, and the restored session stay on this device.
-          </p>
-        </SettingsSection>
+        </div>
+        <div hidden={category !== "editor"} className="space-y-7">
+          <HandwritingPreferenceField />
 
-        <SettingsSection
-          title="Search"
-          description="Control when server AI joins the always-available local full-text search."
-        >
-          <ToggleField
-            checked={settings.aiSearchEnabled}
-            label="AI search"
-            description="Allow the configured notes server to refine local search results. Local FTS stays enabled when this is off."
-            onChange={(checked) => update("aiSearchEnabled", checked)}
-          />
-          <Field
-            label="AI trigger"
-            hint="Enter-only avoids server requests while you are still typing. Press Enter once to request AI results, then again to open the selection."
+          <SettingsSection
+            title="Startup"
+            description="Choose what this device shows when Tangleaf opens. Dashboard is the calm default; your notes are never changed by this choice."
           >
-            <SettingsSelect
-              label="AI trigger"
-              value={settings.aiSearchTrigger}
-              disabled={!settings.aiSearchEnabled}
-              onValueChange={(value) => update("aiSearchTrigger", value)}
-              options={[
-                { value: "as_you_type", label: "As you type" },
-                { value: "enter_only", label: "Enter only" },
-              ]}
-            />
-          </Field>
-          <ToggleField
-            checked={settings.aiSearchRerank}
-            disabled={!settings.aiSearchEnabled}
-            label="Reranker"
-            description="Applies when AI search runs on Enter. When disabled, the server keeps its original RRF order."
-            onChange={(checked) => update("aiSearchRerank", checked)}
-          />
-          <details className="rounded-2xl border border-border/60 surface-base-soft p-4">
-            <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
-            <div className="mt-3">
-              <ToggleField
-                checked={settings.searchDebugSources}
-                label="Per-result source badges"
-                description="Show local FTS and server AI labels on every result for ranking diagnostics."
-                onChange={(checked) => update("searchDebugSources", checked)}
-              />
-            </div>
-          </details>
-        </SettingsSection>
-
-        <SettingsSection
-          title="Notes server"
-          description="Realtime sync and every AI feature are owned by your Tangleaf server. Local editing, graph navigation, and full-text search remain available offline."
-        >
-          <Field
-            label="Server URL"
-            hint="Leave empty for a standalone offline device. Use the public HTTPS origin without an API path."
-          >
-            <Input
-              value={settings.syncServerUrl ?? ""}
-              onChange={(event) => update("syncServerUrl", event.currentTarget.value || null)}
-              placeholder="https://notes.okhsunrog.ru"
-            />
-          </Field>
-          <Field
-            label="Device token"
-            hint={
-              tokenConfigured
-                ? "A token is configured; leave empty to keep it."
-                : "Paste the bearer token assigned to this device."
-            }
-          >
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                autoComplete="off"
-                value={secrets.SYNC_TOKEN ?? ""}
-                placeholder={tokenConfigured ? "configured" : "not configured"}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  setSecrets((current) => ({ ...current, SYNC_TOKEN: value }));
-                  if (value)
-                    setClearKeys((current) => current.filter((item) => item !== "SYNC_TOKEN"));
+            <Field label="Open on launch">
+              <SettingsSelect<SettingsSnapshot["startupView"]>
+                label="Open on launch"
+                value={settings.startupView}
+                onValueChange={(startupView) => {
+                  setSettings((current) =>
+                    current
+                      ? {
+                          ...current,
+                          startupView,
+                          startupPageUuid:
+                            startupView === "specific_page"
+                              ? (current.startupPageUuid ??
+                                startupPagesQuery.data?.[0]?.uuid ??
+                                null)
+                              : current.startupPageUuid,
+                        }
+                      : current,
+                  );
+                  setMessage("");
                 }}
+                options={[
+                  { value: "dashboard", label: "Dashboard" },
+                  { value: "last_session", label: "Restore last session" },
+                  { value: "today", label: "Today's journal" },
+                  { value: "specific_page", label: "A specific note" },
+                ]}
               />
-              {tokenConfigured && (
+            </Field>
+            {settings.startupView === "specific_page" && (
+              <Field
+                label="Startup note"
+                hint={
+                  startupPagesQuery.data?.length
+                    ? "If this note is deleted, Tangleaf safely falls back to Dashboard."
+                    : "Create a note before choosing it as your startup page."
+                }
+              >
+                <SettingsSelect
+                  label="Startup note"
+                  value={settings.startupPageUuid}
+                  disabled={!startupPagesQuery.data?.length}
+                  placeholder={
+                    startupPagesQuery.data?.length ? "Choose a note" : "No notes available"
+                  }
+                  onValueChange={(value) => update("startupPageUuid", value)}
+                  options={(startupPagesQuery.data ?? []).map((page) => ({
+                    value: page.uuid,
+                    label: page.title ?? "Untitled note",
+                  }))}
+                />
+              </Field>
+            )}
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Favorites, recent notes, and the restored session stay on this device.
+            </p>
+          </SettingsSection>
+        </div>
+        <div hidden={category !== "search"} className="space-y-7">
+          <SettingsSection
+            title="Search"
+            description="Control when server AI joins the always-available local full-text search."
+          >
+            <ToggleField
+              checked={settings.aiSearchEnabled}
+              label="AI search"
+              description="Allow the configured notes server to refine local search results. Local FTS stays enabled when this is off."
+              onChange={(checked) => update("aiSearchEnabled", checked)}
+            />
+            <Field
+              label="AI trigger"
+              hint="Enter-only avoids server requests while you are still typing. Press Enter once to request AI results, then again to open the selection."
+            >
+              <SettingsSelect
+                label="AI trigger"
+                value={settings.aiSearchTrigger}
+                disabled={!settings.aiSearchEnabled}
+                onValueChange={(value) => update("aiSearchTrigger", value)}
+                options={[
+                  { value: "as_you_type", label: "As you type" },
+                  { value: "enter_only", label: "Enter only" },
+                ]}
+              />
+            </Field>
+            <ToggleField
+              checked={settings.aiSearchRerank}
+              disabled={!settings.aiSearchEnabled}
+              label="Reranker"
+              description="Applies when AI search runs on Enter. When disabled, the server keeps its original RRF order."
+              onChange={(checked) => update("aiSearchRerank", checked)}
+            />
+            <details className="rounded-2xl border border-border/60 surface-base-soft p-4">
+              <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
+              <div className="mt-3">
+                <ToggleField
+                  checked={settings.searchDebugSources}
+                  label="Per-result source badges"
+                  description="Show local FTS and server AI labels on every result for ranking diagnostics."
+                  onChange={(checked) => update("searchDebugSources", checked)}
+                />
+              </div>
+            </details>
+          </SettingsSection>
+        </div>
+        <div hidden={category !== "server"} className="space-y-7">
+          <SettingsSection
+            title="Notes server"
+            description="Realtime sync and every AI feature are owned by your Tangleaf server. Local editing, graph navigation, and full-text search remain available offline."
+          >
+            <Field
+              label="Server URL"
+              hint="Leave empty for a standalone offline device. Use the public HTTPS origin without an API path."
+            >
+              <Input
+                value={settings.syncServerUrl ?? ""}
+                onChange={(event) => update("syncServerUrl", event.currentTarget.value || null)}
+                placeholder="https://notes.okhsunrog.ru"
+              />
+            </Field>
+            <Field
+              label="Device token"
+              hint={
+                tokenConfigured
+                  ? "A token is configured; leave empty to keep it."
+                  : "Paste the bearer token assigned to this device."
+              }
+            >
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={secrets.SYNC_TOKEN ?? ""}
+                  placeholder={tokenConfigured ? "configured" : "not configured"}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setSecrets((current) => ({ ...current, SYNC_TOKEN: value }));
+                    if (value)
+                      setClearKeys((current) => current.filter((item) => item !== "SYNC_TOKEN"));
+                  }}
+                />
+                {tokenConfigured && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label="Clear sync token"
+                    onClick={() => setClearKeys(["SYNC_TOKEN"])}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                )}
+              </div>
+            </Field>
+            <div className="rounded-xl border border-border/60 surface-base p-3 text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-medium">Current state</span>
+                <span
+                  className={cn(
+                    syncPresentation?.tone === "success"
+                      ? "text-emerald-600"
+                      : syncPresentation?.tone === "danger"
+                        ? "text-destructive"
+                        : syncPresentation?.tone === "warning"
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-muted-foreground",
+                  )}
+                >
+                  {syncPresentation?.label ?? "Sync off"}
+                </span>
+              </div>
+              {syncQuery.data && (
+                <div className="mt-1 space-y-1 text-muted-foreground">
+                  <p>{syncPresentation?.description}</p>
+                  <p>
+                    seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
+                  </p>
+                  {syncQuery.data.message && (
+                    <p className="break-words text-destructive">{syncQuery.data.message}</p>
+                  )}
+                </div>
+              )}
+              {syncPresentation?.canRetry && (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  aria-label="Clear sync token"
-                  onClick={() => setClearKeys(["SYNC_TOKEN"])}
+                  className="mt-3"
+                  disabled={busy}
+                  onClick={() => void retrySyncConnection()}
                 >
-                  <Trash2 className="size-4" />
+                  Retry sync
                 </Button>
               )}
             </div>
-          </Field>
-          <div className="rounded-xl border border-border/60 surface-base p-3 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-medium">Current state</span>
-              <span
-                className={cn(
-                  syncPresentation?.tone === "success"
-                    ? "text-emerald-600"
-                    : syncPresentation?.tone === "danger"
-                      ? "text-destructive"
-                      : syncPresentation?.tone === "warning"
-                        ? "text-amber-600 dark:text-amber-400"
-                        : "text-muted-foreground",
-                )}
-              >
-                {syncPresentation?.label ?? "Sync off"}
-              </span>
-            </div>
-            {syncQuery.data && (
-              <div className="mt-1 space-y-1 text-muted-foreground">
-                <p>{syncPresentation?.description}</p>
-                <p>
-                  seq {syncQuery.data.lastServerSeq} · {syncQuery.data.pendingOperations} pending
-                </p>
-                {syncQuery.data.message && (
-                  <p className="break-words text-destructive">{syncQuery.data.message}</p>
-                )}
-              </div>
-            )}
-            {syncPresentation?.canRetry && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                disabled={busy}
-                onClick={() => void retrySyncConnection()}
-              >
-                Retry sync
-              </Button>
-            )}
-          </div>
-          <p className="text-xs break-all text-muted-foreground">
-            Device config: {settings.configPath}
-          </p>
-        </SettingsSection>
+            <p className="text-xs break-all text-muted-foreground">
+              Device config: {settings.configPath}
+            </p>
+          </SettingsSection>
 
-        <ServerAiSettingsSection
-          enabled={Boolean(settings.syncServerUrl?.trim() && tokenConfigured)}
-          onError={setError}
-          onMessage={setMessage}
-        />
-
-        <DataSettingsSections
-          dataAvailable={dataAvailable}
-          busy={busy}
-          dataAction={dataAction}
-          onDataChanged={onDataChanged}
-          onError={setError}
-          onMessage={setMessage}
-        />
-
+          <ServerAiSettingsSection
+            enabled={Boolean(settings.syncServerUrl?.trim() && tokenConfigured)}
+            onError={setError}
+            onMessage={setMessage}
+          />
+        </div>
+        <div hidden={category !== "data"} className="space-y-7">
+          <ConfigurationTransferSection
+            appearance={{
+              theme: theme === "light" || theme === "dark" ? theme : "system",
+              palette,
+              displayProfile,
+              inkColor,
+            }}
+            disabled={busy}
+            onBusyChange={setBusy}
+            onImported={(result) => {
+              setSettings(result.settings);
+              queryClient.setQueryData(queryKeys.settings, result.settings);
+              setSecrets({});
+              setClearKeys([]);
+              if (result.appearance) {
+                setTheme(result.appearance.theme);
+                setPalette(result.appearance.palette);
+                setDisplayProfile(result.appearance.displayProfile ?? "auto");
+                setInkColor(result.appearance.inkColor ?? "auto");
+              }
+            }}
+          />
+          <DataSettingsSections
+            dataAvailable={dataAvailable}
+            busy={busy}
+            dataAction={dataAction}
+            onDataChanged={onDataChanged}
+            onError={setError}
+            onMessage={setMessage}
+          />
+        </div>
         {error && (
           <p
             role="alert"
@@ -701,21 +740,20 @@ export function SettingsPage({
             {message}
           </p>
         )}
-
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 pt-5">
-          <Button type="button" variant="ghost" onClick={() => restartApp()}>
-            <RotateCcw className="size-4" /> Restart app
-          </Button>
-          <Button type="submit" disabled={busy}>
-            {busy ? (
-              <BusyIndicator className="size-4" label="Working" hideLabel />
-            ) : (
-              <Save className="size-4" />
-            )}
-            Save settings
-          </Button>
-        </div>
       </form>
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border/50 bg-background px-5 py-3 pb-[max(0.75rem,var(--safe-area-inset-bottom))]">
+        <Button type="button" variant="ghost" onClick={() => restartApp()}>
+          <RotateCcw className="size-4" /> Restart app
+        </Button>
+        <Button type="submit" form="device-settings-form" disabled={busy}>
+          {busy ? (
+            <BusyIndicator className="size-4" label="Working" hideLabel />
+          ) : (
+            <Save className="size-4" />
+          )}
+          Save settings
+        </Button>
+      </div>
     </div>
   );
 }
