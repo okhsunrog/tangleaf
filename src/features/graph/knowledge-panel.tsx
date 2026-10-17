@@ -1,35 +1,24 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, RefreshCw, Sparkles, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ChatCard } from "@/features/chat/chat-card";
 import type { AssistantController } from "@/features/chat/use-assistant-controller";
-import { pageDisplayTitle } from "@/features/journal/journal-date";
 import type { MarkdownOpenHandler } from "@/features/markdown";
-import {
-  contentText,
-  contentUuid,
-  findBacklinks,
-  getBlock,
-  getGraphSnapshot,
-  getPage,
-  type Content,
-  type GraphItem,
-  type GraphSnapshot,
-  type Page,
-} from "@/lib/api";
+import { getGraphSnapshot, getPage, type Content, type Page } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
 } from "@/features/workspace/workspace-model";
+import { notifyError } from "@/lib/notify";
 
 type PanelProps = {
   page: Page | null;
   onOpenMarkdownLink: MarkdownOpenHandler;
   controller: AssistantController;
 };
-
 type GraphProps = {
   page: Page | null;
   onOpenContent: (content: Content, disposition?: OpenDisposition) => void | Promise<void>;
@@ -59,194 +48,199 @@ export function GraphWorkspace({
   onOpenContent,
   onClose,
 }: GraphProps & { onClose: () => void }) {
-  const graphQuery = useQuery({
-    queryKey: queryKeys.graph(page?.uuid ?? null),
-    queryFn: () => getGraphSnapshot(page?.uuid ?? null),
+  const [selectedUuid, setSelectedUuid] = useState<string | null>(page?.uuid ?? null);
+  const [filter, setFilter] = useState("");
+  const graph = useQuery({
+    queryKey: queryKeys.graph(null),
+    queryFn: () => getGraphSnapshot(null),
   });
-  const backlinksQuery = useQuery({
-    queryKey: queryKeys.backlinks(page?.uuid ?? "inactive"),
-    queryFn: () => findBacklinks((page as Page).uuid),
-    enabled: page !== null,
-  });
-  const snapshot = graphQuery.data ?? { items: [], edges: [] };
-  const backlinks = backlinksQuery.data ?? [];
-  const error = graphQuery.error ?? backlinksQuery.error;
-
+  const items = graph.data?.items ?? [];
+  const edges = graph.data?.edges ?? [];
+  const degrees = useMemo(() => {
+    const neighbors = new Map<string, Set<string>>();
+    for (const edge of graph.data?.edges ?? []) {
+      if (edge.sourceUuid === edge.targetUuid) continue;
+      for (const [from, to] of [
+        [edge.sourceUuid, edge.targetUuid],
+        [edge.targetUuid, edge.sourceUuid],
+      ]) {
+        if (!neighbors.has(from)) neighbors.set(from, new Set());
+        neighbors.get(from)!.add(to);
+      }
+    }
+    return neighbors;
+  }, [graph.data]);
+  const visible = items
+    .filter((item) => item.label.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
+    .sort(
+      (a, b) =>
+        (degrees.get(b.uuid)?.size ?? 0) - (degrees.get(a.uuid)?.size ?? 0) ||
+        a.label.localeCompare(b.label),
+    );
+  const selected = items.find((item) => item.uuid === selectedUuid);
+  const incoming = new Set(
+    edges.filter((edge) => edge.targetUuid === selectedUuid).map((edge) => edge.sourceUuid),
+  );
+  const outgoing = new Set(
+    edges.filter((edge) => edge.sourceUuid === selectedUuid).map((edge) => edge.targetUuid),
+  );
+  const openPage = async (uuid: string, shiftKey: boolean) => {
+    try {
+      const record = await getPage(uuid);
+      if (record) await onOpenContent({ kind: "page", record }, dispositionFromShiftKey(shiftKey));
+    } catch (error) {
+      notifyError("Could not open page", error);
+    }
+  };
+  const connections = (direction: "incoming" | "outgoing") => {
+    const targets = direction === "incoming" ? incoming : outgoing;
+    const connected = items
+      .filter((item) => targets.has(item.uuid))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return (
+      <section className="min-w-0 flex-1">
+        <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+          {direction === "incoming" ? "Links from" : "Links to"} · {connected.length}
+          <ArrowRight className="size-3.5" />
+        </h3>
+        {connected.length === 0 && (
+          <p className="rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
+            No {direction} links
+          </p>
+        )}
+        <ul className="space-y-2">
+          {connected.map((item) => (
+            <li key={item.uuid} className="rounded-xl border border-border bg-card p-3">
+              <button
+                type="button"
+                className="w-full text-left text-sm font-medium break-words hover:text-primary"
+                onClick={() => setSelectedUuid(item.uuid)}
+              >
+                {item.label || "Untitled"}
+              </button>
+              <button
+                type="button"
+                className="mt-2 text-xs text-muted-foreground underline underline-offset-4 hover:text-primary"
+                onClick={(event) => void openPage(item.uuid, event.shiftKey)}
+              >
+                Open page
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    );
+  };
   return (
     <div className="graph-workspace flex h-full min-h-0 flex-col bg-canvas">
-      <div className="flex h-16 shrink-0 items-center gap-3 border-b border-border/60 px-5">
+      <header className="flex shrink-0 items-center gap-3 border-b border-border/60 p-4">
         <Button variant="ghost" size="icon-sm" aria-label="Back to notes" onClick={onClose}>
           <ArrowLeft className="size-4" />
         </Button>
         <div>
-          <h2 className="text-sm font-semibold">Knowledge graph</h2>
+          <h2 className="text-sm font-semibold">Page connections</h2>
           <p className="text-xs text-muted-foreground">
-            {page ? `Focused around ${pageDisplayTitle(page)}` : "All pages and blocks"}
+            {items.length} pages · Links and block references between pages
           </p>
         </div>
         <Button
           className="ml-auto"
           variant="ghost"
-          size="sm"
-          onClick={() => void Promise.all([graphQuery.refetch(), backlinksQuery.refetch()])}
+          size="icon-sm"
+          aria-label="Refresh graph"
+          onClick={() => void graph.refetch()}
         >
-          <RefreshCw className="size-3.5" />
-          Refresh
+          <RefreshCw className="size-4" />
         </Button>
-      </div>
-      <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1 overflow-hidden">
-          {error && (
-            <p className="absolute top-4 left-4 z-10 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {String(error)}
+      </header>
+      {graph.isError ? (
+        <p role="alert" className="p-5 text-sm text-destructive">
+          Could not load connections. Use Refresh to retry.
+        </p>
+      ) : graph.isPending ? (
+        <p role="status" className="p-5 text-sm text-muted-foreground">
+          Loading connections…
+        </p>
+      ) : (
+        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto md:grid-cols-[15rem_minmax(0,1fr)] md:overflow-hidden">
+          <aside className="border-b border-border p-4 md:overflow-y-auto md:border-r md:border-b-0">
+            <label
+              className="mb-2 flex items-center gap-2 text-xs font-medium"
+              htmlFor="graph-filter"
+            >
+              <Search className="size-3.5" />
+              Find a page
+            </label>
+            <Input
+              id="graph-filter"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="Page title…"
+            />
+            <p className="my-3 text-xs text-muted-foreground">
+              Pages sorted by number of connections
             </p>
-          )}
-          <GraphView
-            snapshot={snapshot}
-            focusUuid={page?.uuid ?? null}
-            onOpenItem={async (item, disposition) => {
-              if (item.kind === "page") {
-                const record = await getPage(item.uuid);
-                if (record) await onOpenContent({ kind: "page", record }, disposition);
-              } else {
-                const record = await getBlock(item.uuid);
-                if (record) await onOpenContent({ kind: "block", record }, disposition);
-              }
-            }}
-          />
-          <div className="pointer-events-none absolute bottom-5 left-5 flex gap-3 rounded-xl border border-border/60 surface-glass px-3 py-2 text-[10px] eink:text-xs text-muted-foreground shadow-sm">
-            <span>
-              <i className="mr-1 inline-block size-2 rounded-full bg-sky-500" /> Page
-            </span>
-            <span>
-              <i className="mr-1 inline-block size-2 rounded-full bg-amber-500" /> Block
-            </span>
-            <span>Click an item to open it</span>
-          </div>
+            <ul className="max-h-52 space-y-1 overflow-y-auto md:max-h-none">
+              {visible.map((item) => (
+                <li key={item.uuid}>
+                  <button
+                    type="button"
+                    aria-pressed={item.uuid === selectedUuid}
+                    className="flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-accent aria-pressed:bg-primary/10 aria-pressed:text-primary"
+                    onClick={() => setSelectedUuid(item.uuid)}
+                  >
+                    <span className="min-w-0 flex-1 break-words">{item.label || "Untitled"}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {degrees.get(item.uuid)?.size ?? 0}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {visible.length === 0 && (
+              <p className="py-4 text-sm text-muted-foreground">
+                {items.length ? "No matching pages." : "Create a page to get started."}
+              </p>
+            )}
+          </aside>
+          <main className="p-5 md:overflow-y-auto">
+            {selected ? (
+              <>
+                <div className="mb-6 rounded-xl border border-primary/30 bg-primary/5 p-5">
+                  <p className="mb-2 text-xs text-muted-foreground">Selected page</p>
+                  <h3 className="text-xl font-semibold break-words">
+                    {selected.label || "Untitled"}
+                  </h3>
+                  <Button
+                    className="mt-3"
+                    variant="outline"
+                    size="sm"
+                    onClick={(event) => void openPage(selected.uuid, event.shiftKey)}
+                  >
+                    Open page
+                    <ArrowRight className="size-3.5" />
+                  </Button>
+                </div>
+                <div className="flex flex-col gap-6 xl:flex-row">
+                  {connections("incoming")}
+                  {connections("outgoing")}
+                </div>
+                <p className="mt-6 text-xs text-muted-foreground">
+                  Select a linked title to explore its connections. Shift + Open page opens it
+                  alongside your note.
+                </p>
+              </>
+            ) : (
+              <div className="py-12 text-center">
+                <h3 className="text-lg font-medium">Explore connections</h3>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Choose a page to see where its links come from and where they lead.
+                </p>
+              </div>
+            )}
+          </main>
         </div>
-        <aside className="w-72 shrink-0 overflow-y-auto border-l border-border/60 bg-sidebar/65 p-4">
-          <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-            Backlinks
-          </h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {page
-              ? `Incoming links to ${pageDisplayTitle(page)}`
-              : "Open a note before entering the graph to inspect its backlinks."}
-          </p>
-          {page && backlinks.length === 0 && (
-            <p className="mt-4 text-xs text-muted-foreground">No incoming links.</p>
-          )}
-          <ul className="mt-4 space-y-2">
-            {backlinks.map((backlink) => (
-              <li key={contentUuid(backlink)}>
-                <button
-                  type="button"
-                  onClick={(event) =>
-                    void onOpenContent(backlink, dispositionFromShiftKey(event.shiftKey))
-                  }
-                  className="w-full rounded-xl border border-border/60 surface-card px-3 py-2.5 text-left text-xs transition hover:border-primary/25 hover:bg-primary/5"
-                >
-                  <span className="font-medium">
-                    {contentText(backlink).slice(0, 48) || "Untitled"}
-                  </span>
-                  <span className="ml-1 text-muted-foreground">{backlink.kind}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
-      </div>
+      )}
     </div>
-  );
-}
-
-function GraphView({
-  snapshot,
-  focusUuid,
-  onOpenItem,
-}: {
-  snapshot: GraphSnapshot;
-  focusUuid: string | null;
-  onOpenItem: (item: GraphItem, disposition: OpenDisposition) => void | Promise<void>;
-}) {
-  const positioned = useMemo(() => {
-    const count = snapshot.items.length;
-    return snapshot.items.map((item, index) => {
-      const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2;
-      const radiusX = count <= 1 ? 0 : Math.min(430, 150 + count * 30);
-      const radiusY = count <= 1 ? 0 : Math.min(250, 90 + count * 18);
-      return {
-        item,
-        x: 600 + Math.cos(angle) * radiusX,
-        y: 350 + Math.sin(angle) * radiusY,
-      };
-    });
-  }, [snapshot.items]);
-  const byUuid = new Map(positioned.map((position) => [position.item.uuid, position]));
-
-  if (positioned.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Graph is empty.
-      </div>
-    );
-  }
-
-  return (
-    <svg
-      viewBox="0 0 1200 700"
-      preserveAspectRatio="xMidYMid meet"
-      role="img"
-      aria-label="Knowledge graph"
-      className="h-full w-full surface-card-soft"
-    >
-      {snapshot.edges.map((edge) => {
-        const source = byUuid.get(edge.sourceUuid);
-        const target = byUuid.get(edge.targetUuid);
-        return source && target ? (
-          <line
-            key={`${edge.sourceUuid}-${edge.targetUuid}-${edge.relation}`}
-            x1={source.x}
-            y1={source.y}
-            x2={target.x}
-            y2={target.y}
-            className="stroke-border"
-            strokeWidth="2"
-          >
-            <title>{edge.relation}</title>
-          </line>
-        ) : null;
-      })}
-      {positioned.map(({ item, x, y }) => (
-        <g
-          key={item.uuid}
-          role="button"
-          tabIndex={0}
-          aria-label={item.label}
-          onClick={(event) => void onOpenItem(item, dispositionFromShiftKey(event.shiftKey))}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              void onOpenItem(item, dispositionFromShiftKey(event.shiftKey));
-            }
-          }}
-          className="cursor-pointer outline-none"
-        >
-          <circle
-            cx={x}
-            cy={y}
-            r={item.uuid === focusUuid ? 18 : 13}
-            className={item.kind === "block" ? "fill-amber-500" : "fill-sky-500"}
-          />
-          <text
-            x={x}
-            y={y + 34}
-            textAnchor="middle"
-            className="fill-foreground text-[14px] font-medium"
-          >
-            {item.label.slice(0, 28)}
-          </text>
-        </g>
-      ))}
-    </svg>
   );
 }

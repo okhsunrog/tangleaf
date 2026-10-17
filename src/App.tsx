@@ -201,6 +201,27 @@ function App() {
             {compact ? (
               <>
                 <Button
+                  variant={graphOpen ? "secondary" : "ghost"}
+                  size="icon-sm"
+                  aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
+                  aria-pressed={graphOpen}
+                  onClick={() => {
+                    if (graphOpen) {
+                      dispatchWorkspace({ type: "go_back", paneId: activePane.id });
+                    } else {
+                      dispatchWorkspace({
+                        type: "open_target",
+                        target: graphTarget(workspace.activePageUuid),
+                        disposition: currentDisposition,
+                      });
+                    }
+                  }}
+                  className="h-8 gap-1.5 rounded-xl px-2.5"
+                >
+                  <GitFork className="size-3.5" />
+                </Button>
+
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   aria-label="Search notes"

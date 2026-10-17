@@ -9,6 +9,7 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
+import { PageBacklinks } from "./page-backlinks";
 import { usePageFind } from "./page-find";
 import { Button } from "@/components/ui/button";
 import { DocumentPage } from "@/features/document/document-page";
@@ -540,7 +541,8 @@ export function PageView({
           />
         )}
       </div>
-      <div className="mt-16">
+      <PageBacklinks pageUuid={page.uuid} />
+      <div className="mt-8">
         <AttachmentsCard location={{ kind: "page", uuid: page.uuid }} readOnly={!canEdit} />
       </div>
     </article>
