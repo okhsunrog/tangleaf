@@ -422,23 +422,6 @@ fn selected_graph_root_must_not_be_a_symlink() {
     ));
 }
 
-#[cfg(unix)]
-#[test]
-fn non_utf8_source_paths_are_rejected_instead_of_lossily_normalized() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let temp = TempDir::new().expect("temp dir");
-    fs::create_dir_all(temp.path().join("pages")).expect("create pages");
-    let invalid_name = OsString::from_vec(vec![b'n', b'o', b't', 0xff, b'.', b'm', b'd']);
-    fs::write(temp.path().join("pages").join(invalid_name), "bytes").expect("write non-UTF8 file");
-
-    assert!(matches!(
-        scan_logseq_graph(temp.path()),
-        Err(ScanError::NonUtf8Path { .. })
-    ));
-}
-
 fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
     for entry in fs::read_dir(source).expect("read source fixture") {
         let entry = entry.expect("fixture entry");

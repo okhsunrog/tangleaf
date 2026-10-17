@@ -808,3 +808,23 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> ScanError {
         source,
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn non_utf8_source_paths_are_rejected_instead_of_lossily_normalized() {
+        // Filesystems such as ZFS with utf8only reject this filename at creation.
+        // Exercise the scanner's path validation without requiring one on disk.
+        let root = Path::new("/graph");
+        let invalid_name = OsString::from_vec(vec![b'n', b'o', b't', 0xff, b'.', b'm', b'd']);
+        let path = root.join("pages").join(invalid_name);
+        assert!(matches!(
+            portable_relative_path(root, &path),
+            Err(ScanError::NonUtf8Path { path: rejected }) if rejected == path
+        ));
+    }
+}
