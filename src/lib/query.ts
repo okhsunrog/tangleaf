@@ -1,5 +1,5 @@
 import { QueryClient, type Query } from "@tanstack/react-query";
-import { events, type ChangeSet, type DomainEvent } from "@/lib/bindings";
+import { events, type BacklinksSnapshot, type ChangeSet, type DomainEvent } from "@/lib/bindings";
 
 const root = ["backend"] as const;
 
@@ -261,13 +261,27 @@ async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSe
   }
   // Backlink snapshots embed complete source blocks and their owning pages,
   // even when the graph's labels and edge sets stay unchanged.
-  if (
-    changes.blocks.length ||
-    changes.changedPages.length ||
-    changes.deletedPages.length ||
-    changes.graphChangedContent.length
-  ) {
+  if (changes.graphChangedContent.length) {
+    // Changed membership may introduce a source absent from a cached result.
     invalidations.push(invalidateFamily(queryKeys.backlinksRoot));
+  } else if (changes.blocks.length || changes.changedPages.length || changes.deletedPages.length) {
+    const sources = new Set(changes.blocks.map((block) => block.uuid));
+    const owners = new Set([...changes.changedPages, ...changes.deletedPages]);
+    for (const query of queryClient
+      .getQueryCache()
+      .findAll({ queryKey: queryKeys.backlinksRoot })) {
+      const snapshot = query.state.data as BacklinksSnapshot | undefined;
+      // A pending first load has no membership to inspect. Retire that read
+      // conservatively; complete snapshots only refresh when they embed a change.
+      if (
+        !Array.isArray(snapshot?.blocks) ||
+        !Array.isArray(snapshot?.pages) ||
+        snapshot.blocks.some((block) => sources.has(block.uuid)) ||
+        snapshot.pages.some((page) => owners.has(page.uuid))
+      ) {
+        invalidations.push(invalidate(query.queryKey));
+      }
+    }
   }
   if (changes.attachmentOwners.length) {
     invalidations.push(invalidateFamily(queryKeys.attachmentImagesRoot));

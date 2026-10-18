@@ -74,6 +74,33 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryData(queryKeys.searchRevision)).toBeUndefined();
   });
 
+  it("refreshes only backlinks embedding a changed source while graph membership stays equal", async () => {
+    const client = new QueryClient();
+    const affected = queryKeys.backlinks("target-a");
+    const unrelated = queryKeys.backlinks("target-b");
+    client.setQueryData(affected, { blocks: [{ uuid: "source-a" }], pages: [{ uuid: "owner-a" }] });
+    client.setQueryData(unrelated, {
+      blocks: [{ uuid: "source-b" }],
+      pages: [{ uuid: "owner-b" }],
+    });
+    await applyDomainEvent(
+      client,
+      committed({
+        blocks: [{ uuid: "source-a", before: placement("owner-a"), after: placement("owner-a") }],
+      }),
+    );
+    expect(client.getQueryState(affected)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
+  });
+
+  it("refreshes backlink membership when a new source was absent from the cached snapshot", async () => {
+    const client = new QueryClient();
+    const key = queryKeys.backlinks("target-a");
+    client.setQueryData(key, { blocks: [], pages: [] });
+    await applyDomainEvent(client, committed({ graphChangedContent: ["new-source"] }));
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
   it("refreshes a committed Split and its backlinks while preserving a stable graph and unrelated pages", async () => {
     const client = new QueryClient();
     const target = [
