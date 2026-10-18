@@ -351,9 +351,8 @@ describe("window-local workspace model", () => {
 
   it("projects every dock visibility without rewriting dock state", () => {
     expect(projectDock(DockVisibility.Hidden, false)).toBe(DockProjection.Hidden);
-    expect(projectDock(DockVisibility.Rail, false)).toBe(DockProjection.Rail);
     expect(projectDock(DockVisibility.Open, false)).toBe(DockProjection.Panel);
-    expect(projectDock(DockVisibility.Rail, true)).toBe(DockProjection.CompactSurface);
+    expect(projectDock(DockVisibility.Hidden, true)).toBe(DockProjection.Hidden);
     expect(projectDock(DockVisibility.Open, true)).toBe(DockProjection.CompactSurface);
   });
 });

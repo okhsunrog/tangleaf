@@ -26,6 +26,15 @@ export function decodeWorkspaceSession(value: string): WorkspaceState | null {
     const parsed: unknown = JSON.parse(value);
     if (!isRecord(parsed) || parsed.version !== SESSION_VERSION) return null;
     const state = parsed.state;
+    // Older sessions retained a narrow assistant rail. Keep it closed without discarding
+    // the user's pane history or the preferred width of the full assistant panel.
+    if (
+      isRecord(state) &&
+      isRecord(state.assistantDock) &&
+      state.assistantDock.visibility === "rail"
+    ) {
+      state.assistantDock.visibility = DockVisibility.Hidden;
+    }
     if (!isWorkspaceState(state)) return null;
     return validateWorkspaceState(state).length === 0 ? state : null;
   } catch {

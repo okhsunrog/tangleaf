@@ -33,13 +33,11 @@ export enum OpenDispositionKind {
 
 export enum DockVisibility {
   Hidden = "hidden",
-  Rail = "rail",
   Open = "open",
 }
 
 export enum DockProjection {
   Hidden = "hidden",
-  Rail = "rail",
   Panel = "panel",
   CompactSurface = "compact_surface",
 }
@@ -246,7 +244,7 @@ export function visiblePaneIds(state: WorkspaceState, compact: boolean): readonl
 export function projectDock(visibility: DockVisibility, compact: boolean): DockProjection {
   if (visibility === DockVisibility.Hidden) return DockProjection.Hidden;
   if (compact) return DockProjection.CompactSurface;
-  return visibility === DockVisibility.Rail ? DockProjection.Rail : DockProjection.Panel;
+  return DockProjection.Panel;
 }
 
 export function getPane(state: WorkspaceState, paneId: PaneId): PaneRecord {

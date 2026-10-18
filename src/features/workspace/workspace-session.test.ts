@@ -4,12 +4,31 @@ import {
   allNotesTarget,
   createInitialWorkspaceState,
   currentDisposition,
+  DockVisibility,
   pageTarget,
   workspaceReducer,
 } from "./workspace-model";
 import { decodeWorkspaceSession, encodeWorkspaceSession } from "./workspace-session";
 
 describe("workspace session", () => {
+  it("migrates a collapsed assistant to hidden without losing the rest of the session", () => {
+    const state = workspaceReducer(createInitialWorkspaceState(), {
+      type: "open_target",
+      target: pageTarget("019cfa51-8d73-7b53-b090-cdb945bb1b4d"),
+      disposition: adjacentDisposition,
+    });
+    const stored = JSON.stringify({
+      version: 1,
+      state: {
+        ...state,
+        assistantDock: { visibility: "rail", width: 410 },
+      },
+    });
+    expect(decodeWorkspaceSession(stored)).toEqual({
+      ...state,
+      assistantDock: { visibility: DockVisibility.Hidden, width: 410 },
+    });
+  });
   it("round-trips a valid two-pane session", () => {
     const initial = createInitialWorkspaceState();
     const state = workspaceReducer(initial, {

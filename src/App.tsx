@@ -373,7 +373,6 @@ function App() {
         }
         assistantVisibility={assistantDock.visibility}
         assistantWidth={assistantDock.width}
-        assistantBusy={assistant.state.busy}
         onAssistantVisibilityChange={(visibility) =>
           dispatchWorkspace({ type: "set_dock_visibility", visibility })
         }

@@ -8,13 +8,14 @@ import {
 import { useWorkspaceStore } from "./workspace-store";
 
 describe("workspace-store", () => {
-  it("keeps the assistant preference when navigation is reset", () => {
-    useWorkspaceStore
-      .getState()
-      .dispatch({ type: "set_dock_visibility", visibility: DockVisibility.Rail });
-    useWorkspaceStore.getState().dispatch({ type: "reset" });
-    expect(useWorkspaceStore.getState().assistantDock.visibility).toBe(DockVisibility.Rail);
-  });
+  it.each([DockVisibility.Open, DockVisibility.Hidden])(
+    "keeps the %s assistant preference when navigation is reset",
+    (visibility) => {
+      useWorkspaceStore.getState().dispatch({ type: "set_dock_visibility", visibility });
+      useWorkspaceStore.getState().dispatch({ type: "reset" });
+      expect(useWorkspaceStore.getState().assistantDock.visibility).toBe(visibility);
+    },
+  );
   beforeEach(() => {
     // setState shallow-merges, so this resets the workspace fields while keeping dispatch.
     useWorkspaceStore.setState(createInitialWorkspaceState());

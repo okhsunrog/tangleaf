@@ -10,7 +10,7 @@ import {
 import { AppFindChromeContext } from "@/features/pages/page-find-chrome";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { dismissBackOverlay } from "@/lib/back-overlays";
-import { ArrowLeft, Bot, ChevronLeft, X } from "lucide-react";
+import { ArrowLeft, X } from "lucide-react";
 import { TangleafBrand } from "@/brand/TangleafBrand";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
@@ -34,7 +34,6 @@ type Props = {
   assistant: ReactNode;
   assistantVisibility: DockVisibility;
   assistantWidth: number;
-  assistantBusy: boolean;
   onAssistantVisibilityChange: (visibility: DockVisibility) => void;
   onAssistantWidthChange: (width: number) => void;
   workbenchIsHome: boolean;
@@ -59,7 +58,6 @@ export function AppLayout({
   assistant,
   assistantVisibility,
   assistantWidth,
-  assistantBusy,
   onAssistantVisibilityChange,
   onAssistantWidthChange,
   workbenchIsHome,
@@ -187,7 +185,7 @@ export function AppLayout({
       notes.resize("220px");
       if (assistantVisible) {
         dock.expand();
-        dock.resize(assistantVisibility === DockVisibility.Rail ? "48px" : `${assistantWidth}px`);
+        dock.resize(`${assistantWidth}px`);
       } else {
         dock.collapse();
       }
@@ -319,38 +317,17 @@ export function AppLayout({
               <Separator
                 className={cn(
                   "workspace-gutter group relative w-3 bg-transparent after:absolute after:inset-y-4 after:left-1/2 after:w-px hover:after:bg-primary/30",
-                  (!assistantVisible || compact || assistantVisibility === DockVisibility.Rail) &&
-                    "hidden",
+                  (!assistantVisible || compact) && "hidden",
                 )}
               />
               <Panel
                 id="assistant-dock"
                 panelRef={assistantRef}
-                defaultSize={
-                  compact
-                    ? 0
-                    : assistantVisibility === DockVisibility.Rail
-                      ? "48px"
-                      : `${assistantWidth}px`
-                }
-                minSize={
-                  compact || !assistantVisible
-                    ? 0
-                    : assistantVisibility === DockVisibility.Rail
-                      ? 48
-                      : 320
-                }
-                maxSize={
-                  compact
-                    ? "100%"
-                    : !assistantVisible
-                      ? 0
-                      : assistantVisibility === DockVisibility.Rail
-                        ? 48
-                        : 480
-                }
+                defaultSize={compact || !assistantVisible ? 0 : `${assistantWidth}px`}
+                minSize={compact || !assistantVisible ? 0 : 320}
+                maxSize={compact ? "100%" : assistantVisible ? 480 : 0}
                 groupResizeBehavior="preserve-pixel-size"
-                disabled={!compact && assistantVisibility !== DockVisibility.Open}
+                disabled={!compact && !assistantVisible}
                 collapsible
                 collapsedSize={0}
                 onResize={(size, _id, previous) => {
@@ -364,120 +341,54 @@ export function AppLayout({
                   }
                 }}
               >
-                {(assistantVisible || compact) &&
-                  (compact || assistantVisibility === DockVisibility.Open ? (
-                    <section
-                      id="assistant-dock-content"
-                      aria-hidden={
-                        compact && compactRegion !== CompactRegion.Assistant ? true : undefined
-                      }
-                      inert={
-                        compact && compactRegion !== CompactRegion.Assistant ? true : undefined
-                      }
-                      className={cn(
-                        "inspector-surface flex h-full min-h-0 flex-col overflow-hidden p-3",
-                        compact && "pb-[calc(0.75rem+var(--safe-area-inset-bottom))]",
-                      )}
+                {(assistantVisible || compact) && (
+                  <section
+                    id="assistant-dock-content"
+                    aria-hidden={
+                      compact && compactRegion !== CompactRegion.Assistant ? true : undefined
+                    }
+                    inert={compact && compactRegion !== CompactRegion.Assistant ? true : undefined}
+                    className={cn(
+                      "inspector-surface flex h-full min-h-0 flex-col overflow-hidden p-3",
+                      compact && "pb-[calc(0.75rem+var(--safe-area-inset-bottom))]",
+                    )}
+                  >
+                    <div
+                      className={cn("mb-1 flex h-7 justify-end gap-1", compact && "justify-start")}
                     >
-                      <div
-                        className={cn(
-                          "mb-1 flex h-7 justify-end gap-1",
-                          compact && "justify-start",
-                        )}
-                      >
-                        {compact && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            aria-label="Back from Assistant"
-                            onClick={() => dispatchCompactNavigation({ type: "close_assistant" })}
-                            className="gap-1 rounded-lg px-1.5"
-                          >
-                            <ArrowLeft className="size-3.5" />
-                            Back
-                          </Button>
-                        )}
-                        {!compact && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label="Collapse Assistant to rail"
-                            onClick={() => onAssistantVisibilityChange(DockVisibility.Rail)}
-                          >
-                            <ChevronLeft className="size-3.5" />
-                          </Button>
-                        )}
-                        {!compact && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label="Hide Assistant"
-                            onClick={hideAssistantAndRestoreFocus}
-                          >
-                            <X className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                      <div className="min-h-0 flex-1">{assistant}</div>
-                    </section>
-                  ) : (
-                    <AssistantRail
-                      busy={assistantBusy}
-                      onOpen={() => onAssistantVisibilityChange(DockVisibility.Open)}
-                      onHide={hideAssistantAndRestoreFocus}
-                    />
-                  ))}
+                      {compact && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          aria-label="Back from Assistant"
+                          onClick={() => dispatchCompactNavigation({ type: "close_assistant" })}
+                          className="gap-1 rounded-lg px-1.5"
+                        >
+                          <ArrowLeft className="size-3.5" />
+                          Back
+                        </Button>
+                      )}
+                      {!compact && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Hide Assistant"
+                          onClick={hideAssistantAndRestoreFocus}
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                    <div className="min-h-0 flex-1">{assistant}</div>
+                  </section>
+                )}
               </Panel>
             </Group>
           </div>
         </div>
       </CompactBackToHomeContext.Provider>
     </AppFindChromeContext.Provider>
-  );
-}
-
-function AssistantRail({
-  busy,
-  onOpen,
-  onHide,
-}: {
-  busy: boolean;
-  onOpen: () => void;
-  onHide: () => void;
-}) {
-  return (
-    <section className="inspector-surface flex h-full w-12 flex-col items-center gap-2 py-3">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label="Expand Assistant"
-        aria-expanded={false}
-        aria-controls="assistant-dock-content"
-        onClick={onOpen}
-        className="relative rounded-xl text-primary"
-      >
-        <Bot className="size-4" />
-        {busy && (
-          <span className="absolute top-1 right-1 size-2 animate-pulse rounded-full bg-primary eink:animate-none" />
-        )}
-      </Button>
-      <span className="[writing-mode:vertical-rl] text-[9px] font-semibold tracking-widest text-muted-foreground uppercase">
-        Assistant
-      </span>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        aria-label="Hide Assistant"
-        onClick={onHide}
-        className="mt-auto"
-      >
-        <X className="size-3" />
-      </Button>
-    </section>
   );
 }
