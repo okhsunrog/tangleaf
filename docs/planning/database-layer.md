@@ -297,6 +297,18 @@
   suites прошли 18/18. Общий Clippy и `vp check` чистые. Archive restore переносится следующим
   отдельным шагом; локальная epoch не заменяет runtime generation при физической замене файла.
 
+- Archive restore также использует подготовленную bulk-команду: проверка/декодирование ink
+  выполняются вне writer, текстовый Full Apply и новые причинно связанные InkPublish остаются
+  в одной SQL-транзакции. Сохраняются cursor и ожидающие envelopes, receipts заменяются,
+  история и её pins очищаются. Проверенные attachment blobs устанавливаются прежним precommit
+  callback; его ошибка и ошибка финального counter update откатывают SQL без notice.
+  Проверка synchronized replica использует общую role/config policy: Server и непустой URL
+  закрепляют workspace, пустая строка у Client — нет. Host публикует единственный ordered
+  replacement notice вместо двух after-await событий. Прошёл 51 целевой core test;
+  Tauri lib — 44 passed / 1 ignored. При проверке обнаружена отдельная прежняя проблема:
+  сохранённые pending InkPublish после удаления страницы могут потерять тела старых версий.
+  Следующий integrity cut закрепит владение этими данными за outbox и проверит отправку после reopen.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

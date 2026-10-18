@@ -167,17 +167,14 @@ pub async fn export_archive(conn: &Connection) -> Result<DataArchive> {
 }
 
 pub async fn import_archive(conn: &Connection, archive: DataArchive) -> Result<()> {
-    import_archive_with_precommit(conn, archive, || Ok(()))
+    crate::store::NotesStore::new(conn.clone())
+        .import_archive(archive)
         .await
-        .map(|_| ())
+        .map(|committed| committed.value)
 }
 
-/// Restores an archive while running a host-owned publication step inside the
+/// Restores an archive while publishing verified attachment blobs inside the
 /// validated SQLite transaction immediately before commit.
-///
-/// Attachment hosts use this boundary to publish already-verified blob bytes
-/// only after every archive operation has applied successfully, while still
-/// guaranteeing that bytes become durable before their metadata is committed.
 pub async fn import_archive_with_precommit<F>(
     conn: &Connection,
     archive: DataArchive,
@@ -186,89 +183,152 @@ pub async fn import_archive_with_precommit<F>(
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
-    if archive.format != ARCHIVE_FORMAT || !matches!(archive.version, 7 | ARCHIVE_VERSION) {
-        return Err(crate::CoreError::invalid(format!(
-            "unsupported archive format {} version {}",
-            archive.format, archive.version
-        ))
-        .into());
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .import_archive_with_precommit(archive, precommit)
+        .await?
+        .value)
+}
+
+impl crate::store::NotesStore {
+    pub async fn import_archive(
+        &self,
+        archive: DataArchive,
+    ) -> Result<crate::store::Committed<()>> {
+        Ok(self
+            .import_archive_with_precommit(archive, || Ok(()))
+            .await?
+            .map_value(|_| ()))
     }
-    if archive.workspace_uuid.is_nil() {
-        return Err(crate::CoreError::invalid("archive workspace UUID cannot be nil").into());
+
+    /// The callback installs already-verified attachment bytes after archive
+    /// operations succeed, before their metadata becomes committed and visible.
+    pub async fn import_archive_with_precommit<F>(
+        &self,
+        archive: DataArchive,
+        precommit: F,
+    ) -> Result<crate::store::Committed<ArchiveImportStats>>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        let plan = tokio::task::spawn_blocking(move || {
+            PreparedArchiveRestore::prepare(archive, precommit)
+        })
+        .await??;
+        self.execute_bulk(plan).await
     }
-    let mut identities = HashMap::new();
-    let mut journal_dates = HashSet::new();
-    for identity in &archive.page_identities {
-        operation::validate_page_identity(archive.workspace_uuid, identity.uuid, &identity.kind)?;
-        if identities.insert(identity.uuid, &identity.kind).is_some() {
+}
+
+pub(crate) struct PreparedArchiveRestore<F> {
+    archive: DataArchive,
+    ink_manifest: crate::ink::archive::Manifest,
+    ink_graphs: std::collections::BTreeMap<BlobHash, ink_format::snapshot::Snapshot>,
+    precommit: F,
+}
+
+impl<F> PreparedArchiveRestore<F>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
+    pub(crate) fn prepare(archive: DataArchive, precommit: F) -> Result<Self> {
+        if archive.format != ARCHIVE_FORMAT || !matches!(archive.version, 7 | ARCHIVE_VERSION) {
             return Err(crate::CoreError::invalid(format!(
-                "archive contains duplicate page identity UUID {}",
-                identity.uuid
+                "unsupported archive format {} version {}",
+                archive.format, archive.version
             ))
             .into());
         }
-        if let PageKind::Journal { date } = &identity.kind
-            && !journal_dates.insert(date)
-        {
-            return Err(crate::CoreError::invalid(format!(
-                "archive contains duplicate journal date {date}"
-            ))
-            .into());
+        if archive.workspace_uuid.is_nil() {
+            return Err(crate::CoreError::invalid("archive workspace UUID cannot be nil").into());
         }
-    }
-    for page in &archive.pages {
-        if identities
-            .get(&page.uuid)
-            .is_none_or(|kind| *kind != &page.kind)
-        {
-            return Err(crate::CoreError::invalid(format!(
-                "archive page {} is missing its matching immutable identity",
-                page.uuid
-            ))
-            .into());
+        let mut identities = HashMap::new();
+        let mut journal_dates = HashSet::new();
+        for identity in &archive.page_identities {
+            operation::validate_page_identity(
+                archive.workspace_uuid,
+                identity.uuid,
+                &identity.kind,
+            )?;
+            if identities.insert(identity.uuid, &identity.kind).is_some() {
+                return Err(crate::CoreError::invalid(format!(
+                    "archive contains duplicate page identity UUID {}",
+                    identity.uuid
+                ))
+                .into());
+            }
+            if let PageKind::Journal { date } = &identity.kind
+                && !journal_dates.insert(date)
+            {
+                return Err(crate::CoreError::invalid(format!(
+                    "archive contains duplicate journal date {date}"
+                ))
+                .into());
+            }
         }
-    }
-    for alias in &archive.page_aliases {
-        if !identities.contains_key(&alias.page_uuid) {
-            return Err(crate::CoreError::invalid(format!(
-                "archive alias {} references unknown page identity {}",
-                alias.alias, alias.page_uuid
-            ))
-            .into());
+        for page in &archive.pages {
+            if identities
+                .get(&page.uuid)
+                .is_none_or(|kind| *kind != &page.kind)
+            {
+                return Err(crate::CoreError::invalid(format!(
+                    "archive page {} is missing its matching immutable identity",
+                    page.uuid
+                ))
+                .into());
+            }
         }
-    }
-    for block in &archive.blocks {
-        if identities.contains_key(&block.uuid) {
-            return Err(crate::CoreError::invalid(format!(
-                "archive UUID {} is reserved by both a page identity and a block",
-                block.uuid
-            ))
-            .into());
+        for alias in &archive.page_aliases {
+            if !identities.contains_key(&alias.page_uuid) {
+                return Err(crate::CoreError::invalid(format!(
+                    "archive alias {} references unknown page identity {}",
+                    alias.alias, alias.page_uuid
+                ))
+                .into());
+            }
         }
-    }
-    let mut receipt_formats = HashSet::new();
-    for receipt in &archive.external_import_receipts {
-        if receipt.receipt_uuid.is_nil()
-            || receipt.identity.import_namespace_uuid.is_nil()
-            || receipt.identity.workspace_uuid != archive.workspace_uuid
-            || receipt.planner_version == 0
-            || !receipt.provenance.is_object()
-            || !receipt_formats.insert(receipt.format)
-        {
-            return Err(crate::CoreError::invalid(
-                "archive contains an invalid or duplicate external import receipt",
-            )
-            .into());
+        for block in &archive.blocks {
+            if identities.contains_key(&block.uuid) {
+                return Err(crate::CoreError::invalid(format!(
+                    "archive UUID {} is reserved by both a page identity and a block",
+                    block.uuid
+                ))
+                .into());
+            }
         }
+        let mut receipt_formats = HashSet::new();
+        for receipt in &archive.external_import_receipts {
+            if receipt.receipt_uuid.is_nil()
+                || receipt.identity.import_namespace_uuid.is_nil()
+                || receipt.identity.workspace_uuid != archive.workspace_uuid
+                || receipt.planner_version == 0
+                || !receipt.provenance.is_object()
+                || !receipt_formats.insert(receipt.format)
+            {
+                return Err(crate::CoreError::invalid(
+                    "archive contains an invalid or duplicate external import receipt",
+                )
+                .into());
+            }
+        }
+        let (ink_manifest, ink_graphs) = crate::ink::archive::prepare(&archive)?;
+        Ok(Self {
+            archive,
+            ink_manifest,
+            ink_graphs,
+            precommit,
+        })
     }
-    let (archive, ink_manifest, ink_graphs) = tokio::task::spawn_blocking(move || {
-        let (manifest, graphs) = crate::ink::archive::prepare(&archive)?;
-        Ok::<_, crate::CoreError>((archive, manifest, graphs))
-    })
-    .await??;
-    conn.call_domain(move |database| -> Result<ArchiveImportStats> {
-        let transaction = database.transaction()?;
-        let current_workspace_uuid = transaction_workspace_uuid(&transaction)?;
+
+    pub(crate) fn apply_in_transaction(
+        self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<crate::store::bulk::BulkMutation<ArchiveImportStats>> {
+        let Self {
+            archive,
+            ink_manifest,
+            ink_graphs,
+            precommit,
+        } = self;
+        let current_workspace_uuid = transaction_workspace_uuid(transaction)?;
         if current_workspace_uuid != archive.workspace_uuid {
             let has_state: bool = transaction.query_row(
                 "SELECT EXISTS(
@@ -281,12 +341,7 @@ where
                 [],
                 |row| row.get(0),
             )?;
-            let sync_configured: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sync_meta WHERE key = 'server_url')",
-                [],
-                |row| row.get(0),
-            )?;
-            if has_state || sync_configured {
+            if has_state || operation::publishes_authored_ops(transaction)? {
                 return Err(crate::CoreError::conflict(
                     "cannot restore an archive from a different workspace into a non-empty or synchronized replica",
                 )
@@ -328,15 +383,13 @@ where
                 OpKind::AttachmentRemove(AttachmentRemove { owner, blob_hash })
             })
             .collect::<Vec<_>>();
-        restore_kinds.extend(
-            current_aliases.into_iter().map(|(uuid, alias)| {
-                OpKind::PageAliasSet(PageAliasSet {
-                    uuid,
-                    alias,
-                    present: false,
-                })
-            }),
-        );
+        restore_kinds.extend(current_aliases.into_iter().map(|(uuid, alias)| {
+            OpKind::PageAliasSet(PageAliasSet {
+                uuid,
+                alias,
+                present: false,
+            })
+        }));
         restore_kinds.extend(
             current_blocks
                 .into_iter()
@@ -355,7 +408,7 @@ where
             )?;
         }
         for identity in &archive.page_identities {
-            operation::ensure_page_identity(&transaction, identity.uuid, &identity.kind)?;
+            operation::ensure_page_identity(transaction, identity.uuid, &identity.kind)?;
         }
 
         restore_kinds.extend(archive.pages.into_iter().map(|page| {
@@ -397,18 +450,14 @@ where
         // Read before the page deletes below purge them: the restored version
         // must descend from what this replica already published.
         let prior_ink_heads =
-            crate::ink::archive::heads_before_restore(&transaction, &ink_manifest)?;
+            crate::ink::archive::heads_before_restore(transaction, &ink_manifest)?;
         let applied = operation::apply_local_kinds_deferred_in_transaction(
-            &transaction,
+            transaction,
             restore_kinds,
             operation::StructureProjectionMode::Full,
         )?;
-        let ink_operations = crate::ink::archive::restore(
-            &transaction,
-            ink_manifest,
-            ink_graphs,
-            &prior_ink_heads,
-        )?;
+        let ink_operations =
+            crate::ink::archive::restore(transaction, ink_manifest, ink_graphs, &prior_ink_heads)?;
         let stats = ArchiveImportStats {
             applied_operations: applied.operations.len() + ink_operations,
             structure_reconciliations: applied.stats.structure_reconciliations,
@@ -440,12 +489,13 @@ where
         }
         transaction.execute("DELETE FROM history_undo", [])?;
         transaction.execute("DELETE FROM history_redo", [])?;
-        crate::ink::history_retention::cleanup(&transaction)?;
+        crate::ink::history_retention::cleanup(transaction)?;
         precommit()?;
-        transaction.commit()?;
-        Ok(stats)
-    })
-    .await
+        Ok(crate::store::bulk::BulkMutation {
+            value: stats,
+            wrote: true,
+        })
+    }
 }
 
 fn invalid_archive_column(

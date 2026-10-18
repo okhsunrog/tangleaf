@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 mod archive;
+pub(crate) use archive::PreparedArchiveRestore;
 mod attachments;
 mod blocks;
 mod document;

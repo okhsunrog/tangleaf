@@ -39,6 +39,21 @@ impl BulkCommand for PreparedSyncSnapshot {
     }
 }
 
+impl<F> sealed::Sealed for crate::db::PreparedArchiveRestore<F> where
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static
+{
+}
+
+impl<F> BulkCommand for crate::db::PreparedArchiveRestore<F>
+where
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    type Value = crate::db::ArchiveImportStats;
+    fn execute(self, sql: &rusqlite::Transaction<'_>) -> anyhow::Result<BulkMutation<Self::Value>> {
+        self.apply_in_transaction(sql)
+    }
+}
+
 impl NotesStore {
     pub(crate) async fn execute_bulk<P: BulkCommand>(
         &self,

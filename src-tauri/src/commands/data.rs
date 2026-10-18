@@ -189,17 +189,18 @@ pub async fn import_data(
     let published_blobs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let callback_published_blobs = published_blobs.clone();
     let callback_destination = destination_blob_store.clone();
-    let import_result = db::import_archive_with_precommit(&state.conn, archive, move || {
-        publish_staged_blobs(
-            &staged_blob_store,
-            &callback_destination,
-            &expected_blobs,
-            &callback_published_blobs,
-        )?;
-        drop(staging_directory);
-        Ok(())
-    })
-    .await;
+    let import_result = observed_store(&app, &state)
+        .import_archive_with_precommit(archive, move || {
+            publish_staged_blobs(
+                &staged_blob_store,
+                &callback_destination,
+                &expected_blobs,
+                &callback_published_blobs,
+            )?;
+            drop(staging_directory);
+            Ok(())
+        })
+        .await;
     if let Err(import_error) = import_result {
         let candidates = published_blobs
             .lock()
@@ -221,8 +222,6 @@ pub async fn import_data(
         };
         return Err(err(import_error));
     }
-    emit_domain(&app, DomainEvent::WorkspaceChanged);
-    emit_domain(&app, DomainEvent::HistoryChanged);
     Ok(Some(source))
 }
 

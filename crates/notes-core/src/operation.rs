@@ -3450,7 +3450,7 @@ fn sync_is_configured(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Resu
 /// proxy for the question there. The server has no upstream — it owns the log
 /// its own writes must reach — so the URL is absent and the proxy answers the
 /// wrong way. Asking for the role keeps the two apart.
-fn publishes_authored_ops(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
+pub(crate) fn publishes_authored_ops(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
     if replica_role_in_transaction(transaction)? == ReplicaRole::Server {
         return Ok(true);
     }
