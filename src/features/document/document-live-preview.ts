@@ -1,5 +1,5 @@
 import { syntaxTree } from "@codemirror/language";
-import type { EditorState, Extension, Range } from "@codemirror/state";
+import { EditorState, type Extension, type Range } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -414,6 +414,18 @@ const documentLivePreviewTheme = EditorView.baseTheme({
 export function documentAuthoringExtensions(mode: DocumentAuthoringMode): Extension {
   return [
     EditorView.contentAttributes.of({ "data-document-authoring-mode": mode }),
-    mode === "live_preview" ? [documentLivePreviewPlugin, documentLivePreviewTheme] : [],
+    mode === "live_preview"
+      ? [documentLivePreviewPlugin, documentLivePreviewTheme]
+      : [
+          EditorState.tabSize.of(4),
+          EditorView.theme({
+            '.cm-content[data-document-authoring-mode="source"]': {
+              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              fontSize: "0.875rem",
+              lineHeight: "1.7",
+              fontVariantLigatures: "none",
+            },
+          }),
+        ],
   ];
 }

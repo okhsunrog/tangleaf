@@ -245,75 +245,78 @@ function LoadedDocumentPage({
     };
   }, [autosave, flush]);
 
-  if (!editing) {
-    return (
-      <DocumentReadingSurface
-        pageUuid={pageUuid}
-        markdown={buffer}
-        blockAnchors={blockAnchors}
-        navigation={navigation}
-        onOpenMarkdownLink={onOpenMarkdownLink}
-      />
-    );
-  }
-
   return (
-    <section className="document-authoring" aria-label="Document editor">
-      <div className="mb-3 flex min-h-5 items-center justify-end">
-        <DocumentSaveIndicator state={saveState} />
-      </div>
-      {overlay?.conflict && canEdit && (
-        <div
-          role="alert"
-          className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
-        >
-          <span className="mr-auto text-foreground">
-            This document changed on another replica. Choose which version to keep.
-          </span>
-          <button
-            type="button"
-            onClick={() => sessions.useRemoteDocument(pageUuid)}
-            className="rounded-md border bg-background px-2 py-1 hover:bg-accent"
-          >
-            Use remote
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              sessions.keepLocalDocument(pageUuid);
-              scheduleSave();
-            }}
-            className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:bg-primary/90"
-          >
-            Keep mine
-          </button>
-        </div>
-      )}
-      <div className="relative rounded-2xl border border-border/55 surface-card-soft px-5 py-4 shadow-sm">
-        {buffer.length === 0 && (
-          <p className="pointer-events-none absolute top-5 left-5 text-sm text-muted-foreground/45">
-            Start writing your document…
-          </p>
-        )}
-        <ContinuousDocumentEditor
-          value={buffer}
-          readOnly={!canEdit}
-          focusRequest={focusRequest}
-          navigation={navigation}
-          findRange={findRange}
-          mode={authoringMode}
+    <>
+      {!editing && (
+        <DocumentReadingSurface
           pageUuid={pageUuid}
-          onChange={updateDraft}
-          onCompositionEnd={(value) => {
-            updateDraft(value, false);
-          }}
-          onBlur={() => {
-            if (canEdit) void flush();
-          }}
+          markdown={buffer}
+          blockAnchors={blockAnchors}
+          navigation={navigation}
           onOpenMarkdownLink={onOpenMarkdownLink}
         />
-      </div>
-    </section>
+      )}
+      <section
+        hidden={!editing}
+        className="document-authoring relative"
+        aria-label="Document editor"
+      >
+        <div className="absolute -top-5 right-0 flex min-h-5 items-center justify-end">
+          <DocumentSaveIndicator state={saveState} />
+        </div>
+        {overlay?.conflict && canEdit && (
+          <div
+            role="alert"
+            className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+          >
+            <span className="mr-auto text-foreground">
+              This document changed on another replica. Choose which version to keep.
+            </span>
+            <button
+              type="button"
+              onClick={() => sessions.useRemoteDocument(pageUuid)}
+              className="rounded-md border bg-background px-2 py-1 hover:bg-accent"
+            >
+              Use remote
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sessions.keepLocalDocument(pageUuid);
+                scheduleSave();
+              }}
+              className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:bg-primary/90"
+            >
+              Keep mine
+            </button>
+          </div>
+        )}
+        <div className="relative">
+          {buffer.length === 0 && (
+            <p className="pointer-events-none absolute top-1 left-0 text-base text-muted-foreground/45">
+              Start writing your document…
+            </p>
+          )}
+          <ContinuousDocumentEditor
+            value={buffer}
+            readOnly={!canEdit || !editing}
+            focusRequest={focusRequest}
+            navigation={navigation}
+            findRange={findRange}
+            mode={authoringMode}
+            pageUuid={pageUuid}
+            onChange={updateDraft}
+            onCompositionEnd={(value) => {
+              updateDraft(value, false);
+            }}
+            onBlur={() => {
+              if (canEdit) void flush();
+            }}
+            onOpenMarkdownLink={onOpenMarkdownLink}
+          />
+        </div>
+      </section>
+    </>
   );
 }
 

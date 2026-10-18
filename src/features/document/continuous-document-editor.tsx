@@ -70,7 +70,7 @@ const documentEditorTheme = EditorView.theme({
     minHeight: "24rem",
     color: "var(--foreground)",
     backgroundColor: "transparent",
-    fontSize: "0.95rem",
+    fontSize: "1rem",
   },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": {

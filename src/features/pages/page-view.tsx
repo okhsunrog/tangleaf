@@ -422,9 +422,6 @@ export function PageView({
       )}
 
       <div className="mt-3 mb-5 flex items-center gap-2">
-        <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] eink:text-xs font-semibold tracking-wide text-primary">
-          {page.layout.toUpperCase()}
-        </span>
         {journalDate && (
           <div className="flex items-center rounded-lg border border-border/60 surface-card p-0.5">
             <Button
