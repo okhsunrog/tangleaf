@@ -14,7 +14,7 @@ import { useDocumentAuthoringPreference } from "@/features/document/document-aut
 import { Outliner } from "@/features/outliner/outliner";
 import type { MarkdownOpenHandler } from "@/features/markdown";
 import { AttachmentsCard } from "@/features/attachments/attachments-card";
-import { pageDisplayTitle, shiftJournalDate } from "@/features/journal/journal-date";
+import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { notifyError } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 import {
@@ -22,7 +22,6 @@ import {
   getPage,
   renamePage,
   setPageLayout,
-  type JournalDate,
   type Page,
   type PageLayout,
 } from "@/lib/api";
@@ -34,11 +33,7 @@ import {
   usePageWriterPaneId,
   useTitleDraftOverlay,
 } from "./page-session";
-import {
-  dispositionFromShiftKey,
-  type OpenDisposition,
-  type PaneId,
-} from "@/features/workspace/workspace-model";
+import type { PaneId } from "@/features/workspace/workspace-model";
 import { usePageNavigationStore } from "./page-navigation-store";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 
@@ -49,8 +44,6 @@ type Props = {
   onOpenAllNotes: () => void;
   onDelete: (page: Page) => void | Promise<void>;
   onOpenMarkdownLink: MarkdownOpenHandler;
-  onOpenJournalDate: (date: JournalDate, disposition?: OpenDisposition) => void | Promise<void>;
-  journalBusy: boolean;
   initialBlockUuid?: string | null;
   navigationRequest?: number;
   autoFocusTitle?: boolean;
@@ -69,8 +62,6 @@ export function PageView({
   onOpenAllNotes,
   onDelete,
   onOpenMarkdownLink,
-  onOpenJournalDate,
-  journalBusy,
   initialBlockUuid = null,
   navigationRequest = 0,
   autoFocusTitle = false,
@@ -409,40 +400,6 @@ export function PageView({
       )}
 
       <div className="mt-3 mb-5 flex flex-wrap items-center gap-2">
-        {journalDate && (
-          <div className="flex items-center rounded-lg border border-border/60 surface-card p-0.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              disabled={journalBusy}
-              onClick={(event) =>
-                void onOpenJournalDate(
-                  shiftJournalDate(journalDate, -1),
-                  dispositionFromShiftKey(event.shiftKey),
-                )
-              }
-              className="rounded-md px-2 text-[10px] eink:text-xs"
-            >
-              Previous day
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              disabled={journalBusy}
-              onClick={(event) =>
-                void onOpenJournalDate(
-                  shiftJournalDate(journalDate, 1),
-                  dispositionFromShiftKey(event.shiftKey),
-                )
-              }
-              className="rounded-md px-2 text-[10px] eink:text-xs"
-            >
-              Next day
-            </Button>
-          </div>
-        )}
         <div
           role="group"
           aria-label="Page layout"

@@ -46,7 +46,7 @@ export function pageDisplayTitle(page: Page): string {
     : (page.title ?? "Untitled");
 }
 
-function journalDateToLocalDate(value: JournalDate): Date {
+export function journalDateToLocalDate(value: JournalDate): Date {
   const parsed = parseJournalDate(value);
   if (!parsed) throw new Error(`invalid JournalDate from typed API: ${value}`);
   const match = JOURNAL_DATE_PATTERN.exec(parsed);

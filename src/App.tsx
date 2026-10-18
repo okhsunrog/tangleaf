@@ -359,7 +359,6 @@ function App() {
         workbench={
           <Workbench
             creatingNote={workspace.creatingNote}
-            journalBusy={workspace.journalBusy}
             newNote={workspace.newNote}
             sheetPaneId={sheetMode ? activePane.id : null}
           />

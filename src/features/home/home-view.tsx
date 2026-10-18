@@ -4,6 +4,7 @@ import { FilePlus2, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { JournalEntry } from "@/features/journal/journal-entry";
+import { JournalCalendar } from "@/features/journal/journal-calendar";
 import { formatJournalDate, todayJournalDate } from "@/features/journal/journal-date";
 import { DocumentReadingSurface, pageDocumentToPersisted } from "@/features/document/document-page";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
@@ -63,11 +64,20 @@ export function HomeView({ paneId }: { paneId: PaneId }) {
         </nav>
       )}
       <section aria-label="Today's journal" className="journal-today">
-        <header className="mb-8 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Today</h1>
-          <time dateTime={today} className="text-sm text-muted-foreground">
-            {formatJournalDate(today, { weekday: "long", day: "numeric", month: "long" })}
-          </time>
+        <header className="mb-8 flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight">Today</h1>
+            <time dateTime={today} className="text-sm text-muted-foreground">
+              {formatJournalDate(today, { weekday: "long", day: "numeric", month: "long" })}
+            </time>
+          </div>
+          {compact && (
+            <JournalCalendar
+              activeDate={today}
+              onOpenDate={(date, disposition) => controller.openJournal(date, disposition)}
+              className="size-11"
+            />
+          )}
         </header>
         <JournalEntry key={today} date={today} paneId={paneId} autoFocus />
       </section>

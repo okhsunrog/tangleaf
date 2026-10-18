@@ -1,7 +1,8 @@
-import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
+import { CalendarDays } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { JournalDate } from "@/lib/api";
-import { formatJournalDate, shiftJournalDate, todayJournalDate } from "./journal-date";
+import { formatJournalDate, todayJournalDate } from "./journal-date";
+import { JournalCalendar } from "./journal-calendar";
 import {
   dispositionFromShiftKey,
   type OpenDisposition,
@@ -15,7 +16,6 @@ type Props = {
 
 export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
   const today = todayJournalDate();
-  const navigationDate = activeDate ?? today;
 
   return (
     <section aria-labelledby="journal-navigation-title" aria-busy={busy} className="space-y-2">
@@ -26,38 +26,6 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
         >
           Journal
         </span>
-        <div className="flex items-center gap-0.5">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            disabled={busy}
-            aria-label="Open previous journal day"
-            onClick={(event) =>
-              void onOpenDate(
-                shiftJournalDate(navigationDate, -1),
-                dispositionFromShiftKey(event.shiftKey),
-              )
-            }
-          >
-            <ChevronLeft className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            disabled={busy}
-            aria-label="Open next journal day"
-            onClick={(event) =>
-              void onOpenDate(
-                shiftJournalDate(navigationDate, 1),
-                dispositionFromShiftKey(event.shiftKey),
-              )
-            }
-          >
-            <ChevronRight className="size-3.5" />
-          </Button>
-        </div>
       </div>
 
       <div className="grid grid-cols-[1fr_auto] gap-1.5">
@@ -76,25 +44,7 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
             {formatJournalDate(today, { month: "short", day: "numeric" })}
           </span>
         </Button>
-        <label
-          aria-disabled={busy}
-          className="relative flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground has-disabled:pointer-events-none has-disabled:cursor-not-allowed has-disabled:opacity-50"
-        >
-          <CalendarDays className="size-4" />
-          <span className="sr-only">Choose journal date</span>
-          <input
-            type="date"
-            value={navigationDate}
-            disabled={busy}
-            aria-label="Choose journal date"
-            onChange={(event) => {
-              if (event.currentTarget.value) {
-                void onOpenDate(event.currentTarget.value);
-              }
-            }}
-            className="absolute inset-0 cursor-pointer opacity-0"
-          />
-        </label>
+        <JournalCalendar activeDate={activeDate} busy={busy} onOpenDate={onOpenDate} />
       </div>
     </section>
   );

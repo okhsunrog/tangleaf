@@ -34,7 +34,6 @@ import { BusyIndicator } from "@/components/ui/busy-indicator";
 
 type WorkbenchProps = {
   creatingNote: boolean;
-  journalBusy: boolean;
   newNote: {
     pageUuid: string;
     blockUuid: string | null;
@@ -320,7 +319,6 @@ function PaneSurface({
   content,
   ...props
 }: WorkbenchProps & { paneId: PaneId; content: PaneContent }) {
-  const controller = useWorkspaceController();
   switch (content.kind) {
     case PaneContentKind.Home:
       return <HomeView paneId={paneId} />;
@@ -331,16 +329,7 @@ function PaneSurface({
     case PaneContentKind.Graph:
       return <GraphPane content={content} paneId={paneId} />;
     case PaneContentKind.JournalDay:
-      return (
-        <EmptyJournalView
-          paneId={paneId}
-          date={content.date}
-          busy={props.journalBusy}
-          onOpenDate={(date, disposition) =>
-            controller.openJournal(date, disposition ?? currentDisposition)
-          }
-        />
-      );
+      return <EmptyJournalView paneId={paneId} date={content.date} />;
   }
 }
 
@@ -417,10 +406,6 @@ function PagePane({
       onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
       onDelete={controller.onDelete}
       onOpenMarkdownLink={controller.openMarkdownLink}
-      onOpenJournalDate={(date, disposition) =>
-        controller.openJournal(date, disposition ?? currentDisposition)
-      }
-      journalBusy={props.journalBusy}
     />
   );
 }
