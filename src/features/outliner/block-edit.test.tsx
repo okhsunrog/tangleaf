@@ -8,6 +8,8 @@ import { afterEach, beforeAll, expect, it, vi } from "vite-plus/test";
 import { BlockEdit } from "./block-edit";
 
 beforeAll(() => {
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;

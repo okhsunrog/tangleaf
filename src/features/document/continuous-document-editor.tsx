@@ -18,6 +18,8 @@ import { resolveDocumentHistoryKey } from "./document-editor-model";
 import type { DocumentHistoryAction } from "./document-editor-model";
 import { resolveDocumentLinkClickDisposition } from "./document-link-navigation";
 import { notesLinkMarkdownExtension } from "./notes-link-markdown-extension";
+import { markdownFormatting } from "@/features/editor/markdown-formatting";
+import { documentLinkCompletion } from "./document-completion";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
 
@@ -192,6 +194,8 @@ export function ContinuousDocumentEditor({
         }),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         history(),
+        markdownFormatting(),
+        documentLinkCompletion,
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({
           "aria-label": "Document Markdown",

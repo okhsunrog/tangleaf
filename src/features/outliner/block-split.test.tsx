@@ -37,6 +37,8 @@ function view() {
   return EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
 }
 beforeEach(async () => {
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
   container = document.createElement("div");

@@ -4,6 +4,7 @@ import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language"
 import { EditorState, Prec, StateEffect, type Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { markdownFormatting } from "@/features/editor/markdown-formatting";
 import {
   replaceEditorRange,
   type BlockEditKeyEvent,
@@ -127,6 +128,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       markdown(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       history(),
+      markdownFormatting(),
       EditorView.lineWrapping,
       EditorView.contentAttributes.of({
         "aria-label": "Block content",
