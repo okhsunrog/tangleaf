@@ -45,6 +45,8 @@ import type {
   PageLayout,
   PageRenderSnapshot,
   PageListFilter,
+  RecoveryRestorePreview,
+  RecoveryRestoreResult,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -106,6 +108,8 @@ export type {
   PageLayout,
   PageRenderSnapshot,
   PageListFilter,
+  RecoveryRestorePreview,
+  RecoveryRestoreResult,
   SearchHit,
   SecretKey,
   SearchMode,
@@ -291,6 +295,11 @@ export const getLogseqImportDiagnostics = checkedCommand(commands.logseqImportDi
 export const commitLogseqImport = checkedCommand(commands.commitLogseqImport);
 export const discardLogseqImport = commands.discardLogseqImport;
 export const createBackup = checkedCommand(commands.createBackup);
+export const listRecoveryBackups = checkedCommand(commands.listRecoveryBackups);
+export const prepareRecoveryRestore = checkedCommand(commands.prepareRecoveryRestore);
+export const chooseRecoveryRestore = checkedCommand(commands.chooseRecoveryRestore);
+export const discardRecoveryRestore = checkedCommand(commands.discardRecoveryRestore);
+export const commitRecoveryRestore = checkedCommand(commands.commitRecoveryRestore);
 export const attachFile = checkedCommand(commands.attachFile);
 export const listAttachments = checkedCommand(commands.listAttachments);
 export const resolveAttachmentImages = checkedCommand(commands.resolveAttachmentImages);

@@ -34,6 +34,7 @@ export const queryKeys = {
   // This is not a persisted store or database revision.
   searchRevision: [...root, "search-revision"] as const,
   settings: [...root, "settings"] as const,
+  recoveryBackups: [...root, "recovery-backups"] as const,
   inputCapabilities: [...root, "input-capabilities"] as const,
   einkWise: [...root, "einkwise"] as const,
   handwritingStatusRoot: [...root, "handwriting-status"] as const,

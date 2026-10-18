@@ -42,6 +42,7 @@ import { EinkWiseField } from "./einkwise-field";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 import { flushWorkspaceDrafts } from "@/app/lifecycle-flush";
 import { usePageSessionRegistry } from "@/features/pages/page-session";
+import { RecoveryRestoreSection } from "./recovery-restore-section";
 
 type Props = {
   onBack: () => void;
@@ -163,6 +164,8 @@ export function SettingsPage({
           `${action === "backup" ? "Backup created" : action === "export" ? "Exported" : "Imported"}: ${path}`,
         );
         if (action === "import") onDataChanged();
+        if (action === "backup")
+          void queryClient.invalidateQueries({ queryKey: queryKeys.recoveryBackups });
       }
     } catch (reason) {
       setError(String(reason));
@@ -661,6 +664,11 @@ export function SettingsPage({
             onDataChanged={onDataChanged}
             onError={setError}
             onMessage={setMessage}
+          />
+          <RecoveryRestoreSection
+            disabled={busy}
+            dataAvailable={dataAvailable}
+            onBusyChange={setBusy}
           />
         </div>
         {error && (
