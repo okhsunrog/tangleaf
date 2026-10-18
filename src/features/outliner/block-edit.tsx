@@ -1,7 +1,7 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, Prec, StateEffect } from "@codemirror/state";
+import { EditorState, Prec, StateEffect, type Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import {
@@ -11,6 +11,8 @@ import {
 } from "./block-edit-model";
 
 export type BlockEditHandle = {
+  beginBuffer: (value: string) => void;
+  getState: () => EditorState | undefined;
   /** Replace text and selection in one CodeMirror transaction. */
   replaceRange: (start: number, end: number, replacement: string, caret?: number) => void;
   focus: () => void;
@@ -83,6 +85,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
 ) {
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const extensionsRef = useRef<Extension[]>([]);
   const initialRef = useRef(initial);
   const autoFocusRef = useRef(autoFocus);
   const callbacksRef = useRef({ onChange, onBlur, onKeyDown, onPaste });
@@ -91,6 +94,15 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
   useImperativeHandle(
     ref,
     () => ({
+      beginBuffer(value) {
+        viewRef.current?.setState(
+          EditorState.create({ doc: value, extensions: extensionsRef.current }),
+        );
+        viewRef.current?.focus();
+      },
+      getState() {
+        return viewRef.current?.state;
+      },
       replaceRange(start, end, replacement, caret) {
         const view = viewRef.current;
         if (!view) return;
@@ -174,6 +186,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
     ];
     // Reconfigure retained state with this mount's callbacks. Reusing the old
     // extensions would retain handlers belonging to a destroyed React component.
+    extensionsRef.current = extensions;
     const retained = blockUuid ? stateCache?.get(blockUuid) : undefined;
     const state =
       retained?.doc.toString() === initialRef.current

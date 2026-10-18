@@ -108,6 +108,8 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   const overlay = useBlockDraftOverlay(block.pageUuid, block.uuid);
   const effectiveMarkdown = overlay?.draft ?? block.markdown;
   const editing = !store.readOnly && store.editingUuid === block.uuid;
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const outline = store.layout === "outline";
   const readOnly = store.readOnly;
   const containerUuid = block.parentUuid ?? block.pageUuid;
@@ -122,6 +124,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   const saveInFlight = useRef<Promise<boolean> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
   const initialPointer = useRef<{ x: number; y: number } | null>(null);
+  const pendingSplit = useRef<{ before: string; after: string } | null>(null);
+  const splitPromise = useRef<Promise<void> | null>(null);
+  const [splitPreview, setSplitPreview] = useState<string | null>(null);
   const [draftLen, setDraftLen] = useState(effectiveMarkdown.length);
   const longBlock = (editing ? draftLen : effectiveMarkdown.length) >= LONG_BLOCK_CHARS;
 
@@ -298,7 +303,10 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   // The window can be destroyed without unmounting anything, and debounced
   // autosave never fires then. A process-level drain reaches this draft here.
   const flushRef = useRef(flush);
-  flushRef.current = flush;
+  flushRef.current = async () => {
+    if (splitPromise.current) await splitPromise.current;
+    return flush();
+  };
   useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
 
   const changeBlockStyle = async (value: string) => {
@@ -380,6 +388,10 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   }, [trigger]);
 
   const onDraftChange = (value: string, caret: number) => {
+    if (pendingSplit.current) {
+      pendingSplit.current.after = value;
+      return;
+    }
     const changed = draftRef.current !== value;
     draftRef.current = value;
     if (changed) {
@@ -446,6 +458,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   };
 
   const onPaste = (event: BlockEditPasteEvent) => {
+    if (pendingSplit.current) return false;
     if (event.isComposing || !event.text) return false;
     const paragraphs = event.text
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
@@ -530,21 +543,80 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
       return;
     }
     clearTimer();
+    closeAutocomplete();
+    const [before, after] = splitEditorContent(draftRef.current, selectionStart, selectionEnd);
+    const pending = { before, after };
+    pendingSplit.current = pending;
+    setSplitPreview(before);
+    // Give subsequent input its own buffer immediately, before any database await.
+    // The original draft remains owned by flush() until its revision is acknowledged.
+    editRef.current?.beginBuffer(after);
+    let created: Block | undefined;
     try {
-      await runStructuralEditAfterFlush(flush, async () => {
-        const parts = splitEditorContent(draftRef.current, selectionStart, selectionEnd).map(
-          blockContent,
-        );
-        const changed = await splitBlock(block.uuid, parts, splitExpectedRevision());
-        sessions.discardBlock(block.pageUuid, block.uuid);
-        await invalidateChildren(containerUuid);
-        store.setEditing(
-          changed.find((candidate) => candidate.uuid !== block.uuid)?.uuid ?? block.uuid,
-        );
-      });
+      if (!(await flush())) throw new Error("The original block could not be saved");
+      const changed = await splitBlock(
+        block.uuid,
+        [before, pending.after].map(blockContent),
+        splitExpectedRevision(),
+      );
+      let next = changed.find((candidate) => candidate.uuid !== block.uuid);
+      if (!next) throw new Error("Split returned no new block");
+      created = next;
+      // Include text typed while the split command itself was in flight. Keep
+      // draining until the acknowledged block contains the current input buffer.
+      while (next.markdown !== pending.after) {
+        const text = pending.after;
+        next = await setBlockContent(next.uuid, blockContent(text), next.markdownRevision);
+        created = next;
+      }
+      const finalNext = next;
+      const finalBlocks = changed.map((candidate) =>
+        candidate.uuid === finalNext.uuid ? finalNext : candidate,
+      );
+      queryClient.setQueryData<PageRenderSnapshot>(
+        queryKeys.pageRender(block.pageUuid),
+        (snapshot) =>
+          snapshot
+            ? {
+                ...snapshot,
+                document: {
+                  ...snapshot.document,
+                  blocks: snapshot.document.blocks.flatMap((candidate) =>
+                    candidate.uuid === block.uuid ? finalBlocks : [candidate],
+                  ),
+                },
+              }
+            : snapshot,
+      );
+      sessions.discardBlock(block.pageUuid, block.uuid);
+      pendingSplit.current = null;
+      setSplitPreview(null);
+      store.editorStates.delete(block.uuid);
+      const editorState = editRef.current?.getState();
+      if (editorState) store.editorStates.set(finalNext.uuid, editorState);
+      if (editingRef.current) store.setEditing(finalNext.uuid);
+      void invalidateChildren(containerUuid);
     } catch (e) {
+      // Restore all input as one editable draft if persistence fails. Never leave
+      // the text typed during the wait stranded in an unowned temporary buffer.
+      pendingSplit.current = null;
+      setSplitPreview(null);
+      if (created) {
+        sessions.discardBlock(block.pageUuid, block.uuid);
+        sessions.editBlock(block.pageUuid, created.uuid, pending.after, {
+          text: created.markdown,
+          revision: created.markdownRevision,
+        });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.pageRender(block.pageUuid) });
+        if (editingRef.current) store.setEditing(created.uuid);
+      } else {
+        const restored = `${before}\n${pending.after}`;
+        onDraftChange(restored, restored.length);
+        editRef.current?.replaceRange(0, pending.after.length, restored);
+      }
       console.error("enter (split block) failed", e);
       setSaveState("error");
+      notifyError("split block", e);
     }
   };
 
@@ -612,6 +684,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   };
 
   const onKeyDown = (event: BlockEditKeyEvent) => {
+    // Text/IME input remains available during persistence. Structural operations
+    // must not race the pending split; Enter here remains a normal newline.
+    if (pendingSplit.current) return event.key === "Tab" || event.key === "Escape";
     const resolution = resolveBlockEditKey(event, {
       autocompleteOpen: trigger !== null,
       autocompleteHasItems: acItems.length > 0,
@@ -644,7 +719,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
         void onReorder("down");
         return true;
       case "split":
-        void onEnter(event.selectionStart, event.selectionEnd);
+        splitPromise.current = onEnter(event.selectionStart, event.selectionEnd).finally(() => {
+          splitPromise.current = null;
+        });
         return true;
       case "delete-empty":
         void onBackspaceEmpty();
@@ -734,6 +811,11 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
         >
           {editing ? (
             <>
+              {splitPreview !== null && (
+                <div className="mb-1 whitespace-pre-wrap text-sm leading-relaxed">
+                  {splitPreview}
+                </div>
+              )}
               <BlockEdit
                 ref={editRef}
                 stateCache={store.editorStates}
