@@ -651,17 +651,18 @@ pub(crate) fn bind_sync_workspace_in_transaction(
 }
 
 pub async fn sync_cursor(conn: &Connection) -> Result<u64> {
-    let value = conn
-        .call(|database| {
-            database
-                .query_row(
-                    "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-        })
-        .await?;
+    conn.call_domain(|database| read_sync_cursor(database))
+        .await
+}
+
+pub(crate) fn read_sync_cursor(database: &rusqlite::Connection) -> Result<u64> {
+    let value = database
+        .query_row(
+            "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     value.map_or(Ok(0), |value| {
         value
             .parse()
@@ -680,26 +681,31 @@ pub struct QuarantinedOp {
 }
 
 pub async fn pending_outbox(conn: &Connection, limit: u32) -> Result<Vec<Op>> {
-    conn.call(move |database| {
-        let mut statement = database.prepare(
-            "SELECT envelope FROM sync_outbox
-              WHERE quarantined_at IS NULL
-              ORDER BY rowid LIMIT ?1",
-        )?;
-        statement
-            .query_map([limit], |row| row.get::<_, String>(0))?
-            .map(|envelope| {
-                decode_persisted_envelope(&envelope?).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
+    conn.call(move |database| read_pending_outbox(database, limit))
+        .await
+}
+
+pub(crate) fn read_pending_outbox(
+    database: &rusqlite::Connection,
+    limit: u32,
+) -> rusqlite::Result<Vec<Op>> {
+    let mut statement = database.prepare(
+        "SELECT envelope FROM sync_outbox
+          WHERE quarantined_at IS NULL
+          ORDER BY rowid LIMIT ?1",
+    )?;
+    statement
+        .query_map([limit], |row| row.get::<_, String>(0))?
+        .map(|envelope| {
+            decode_persisted_envelope(&envelope?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
             })
-            .collect()
-    })
-    .await
+        })
+        .collect()
 }
 
 /// Holds one refused operation back so the rest of the queue keeps moving.
@@ -998,136 +1004,142 @@ pub(crate) fn acknowledge_server_ops_in_transaction(
 pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSnapshot> {
     conn.call_domain(move |database| -> CoreResult<SyncSnapshot> {
         let transaction = database.transaction()?;
-        let database = &transaction;
-        let workspace_uuid = database.query_row(
-            "SELECT uuid FROM workspace WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        let page_identities = database
-            .prepare(
-                "SELECT page_uuid, CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END, journal_date
-                   FROM page_identities ORDER BY page_uuid",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotPageIdentity {
-                    uuid: row.get(0)?,
-                    kind: page_kind_from_sql(row.get(1)?, row.get(2)?, 1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let pages = database
-            .prepare(
-                "SELECT uuid, title, layout, title_hlc, layout_hlc, existence_hlc,
-                        created_at, updated_at,
-                        (SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END FROM page_identities WHERE page_uuid = pages.uuid),
-                        (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
-                   FROM pages ORDER BY uuid",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotPage {
-                    uuid: row.get(0)?,
-                    kind: page_kind_from_sql(row.get(8)?, row.get(9)?, 8)?,
-                    title: row.get(1)?,
-                    layout: row.get(2)?,
-                    title_hlc: optional_sql_hlc(row.get(3)?, 3)?,
-                    layout_hlc: optional_sql_hlc(row.get(4)?, 4)?,
-                    existence_hlc: sql_hlc(row.get(5)?, 5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let page_aliases = database
-            .prepare(
-                "SELECT page_uuid, alias, hlc, present
-                   FROM page_alias_lww ORDER BY page_uuid, alias",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotPageAlias {
-                    page_uuid: row.get(0)?,
-                    alias: row.get(1)?,
-                    hlc: sql_hlc(row.get(2)?, 2)?,
-                    present: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let blocks = database
-            .prepare(
-                "SELECT uuid, page_uuid, parent_uuid, order_key, style, markdown,
-                        markdown_hlc, style_hlc, structure_hlc, existence_hlc,
-                        created_at, updated_at
-                   FROM blocks ORDER BY uuid",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotBlock {
-                    uuid: row.get(0)?,
-                    page_uuid: row.get(1)?,
-                    parent_uuid: row.get(2)?,
-                    order_key: row.get(3)?,
-                    style: row.get(4)?,
-                    markdown: row.get(5)?,
-                    markdown_hlc: optional_sql_hlc(row.get(6)?, 6)?,
-                    style_hlc: optional_sql_hlc(row.get(7)?, 7)?,
-                    structure_hlc: optional_sql_hlc(row.get(8)?, 8)?,
-                    existence_hlc: sql_hlc(row.get(9)?, 9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let tombstones = database
-            .prepare(
-                "SELECT uuid, object_kind, deleted_hlc, root_page_uuid
-                   FROM tombstones ORDER BY uuid",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotTombstone {
-                    uuid: row.get(0)?,
-                    object_kind: row.get(1)?,
-                    deleted_hlc: sql_hlc(row.get(2)?, 2)?,
-                    root_page_uuid: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let structures = database
-            .prepare(
-                "SELECT block_uuid, page_uuid, parent_uuid, order_key, hlc
-                   FROM block_structure_lww ORDER BY block_uuid",
-            )?
-            .query_map([], |row| {
-                Ok(SnapshotBlockStructure {
-                    block_uuid: row.get(0)?,
-                    page_uuid: row.get(1)?,
-                    parent_uuid: row.get(2)?,
-                    order_key: row.get(3)?,
-                    hlc: sql_hlc(row.get(4)?, 4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let attachments = database
-            .prepare(
-                "SELECT owner_kind, owner_uuid, blob_hash, attachment_uuid, hlc,
-                        present, filename, mime, size
-                   FROM attachment_lww ORDER BY owner_kind, owner_uuid, blob_hash",
-            )?
-            .query_map([], snapshot_attachment_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(SyncSnapshot {
-            ink_versions: crate::ink::versions::all(database)?,
-            format_version: FORMAT_VERSION,
-            workspace_uuid,
-            seq,
-            page_identities,
-            pages,
-            page_aliases,
-            blocks,
-            structures,
-            tombstones,
-            attachments,
-        })
+        export_sync_snapshot_in_transaction(&transaction, seq)
     })
     .await
+}
+
+pub(crate) fn export_sync_snapshot_in_transaction(
+    database: &rusqlite::Transaction<'_>,
+    seq: u64,
+) -> CoreResult<SyncSnapshot> {
+    let workspace_uuid = database.query_row(
+        "SELECT uuid FROM workspace WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let page_identities = database
+        .prepare(
+            "SELECT page_uuid, CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END, journal_date
+               FROM page_identities ORDER BY page_uuid",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotPageIdentity {
+                uuid: row.get(0)?,
+                kind: page_kind_from_sql(row.get(1)?, row.get(2)?, 1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let pages = database
+        .prepare(
+            "SELECT uuid, title, layout, title_hlc, layout_hlc, existence_hlc,
+                    created_at, updated_at,
+                    (SELECT CASE WHEN content_type = 'ink' THEN 'handwriting' ELSE page_kind END FROM page_identities WHERE page_uuid = pages.uuid),
+                    (SELECT journal_date FROM page_identities WHERE page_uuid = pages.uuid)
+               FROM pages ORDER BY uuid",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotPage {
+                uuid: row.get(0)?,
+                kind: page_kind_from_sql(row.get(8)?, row.get(9)?, 8)?,
+                title: row.get(1)?,
+                layout: row.get(2)?,
+                title_hlc: optional_sql_hlc(row.get(3)?, 3)?,
+                layout_hlc: optional_sql_hlc(row.get(4)?, 4)?,
+                existence_hlc: sql_hlc(row.get(5)?, 5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let page_aliases = database
+        .prepare(
+            "SELECT page_uuid, alias, hlc, present
+               FROM page_alias_lww ORDER BY page_uuid, alias",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotPageAlias {
+                page_uuid: row.get(0)?,
+                alias: row.get(1)?,
+                hlc: sql_hlc(row.get(2)?, 2)?,
+                present: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let blocks = database
+        .prepare(
+            "SELECT uuid, page_uuid, parent_uuid, order_key, style, markdown,
+                    markdown_hlc, style_hlc, structure_hlc, existence_hlc,
+                    created_at, updated_at
+               FROM blocks ORDER BY uuid",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotBlock {
+                uuid: row.get(0)?,
+                page_uuid: row.get(1)?,
+                parent_uuid: row.get(2)?,
+                order_key: row.get(3)?,
+                style: row.get(4)?,
+                markdown: row.get(5)?,
+                markdown_hlc: optional_sql_hlc(row.get(6)?, 6)?,
+                style_hlc: optional_sql_hlc(row.get(7)?, 7)?,
+                structure_hlc: optional_sql_hlc(row.get(8)?, 8)?,
+                existence_hlc: sql_hlc(row.get(9)?, 9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let tombstones = database
+        .prepare(
+            "SELECT uuid, object_kind, deleted_hlc, root_page_uuid
+               FROM tombstones ORDER BY uuid",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotTombstone {
+                uuid: row.get(0)?,
+                object_kind: row.get(1)?,
+                deleted_hlc: sql_hlc(row.get(2)?, 2)?,
+                root_page_uuid: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let structures = database
+        .prepare(
+            "SELECT block_uuid, page_uuid, parent_uuid, order_key, hlc
+               FROM block_structure_lww ORDER BY block_uuid",
+        )?
+        .query_map([], |row| {
+            Ok(SnapshotBlockStructure {
+                block_uuid: row.get(0)?,
+                page_uuid: row.get(1)?,
+                parent_uuid: row.get(2)?,
+                order_key: row.get(3)?,
+                hlc: sql_hlc(row.get(4)?, 4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let attachments = database
+        .prepare(
+            "SELECT owner_kind, owner_uuid, blob_hash, attachment_uuid, hlc,
+                    present, filename, mime, size
+               FROM attachment_lww ORDER BY owner_kind, owner_uuid, blob_hash",
+        )?
+        .query_map([], snapshot_attachment_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(SyncSnapshot {
+        ink_versions: crate::ink::versions::all(database)?,
+        format_version: FORMAT_VERSION,
+        workspace_uuid,
+        seq,
+        page_identities,
+        pages,
+        page_aliases,
+        blocks,
+        structures,
+        tombstones,
+        attachments,
+    })
 }
 
 pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> Result<()> {

@@ -1,9 +1,7 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use notes_core::store::{CommitNotice, NotesStore};
-use notes_core::{
-    Connection, Op, configure_sync, pending_outbox, quarantine_outbox_op, sync_cursor,
-};
+use notes_core::{Connection, Op, configure_sync, pending_outbox, sync_cursor};
 use notes_protocol::SequencedOp;
 use std::collections::HashMap;
 
@@ -152,16 +150,19 @@ pub struct AppliedRemoteOperation {
 
 #[derive(Clone)]
 pub struct SyncClient {
-    conn: Connection,
     store: NotesStore,
     batch_size: u32,
 }
 
 impl SyncClient {
     pub fn new(conn: Connection) -> Self {
+        Self::from_store(NotesStore::new(conn))
+    }
+
+    /// Keep the runtime's independent read worker and commit observer.
+    pub fn from_store(store: NotesStore) -> Self {
         Self {
-            store: NotesStore::new(conn.clone()),
-            conn,
+            store,
             batch_size: 256,
         }
     }
@@ -190,7 +191,7 @@ impl SyncClient {
         let mut stats = SyncStats::default();
         self.catch_up(transport, &mut stats).await?;
 
-        let outbox = pending_outbox(&self.conn, self.batch_size).await?;
+        let outbox = pending_outbox(self.store.read_connection(), self.batch_size).await?;
         stats.pushed = outbox.len();
         if !outbox.is_empty() {
             transport.prepare_push(&outbox).await?;
@@ -206,7 +207,7 @@ impl SyncClient {
         }
 
         self.catch_up(transport, &mut stats).await?;
-        stats.cursor = sync_cursor(&self.conn).await?;
+        stats.cursor = sync_cursor(self.store.read_connection()).await?;
         Ok(stats)
     }
 
@@ -265,13 +266,13 @@ impl SyncClient {
                 }
                 Err(error) => match crate::terminal_rejection(&error) {
                     Some(reason) => {
-                        quarantine_outbox_op(
-                            &self.conn,
-                            operation.op_id,
-                            quarantine_reason(&reason),
-                            now_ms(),
-                        )
-                        .await?;
+                        self.store
+                            .quarantine_outbox_op(
+                                operation.op_id,
+                                quarantine_reason(&reason),
+                                now_ms(),
+                            )
+                            .await?;
                         progressed = true;
                     }
                     // Transient: a dropped connection is not a rejection. The
@@ -290,7 +291,7 @@ impl SyncClient {
         stats: &mut SyncStats,
     ) -> Result<()> {
         loop {
-            let cursor = sync_cursor(&self.conn).await?;
+            let cursor = sync_cursor(self.store.read_connection()).await?;
             let batch = transport
                 .ops_since(cursor, self.batch_size as usize)
                 .await?;
@@ -737,5 +738,37 @@ mod tests {
             .await
             .expect("open snapshot database");
         (directory, connection)
+    }
+
+    #[tokio::test]
+    async fn an_owned_store_keeps_sync_reads_off_the_blocked_writer() {
+        use std::future::Future;
+        use std::sync::mpsc;
+        use std::task::Waker;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = NotesStore::open(directory.path().join("notes.db"))
+            .await
+            .unwrap();
+        store.configure_sync("loopback://reader").await.unwrap();
+        let client = SyncClient::from_store(store.clone());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut blocked = Box::pin(store.write_connection().call(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        }));
+        let mut context = std::task::Context::from_waker(Waker::noop());
+        assert!(blocked.as_mut().poll(&mut context).is_pending());
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let mut server = LoopbackServer::new();
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), client.sync_once(&mut server)).await;
+        release_tx.send(()).unwrap();
+        blocked.await.unwrap();
+        assert_eq!(result.unwrap().unwrap(), SyncStats::default());
+        store.close().await.unwrap();
     }
 }

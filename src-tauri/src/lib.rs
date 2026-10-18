@@ -312,7 +312,7 @@ pub fn run() {
                     startup_lifecycle.retain_store(&store);
                     let conn = store.write_connection().clone();
                     handle.manage(commands::AppState {
-                        store,
+                        store: store.clone(),
                         blob_store: blob_store.clone(),
                         image_cache,
                         preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),
@@ -335,7 +335,7 @@ pub fn run() {
                         if let Some((server_url, token)) = sync_credentials {
                             sync::spawn_worker(
                                 handle.clone(),
-                                conn.clone(),
+                                store.clone(),
                                 server_url,
                                 token,
                                 blob_store,

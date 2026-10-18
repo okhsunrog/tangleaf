@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use notes_blob::{BlobHash, BlobStore, BlobStoreError};
-use notes_core::{Connection, export_sync_snapshot};
+use notes_core::store::NotesStore;
 use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
 use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError};
 use serde::Serialize;
@@ -115,13 +115,7 @@ impl SyncTransport for DesktopTransport<'_> {
     }
 
     async fn prepare_push(&mut self, operations: &[notes_core::Op]) -> Result<()> {
-        upload_operation_blobs(
-            self.store.read_connection(),
-            self.http,
-            self.blob_store,
-            operations,
-        )
-        .await
+        upload_operation_blobs(&self.store, self.http, self.blob_store, operations).await
     }
 
     async fn prepare_pull(&mut self, operations: &[SequencedOp]) -> Result<()> {
@@ -207,7 +201,7 @@ impl SyncRuntime {
 
 pub fn spawn_worker(
     app: AppHandle,
-    connection: Connection,
+    store: NotesStore,
     server_url: url::Url,
     token: String,
     blob_store: BlobStore,
@@ -215,6 +209,7 @@ pub fn spawn_worker(
     mut retries: watch::Receiver<u64>,
 ) {
     let worker = app.state::<SyncRuntime>().worker.clone();
+    let store = store.with_commit_observer(crate::commands::commit_publisher(&app));
     worker.spawn(async move {
         let mut credentials = Some((server_url, token));
         'configuration: loop {
@@ -225,7 +220,9 @@ pub fn spawn_worker(
                     SyncStatus {
                         state: SyncConnectionState::Disabled,
                         server_url: None,
-                        last_server_seq: notes_core::sync_cursor(&connection).await.unwrap_or(0),
+                        last_server_seq: notes_core::sync_cursor(store.read_connection())
+                            .await
+                            .unwrap_or(0),
                         pending_operations: 0,
                         message: None,
                         server_format_version: None,
@@ -255,9 +252,7 @@ pub fn spawn_worker(
                     return;
                 }
             };
-            if let Err(error) =
-                notes_core::configure_sync(&connection, transport.base_url().as_str()).await
-            {
+            if let Err(error) = store.configure_sync(transport.base_url().as_str()).await {
                 replace_status(
                     &app,
                     &status,
@@ -281,7 +276,7 @@ pub fn spawn_worker(
                 set_connection_state(
                     &app,
                     &status,
-                    &connection,
+                    &store,
                     &server_url,
                     SyncConnectionState::Connecting,
                     None,
@@ -290,7 +285,7 @@ pub fn spawn_worker(
                 let result = tokio::select! {
                     result = synchronize_session(
                         &app,
-                        &connection,
+                        &store,
                         &transport,
                         &status,
                         &server_url,
@@ -308,7 +303,7 @@ pub fn spawn_worker(
                                 set_connection_state(
                                     &app,
                                     &status,
-                                    &connection,
+                                    &store,
                                     &server_url,
                                     SyncConnectionState::Error,
                                     Some(error.to_string()),
@@ -347,7 +342,7 @@ pub fn spawn_worker(
                     set_connection_detail(
                         &app,
                         &status,
-                        &connection,
+                        &store,
                         &server_url,
                         failure_state,
                         Some(parked_message),
@@ -365,7 +360,7 @@ pub fn spawn_worker(
                             set_connection_state(
                                 &app,
                                 &status,
-                                &connection,
+                                &store,
                                 &server_url,
                                 SyncConnectionState::Error,
                                 Some(error.to_string()),
@@ -379,7 +374,7 @@ pub fn spawn_worker(
                 set_connection_state(
                     &app,
                     &status,
-                    &connection,
+                    &store,
                     &server_url,
                     failure_state,
                     Some(message),
@@ -394,7 +389,7 @@ pub fn spawn_worker(
                             set_connection_state(
                                 &app,
                                 &status,
-                                &connection,
+                                &store,
                                 &server_url,
                                 SyncConnectionState::Error,
                                 Some(error.to_string()),
@@ -447,7 +442,7 @@ async fn wait_for_retry_during_backoff(
 
 async fn synchronize_session(
     app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     status: &Arc<RwLock<SyncStatus>>,
     server_url: &url::Url,
@@ -464,27 +459,28 @@ async fn synchronize_session(
         }
         .into());
     }
-    initialize_replica(app, connection, transport, blob_store).await?;
+    initialize_replica(store, transport, blob_store).await?;
     let server_info = transport.info().await?;
-    if notes_core::db::workspace_uuid(connection).await? != server_info.workspace_uuid {
+    if notes_core::db::workspace_uuid(store.read_connection()).await? != server_info.workspace_uuid
+    {
         return Err(SyncSessionError::WorkspaceConflict.into());
     }
     set_connection_state(
         app,
         status,
-        connection,
+        store,
         server_url,
         SyncConnectionState::Syncing,
         None,
     )
     .await;
-    synchronize_http(app, connection, transport, blob_store).await?;
-    let cursor = notes_core::sync_cursor(connection).await?;
+    synchronize_http(store, transport, blob_store).await?;
+    let cursor = notes_core::sync_cursor(store.read_connection()).await?;
     let mut socket = transport.connect(cursor).await?;
     set_connection_state(
         app,
         status,
-        connection,
+        store,
         server_url,
         SyncConnectionState::Online,
         None,
@@ -512,11 +508,11 @@ async fn synchronize_session(
                             // Heartbeats must not acknowledge outbox items or change sync state.
                             continue;
                         }
-                        handle_server_message(app, connection, transport, blob_store, message).await?;
+                        handle_server_message(store, transport, blob_store, message).await?;
                         set_connection_state(
                             app,
                             status,
-                            connection,
+                            store,
                             server_url,
                             SyncConnectionState::Online,
                             None,
@@ -538,7 +534,7 @@ async fn synchronize_session(
                 }
             }
             _ = drain.tick() => {
-                let pending = notes_core::pending_outbox(connection, SYNC_BATCH_SIZE).await?;
+                let pending = notes_core::pending_outbox(store.read_connection(), SYNC_BATCH_SIZE).await?;
                 if !pending.is_empty() {
                     if status
                         .read()
@@ -549,14 +545,14 @@ async fn synchronize_session(
                         set_connection_state(
                             app,
                             status,
-                            connection,
+                            store,
                             server_url,
                             SyncConnectionState::Syncing,
                             None,
                         )
                         .await;
                     }
-                    upload_operation_blobs(connection,transport, blob_store, &pending).await?;
+                    upload_operation_blobs(store,transport, blob_store, &pending).await?;
                     let message = serde_json::to_string(&ClientMessage::Push { ops: pending })?;
                     socket.send(Message::Text(message.into())).await?;
                 }
@@ -566,13 +562,14 @@ async fn synchronize_session(
 }
 
 async fn initialize_replica(
-    app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
 ) -> Result<()> {
-    let local_workspace_uuid = notes_core::db::workspace_uuid(connection).await?;
-    if let Some(bound_workspace_uuid) = notes_core::sync_bound_workspace(connection).await? {
+    let local_workspace_uuid = notes_core::db::workspace_uuid(store.read_connection()).await?;
+    if let Some(bound_workspace_uuid) =
+        notes_core::sync_bound_workspace(store.read_connection()).await?
+    {
         let server_workspace_uuid = transport.info().await?.workspace_uuid;
         if bound_workspace_uuid != local_workspace_uuid
             || bound_workspace_uuid != server_workspace_uuid
@@ -584,20 +581,17 @@ async fn initialize_replica(
 
     let server = transport.snapshot().await?;
     let server_seq = server.seq;
-    let (local, pending) = capture_local_sync_state(connection, server.seq).await?;
+    let (local, pending) = store.capture_sync_baseline(server.seq).await?;
     let server_empty = snapshot_is_empty(&server);
     let local_empty = snapshot_is_empty(&local);
     match (server_empty, local_empty) {
         (true, false) => {
-            upload_snapshot_blobs(connection, transport, blob_store, &local).await?;
+            upload_snapshot_blobs(store, transport, blob_store, &local).await?;
             transport.bootstrap(local.clone()).await?;
         }
         (false, true) => {
-            download_snapshot_blobs(app, connection, transport, blob_store, &server).await?;
-            notes_core::store::NotesStore::new(connection.clone())
-                .with_commit_observer(crate::commands::commit_publisher(app))
-                .bootstrap_sync_snapshot(server.clone())
-                .await?;
+            download_snapshot_blobs(store, transport, blob_store, &server).await?;
+            store.bootstrap_sync_snapshot(server.clone()).await?;
         }
         (false, false) => {
             if local.workspace_uuid != server.workspace_uuid
@@ -606,46 +600,28 @@ async fn initialize_replica(
             {
                 return Err(SyncSessionError::WorkspaceConflict.into());
             }
-            download_snapshot_blobs(app, connection, transport, blob_store, &server).await?;
+            download_snapshot_blobs(store, transport, blob_store, &server).await?;
         }
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
             // successive fresh clients from replacing its Journal namespace.
-            notes_core::store::NotesStore::new(connection.clone())
-                .with_commit_observer(crate::commands::commit_publisher(app))
-                .bootstrap_sync_snapshot(server)
-                .await?;
+            store.bootstrap_sync_snapshot(server).await?;
         }
     }
 
     let server_info = transport.info().await?;
-    let local_workspace_uuid = notes_core::db::workspace_uuid(connection).await?;
+    let local_workspace_uuid = notes_core::db::workspace_uuid(store.read_connection()).await?;
     if local_workspace_uuid != server_info.workspace_uuid {
         return Err(SyncSessionError::WorkspaceConflict.into());
     }
-    notes_core::bind_sync_workspace(
-        connection,
-        transport.base_url().as_str(),
-        local_workspace_uuid,
-        server_seq,
-    )
-    .await?;
+    store
+        .bind_sync_workspace(
+            transport.base_url().as_str(),
+            local_workspace_uuid,
+            server_seq,
+        )
+        .await?;
     Ok(())
-}
-
-async fn capture_local_sync_state(
-    connection: &Connection,
-    seq: u64,
-) -> Result<(SyncSnapshot, Vec<notes_core::Op>)> {
-    for _ in 0..3 {
-        let before = notes_core::pending_outbox(connection, u32::MAX).await?;
-        let snapshot = export_sync_snapshot(connection, seq).await?;
-        let after = notes_core::pending_outbox(connection, u32::MAX).await?;
-        if before == after {
-            return Ok((snapshot, after));
-        }
-    }
-    bail!("local state kept changing while the sync baseline was inspected")
 }
 
 async fn outbox_explains_snapshot_difference(
@@ -670,19 +646,16 @@ fn snapshot_is_empty(snapshot: &SyncSnapshot) -> bool {
 }
 
 async fn synchronize_http(
-    app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
 ) -> Result<()> {
     let mut transport = DesktopTransport {
-        store: notes_core::store::NotesStore::new(connection.clone())
-            .with_commit_observer(crate::commands::commit_publisher(app)),
+        store: store.clone(),
         http: transport,
         blob_store,
     };
-    SyncClient::new(connection.clone())
-        .with_commit_observer(crate::commands::commit_publisher(app))
+    SyncClient::from_store(store.clone())
         .with_batch_size(SYNC_BATCH_SIZE)
         .sync_until_idle(&mut transport)
         .await?;
@@ -690,19 +663,17 @@ async fn synchronize_http(
 }
 
 async fn handle_server_message(
-    app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     message: ServerMessage,
 ) -> Result<()> {
     match message {
         ServerMessage::Ops { ops } => {
-            apply_server_operations(app, connection, transport, blob_store, ops).await
+            apply_server_operations(store, transport, blob_store, ops).await
         }
         ServerMessage::Ack { ops } => {
-            notes_core::store::NotesStore::new(connection.clone())
-                .with_commit_observer(crate::commands::commit_publisher(app))
+            store
                 .acknowledge_server_ops(
                     ops.into_iter()
                         .map(|operation| (operation.envelope.op_id, operation.seq))
@@ -717,23 +688,20 @@ async fn handle_server_message(
         // offending change over HTTP and keep the queue moving on this session.
         ServerMessage::Error { code, message } if code.is_terminal_rejection() => {
             tracing::warn!(%code, %message, "sync server rejected a pushed batch");
-            synchronize_http(app, connection, transport, blob_store).await
+            synchronize_http(store, transport, blob_store).await
         }
         ServerMessage::Error { code, message } => bail!("sync server error {code}: {message}"),
     }
 }
 
 async fn apply_server_operations(
-    app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operations: Vec<SequencedOp>,
 ) -> Result<()> {
-    let store = notes_core::store::NotesStore::new(connection.clone())
-        .with_commit_observer(crate::commands::commit_publisher(app));
     for operation in &operations {
-        download_operation_blob(&store, transport, blob_store, &operation.envelope).await?;
+        download_operation_blob(store, transport, blob_store, &operation.envelope).await?;
     }
     let sequenced = operations
         .iter()
@@ -744,14 +712,16 @@ async fn apply_server_operations(
 }
 
 async fn upload_operation_blobs(
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operations: &[notes_core::Op],
 ) -> Result<()> {
     for operation in operations {
         if let notes_core::OpKind::InkPublish(p) = &operation.kind {
-            transport.upload_ink_graph(connection, p.root_hash).await?;
+            transport
+                .upload_ink_graph(store.read_connection(), p.root_hash)
+                .await?;
         }
         if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
             upload_blob(transport, blob_store, attachment.blob_hash, attachment.size).await?;
@@ -761,7 +731,7 @@ async fn upload_operation_blobs(
 }
 
 async fn download_operation_blob(
-    store: &notes_core::store::NotesStore,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operation: &notes_core::Op,
@@ -778,14 +748,14 @@ async fn download_operation_blob(
 }
 
 async fn upload_snapshot_blobs(
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
     for version in &snapshot.ink_versions {
         transport
-            .upload_ink_graph(connection, version.publication.root_hash)
+            .upload_ink_graph(store.read_connection(), version.publication.root_hash)
             .await?;
     }
     for attachment in snapshot
@@ -802,17 +772,14 @@ async fn upload_snapshot_blobs(
 }
 
 async fn download_snapshot_blobs(
-    app: &AppHandle,
-    connection: &Connection,
+    store: &NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
-    let store = notes_core::store::NotesStore::new(connection.clone())
-        .with_commit_observer(crate::commands::commit_publisher(app));
     for version in &snapshot.ink_versions {
         transport
-            .download_ink_graph_to_store(&store, version.publication.root_hash)
+            .download_ink_graph_to_store(store, version.publication.root_hash)
             .await?;
     }
     for attachment in snapshot
@@ -900,45 +867,36 @@ async fn download_blob(
 async fn set_connection_state(
     app: &AppHandle,
     status: &Arc<RwLock<SyncStatus>>,
-    connection: &Connection,
+    store: &NotesStore,
     server_url: &url::Url,
     state: SyncConnectionState,
     message: Option<String>,
 ) {
-    set_connection_detail(app, status, connection, server_url, state, message, None).await;
+    set_connection_detail(app, status, store, server_url, state, message, None).await;
 }
 
 async fn set_connection_detail(
     app: &AppHandle,
     status: &Arc<RwLock<SyncStatus>>,
-    connection: &Connection,
+    store: &NotesStore,
     server_url: &url::Url,
     state: SyncConnectionState,
     message: Option<String>,
     server_format_version: Option<u32>,
 ) {
-    let cursor = notes_core::sync_cursor(connection)
-        .await
-        .unwrap_or_default();
-    let pending = notes_core::pending_outbox(connection, u32::MAX)
-        .await
-        .map(|operations| operations.len().try_into().unwrap_or(u32::MAX))
-        .unwrap_or_default();
-    let quarantined = notes_core::quarantined_outbox(connection, u32::MAX)
-        .await
-        .unwrap_or_default();
+    let queue = store.sync_queue_status().await.unwrap_or_default();
     replace_status(
         app,
         status,
         SyncStatus {
             state,
             server_url: Some(server_url.clone()),
-            last_server_seq: cursor,
-            pending_operations: pending,
+            last_server_seq: queue.cursor,
+            pending_operations: queue.pending_operations,
             message,
             server_format_version,
-            quarantined_operations: quarantined.len().try_into().unwrap_or(u32::MAX),
-            quarantine_reason: quarantined.first().map(|held| held.reason.clone()),
+            quarantined_operations: queue.quarantined_operations,
+            quarantine_reason: queue.quarantine_reason,
         },
     );
 }
@@ -962,25 +920,23 @@ pub(crate) async fn finish_before_exit(app: &AppHandle) {
             return Ok::<(), anyhow::Error>(());
         };
         let transport = HttpTransport::new(url, token)?;
+        let store = state
+            .store
+            .clone()
+            .with_commit_observer(crate::commands::commit_publisher(app));
         loop {
             let pending =
-                notes_core::pending_outbox(state.store.write_connection(), SYNC_BATCH_SIZE).await?;
+                notes_core::pending_outbox(store.read_connection(), SYNC_BATCH_SIZE).await?;
             if pending.is_empty() {
                 return Ok(());
             }
-            upload_operation_blobs(
-                state.store.write_connection(),
-                &transport,
-                &state.blob_store,
-                &pending,
-            )
-            .await?;
+            upload_operation_blobs(&store, &transport, &state.blob_store, &pending).await?;
             let accepted = transport.push(pending).await?;
-            notes_core::acknowledge_server_ops(
-                state.store.write_connection(),
-                accepted.iter().map(|o| (o.envelope.op_id, o.seq)).collect(),
-            )
-            .await?;
+            store
+                .acknowledge_server_ops(
+                    accepted.iter().map(|o| (o.envelope.op_id, o.seq)).collect(),
+                )
+                .await?;
         }
     };
     match tokio::time::timeout(Duration::from_secs(3), attempt).await {

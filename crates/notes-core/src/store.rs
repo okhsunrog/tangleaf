@@ -18,6 +18,8 @@ pub(crate) mod bulk;
 mod ink;
 mod metadata;
 mod runtime;
+mod sync_read;
+pub use sync_read::SyncQueueStatus;
 
 type CommitObserver = dyn Fn(&CommitNotice) + Send + Sync;
 
