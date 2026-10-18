@@ -172,6 +172,23 @@ describe("outliner block navigation", () => {
     expect(container.querySelector('[data-block-uuid="block-0"]')).toBe(editor);
     expect(container.querySelectorAll("[data-block-uuid]")).toHaveLength(1);
   });
+  it("does not reveal the active editor again when a persisted snapshot refreshes", () => {
+    const blocks = Array.from({ length: 243 }, (_, index) => block(index));
+    render(blocks, null, 0, false);
+    act(() => editingStore.setEditing("block-242"));
+    act(() => {
+      container.scrollTop = 4000;
+      container.dispatchEvent(new Event("scroll"));
+    });
+    render(
+      blocks.map((row, index) => (index ? row : { ...row, markdown: "Updated" })),
+      null,
+      0,
+      false,
+    );
+    expect(container.scrollTop).toBe(4000);
+    expect(container.querySelector('[data-block-uuid="block-242"]')).not.toBeNull();
+  });
   it("virtualizes a narrow desktop and preserves Android's static target path", () => {
     Object.defineProperty(container, "clientWidth", { configurable: true, value: 390 });
     const blocks = Array.from({ length: 243 }, (_, index) => block(index));

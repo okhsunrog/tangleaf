@@ -17,7 +17,7 @@ import { type MarkdownOpenHandler, useResolvedAttachmentImages } from "@/feature
 import { PagePresentation } from "@/features/pages/page-presentation";
 import { isAndroid } from "@/app/sheet-mode";
 import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib/api";
-import { queryKeys } from "@/lib/query";
+import { queryKeys, refreshQueries } from "@/lib/query";
 import { BlockNode } from "./block-node";
 import { OutlinerProvider, useOutliner } from "./outliner-store";
 
@@ -182,6 +182,7 @@ function VirtualOutline({
       width: scrollElement?.clientWidth ?? 0,
       height: scrollElement?.clientHeight ?? 0,
     },
+    initialOffset: () => scrollElement?.scrollTop ?? 0,
     // Keep enough neighbours for smooth keyboard/trackpad scrolling without
     // eagerly decoding a whole run of image blocks just below the viewport.
     overscan: 4,
@@ -234,10 +235,19 @@ function VirtualOutline({
     store.setEditing(rows[0].block.uuid);
   }, [focusFirstBlockRequest, rows, store]);
 
+  const revealedEditor = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (!virtualize || !store.editingUuid) return;
+    if (!store.editingUuid) {
+      revealedEditor.current = null;
+      return;
+    }
+    if (revealedEditor.current === store.editingUuid) return;
     const index = rows.findIndex(({ block }) => block.uuid === store.editingUuid);
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
+    if (index < 0) return;
+    revealedEditor.current = store.editingUuid;
+    // A persisted refresh is not a new focus request. Keep the user's scroll
+    // position when autosave or a remote edit replaces the snapshot.
+    if (virtualize) virtualizer.scrollToIndex(index, { align: "auto" });
   }, [rows, store.editingUuid, virtualize, virtualizer]);
 
   const addRootBlock = async () => {
@@ -248,7 +258,7 @@ function VirtualOutline({
       parentUuid: null,
       afterUuid: last?.uuid ?? null,
     });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.pageRender(page.uuid) });
+    await refreshQueries(queryClient, { queryKey: queryKeys.pageRender(page.uuid) });
   };
 
   if (blocks.length === 0) {
