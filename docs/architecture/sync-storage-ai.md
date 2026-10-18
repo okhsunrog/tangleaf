@@ -187,14 +187,21 @@ input operations. Observer failure cannot turn an already committed write into a
 
 Each SQLite worker admits at most 64 outstanding jobs. Admission is cancelable before acceptance;
 an accepted write remains owned by the worker when its waiting frontend future disappears.
-Explicit Store close stops and drains both workers and joins their threads. Raw native ink
-connections still require separate lifecycle coordination before that close; opening a reader
-does not make the text writer the only writer of the file.
+Explicit Store close stops and drains both workers and joins their threads. Application shutdown
+first stops startup publication and waits for its owned opener, then drains native ink jobs and
+completion, stops background sync and attempts bounded final upload, and closes both SQLite workers.
+An advisory application lock precedes database open and stays held through this drain; external
+SQLite clients do not participate in that lock. Native ink remains a separate writer, with its
+own input and frame lifecycle.
 
-Connection policy lives in `sqlite::policy`. During measurement the main and AI stores retain
-`NORMAL`; native ink and server oplog/OAuth/blob ownership retain `FULL`. `FULL` is the candidate
-common guarantee for primary data; a production policy change needs the mixed-workload and
-recovery checks in the database plan.
+Connection policy lives in `sqlite::policy`. All six production writers use its primary-state
+WAL/FULL helpers: main notes, native ink, AI, server oplog, OAuth and blob ownership. Main and AI
+moved from NORMAL after the [release comparisons](../planning/database-layer-baseline.md);
+the others retain FULL. Persistent AI controls share their file with derived indexes, so that
+file has no weaker cache exception. Explicit configurable profiles remain for disposable fixtures
+and measurements. Tests verify actual opener settings and explicit close/reopen. Filesystem blob
+publication remains a separate durable boundary; FULL is not a transaction across files/stores,
+and the measurements do not establish power-loss survival or Android/BOOX performance.
 
 ## 4. Operation and apply model
 
