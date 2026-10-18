@@ -1082,7 +1082,7 @@ async fn invalid_archive_never_runs_the_precommit_callback() {
 }
 
 #[tokio::test]
-async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
+async fn large_archive_restore_reconciles_at_dependency_boundaries_only() {
     const INCOMING_BLOCKS: usize = 2_048;
     const EXISTING_BLOCKS: usize = 8;
 
@@ -1147,7 +1147,10 @@ async fn large_archive_restore_reconciles_deleted_and_created_trees_once() {
         .await
         .expect("restore large archive");
 
-    assert_eq!(stats.structure_reconciliations, 1);
+    assert_eq!(
+        stats.structure_reconciliations, 2,
+        "one read barrier before page deletion and one final projection, not one per block"
+    );
     assert_eq!(
         stats.applied_operations,
         1 + INCOMING_BLOCKS + 1 + EXISTING_BLOCKS,

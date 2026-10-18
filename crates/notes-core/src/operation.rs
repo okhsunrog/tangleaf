@@ -1594,6 +1594,20 @@ impl ApplyEffects {
         Ok(())
     }
 
+    /// Materialized placement is needed by some operations before the batch
+    /// ends. Keep that read barrier shared by local, remote and sequenced apply.
+    fn ensure_structure_current(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> rusqlite::Result<()> {
+        if self.structure_dirty {
+            reconcile_structure(transaction)?;
+            self.structure_dirty = false;
+            self.stats.structure_reconciliations += 1;
+        }
+        Ok(())
+    }
+
     fn request_block_refs(
         &mut self,
         transaction: &rusqlite::Transaction<'_>,
@@ -1634,10 +1648,7 @@ impl ApplyEffects {
         mut self,
         transaction: &rusqlite::Transaction<'_>,
     ) -> rusqlite::Result<DeferredApplyStats> {
-        if self.structure_dirty {
-            reconcile_structure(transaction)?;
-            self.stats.structure_reconciliations += 1;
-        }
+        self.ensure_structure_current(transaction)?;
         // First update already-materialized references for changed aliases.
         // Pending Markdown is projected afterwards against the final alias
         // state, avoiding an alias-by-reference second pass during imports.
@@ -1725,6 +1736,9 @@ fn apply_one_with_effects(
                 .as_deref()
                 .is_some_and(|current| current < operation.hlc.to_string().as_str())
             {
+                // Replacing a generation must examine the page's current
+                // members, including moves earlier in this same transaction.
+                effects.ensure_structure_current(transaction)?;
                 let stale_blocks = {
                     let mut statement = transaction.prepare(
                         "SELECT uuid FROM blocks
@@ -1881,6 +1895,9 @@ fn apply_one_with_effects(
             if existence_hlc.is_some_and(|hlc| hlc > operation.hlc.to_string()) {
                 return Ok(vec![payload.uuid]);
             }
+            // Resolve pending moves before choosing the cascade's members.
+            // Otherwise packet boundaries decide which blocks are deleted.
+            effects.ensure_structure_current(transaction)?;
             let reference_aliases = page_reference_aliases(transaction, payload.uuid)?;
             let blocks = {
                 let mut statement =
@@ -2068,6 +2085,18 @@ fn apply_one_with_effects(
                 ensure_object_kind(transaction, parent_uuid, ObjectKind::Block)?;
             }
             if !is_tombstoned(transaction, payload.uuid)? {
+                if effects.structure_dirty
+                    && !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pages WHERE uuid = ?1)",
+                        [payload.page_uuid],
+                        |row| row.get::<_, bool>(0),
+                    )?
+                {
+                    // An unavailable destination keeps the last materialized
+                    // placement while retaining the new intent for replay.
+                    // Preserve that fallback before overwriting pending intent.
+                    effects.ensure_structure_current(transaction)?;
+                }
                 write_structure_intent(
                     transaction,
                     payload.uuid,
@@ -2089,20 +2118,14 @@ fn apply_one_with_effects(
             ensure_object_kind(transaction, payload.page_uuid, ObjectKind::Page)?;
             let state = transaction
                 .query_row(
-                    "SELECT page_uuid, parent_uuid, existence_hlc FROM blocks WHERE uuid = ?1",
+                    "SELECT existence_hlc FROM blocks WHERE uuid = ?1",
                     [payload.uuid],
-                    |row| {
-                        Ok((
-                            row.get::<_, uuid::Uuid>(0)?,
-                            row.get::<_, Option<uuid::Uuid>>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()?;
             if state
                 .as_ref()
-                .is_some_and(|state| state.2 > operation.hlc.to_string())
+                .is_some_and(|existence_hlc| *existence_hlc > operation.hlc.to_string())
             {
                 return Ok(vec![payload.uuid]);
             }
