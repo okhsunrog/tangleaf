@@ -43,7 +43,7 @@ Findings from the 2026-07-19 multi-agent review that are **deliberately not in a
 
 - **Undo boundary is inconsistent**: document edits and structure are in persistent history; outline typing undo is editor-local and dies on blur/restart (`db/blocks.rs:198` bypasses `record_action`). _Trigger: after B6 (sync-safe undo) lands — same subsystem, decide the model once._
 - **`reconcileRemoteDraft` is nearly vestigial** (`editor-sync.ts`) — real reconciliation lives in the page-session registry. _Trigger: next outliner refactor; fold/remove._
-- **Graph view is prototype-grade** (fixed ellipse layout, refetch-on-click). _Trigger: when the graph becomes a daily tool; consciously parked._
+- **Graph redesign** (direction recorded 2026-10-18): open a global map of existing note links immediately, with search and navigation. Replace the current list-first view and three-column card map. [Graph and boards](graph-and-boards.md) separates agreed direction from proposed implementation details; implementation is pending. Boards with manual layout and connections are a separate future feature.
 
 ## Handwriting integration (2026-09-06 review, accepted for now)
 
