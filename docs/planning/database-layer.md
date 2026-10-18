@@ -395,6 +395,16 @@
   Android callback вне Tokio проверен обычным std::thread тестом. Pen/frame/eraser/display код
   не менялся; реальная BOOX проверка ещё нужна. Отдельно закрывается race выхода во время startup.
 
+- Workload дополнен отдельным CONTENT режимом: реальные revision-safe saves, independent
+  document/search reader, sequenced bursts по 32 блока, native ink patch (256 points/save),
+  completion каждые три/последнее сохранение, fsync 256 KiB blob и attachment metadata каждые
+  три сохранения. Старый BOTH сохраняет QUIET+MIXED. CONTENT требует минимум 30 saves/policy,
+  выводит отдельные phase samples/p50/p95 и checkpoint; перед сравнением проверяет фактические
+  main PRAGMA и сохраняет FULL у ink. Короткая регрессия сверяет точные counts, текст, рисунки,
+  native history, bytes и доступность каждой pending InkPublish после закрытия/reopen.
+  Два обычных workload tests прошли, включая пять повторов; targeted Clippy чистый.
+  Длинные release-замеры выполняются после фиксации production изменений.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
