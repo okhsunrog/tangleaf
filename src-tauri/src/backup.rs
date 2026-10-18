@@ -1,7 +1,9 @@
 //! Full recovery backups. Portable `.notes` export remains a separate format.
 use anyhow::{Context, Result, ensure};
 use notes_blob::{BlobHash, BlobStore};
-use notes_core::store::{NotesStore, inspect_database_backup, required_attachment_blobs};
+use notes_core::store::{
+    NotesStore, backup_closed_database, inspect_database_backup, required_attachment_blobs,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,7 +88,36 @@ pub async fn create_recovery_backup(
     blobs: &BlobStore,
     destination: impl AsRef<Path>,
 ) -> Result<PathBuf> {
-    let destination = destination.as_ref().to_owned();
+    create_recovery_backup_from(CaptureSource::Live(store), blobs, destination.as_ref()).await
+}
+
+/// Capture a drained workspace before physical replacement. The coordinator
+/// must retain its application lock and block new database users throughout
+/// capture and publication. Use the original BlobStore to share its GC lease.
+pub async fn create_recovery_backup_offline(
+    database: impl AsRef<Path>,
+    blobs: &BlobStore,
+    destination: impl AsRef<Path>,
+) -> Result<PathBuf> {
+    create_recovery_backup_from(
+        CaptureSource::Closed(database.as_ref()),
+        blobs,
+        destination.as_ref(),
+    )
+    .await
+}
+
+enum CaptureSource<'a> {
+    Live(&'a NotesStore),
+    Closed(&'a Path),
+}
+
+async fn create_recovery_backup_from(
+    source: CaptureSource<'_>,
+    blobs: &BlobStore,
+    destination: &Path,
+) -> Result<PathBuf> {
+    let destination = destination.to_owned();
     ensure!(
         !destination.try_exists()?,
         "backup destination already exists"
@@ -100,7 +131,11 @@ pub async fn create_recovery_backup(
     let staging = tempfile::Builder::new()
         .prefix(".tangleaf-recovery-")
         .tempdir_in(parent)?;
-    let database = store.backup_database(staging.path().join(DATABASE)).await?;
+    let path = staging.path().join(DATABASE);
+    let database = match source {
+        CaptureSource::Live(store) => store.backup_database(path).await?,
+        CaptureSource::Closed(source) => backup_closed_database(source, path).await?,
+    };
     ensure!(
         database.size <= MAX_DATABASE_BYTES,
         "recovery database exceeds size limit"

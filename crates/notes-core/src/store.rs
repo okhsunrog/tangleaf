@@ -10,7 +10,9 @@ use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
 mod backup;
-pub use backup::{DatabaseBackup, inspect_database_backup, required_attachment_blobs};
+pub use backup::{
+    DatabaseBackup, backup_closed_database, inspect_database_backup, required_attachment_blobs,
+};
 pub(crate) mod bulk;
 mod metadata;
 mod runtime;

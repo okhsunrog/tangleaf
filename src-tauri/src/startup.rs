@@ -10,6 +10,7 @@ type Outcome = std::result::Result<(), String>;
 
 struct State {
     stopping: bool,
+    application_lock: Option<Arc<crate::app_lock::ApplicationLock>>,
     store: Option<NotesStore>,
 }
 
@@ -36,6 +37,7 @@ impl StartupLifecycle {
         let lifecycle = Self(Arc::new(Inner {
             state: Mutex::new(State {
                 stopping: false,
+                application_lock: None,
                 store: None,
             }),
             completed,
@@ -45,6 +47,24 @@ impl StartupLifecycle {
             finished: false,
         };
         (lifecycle, registration)
+    }
+
+    /// Retained before opening SQLite, including failed or interrupted startup.
+    pub(crate) fn retain_application_lock(&self, lock: crate::app_lock::ApplicationLock) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .application_lock = Some(Arc::new(lock));
+    }
+
+    /// Only after all raw jobs and both Store workers have confirmed closure.
+    pub(crate) fn release_application_lock(&self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .application_lock = None;
     }
 
     /// Called immediately after open returns, without an intervening await.

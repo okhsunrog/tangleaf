@@ -164,5 +164,5 @@ pub async fn retry_rejected_changes(
 #[tauri::command]
 #[specta::specta]
 pub fn restart_app(app: AppHandle) {
-    app.restart()
+    app.request_restart()
 }

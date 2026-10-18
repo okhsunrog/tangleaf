@@ -388,3 +388,142 @@ async fn dropping_an_accepted_backup_waiter_does_not_orphan_its_job_or_temporary
     );
     captured.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn offline_backup_captures_wal_only_commits_after_the_last_reader_closes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("notes.db");
+    let wal = directory.path().join("notes.db-wal");
+    let store = NotesStore::open(&source).await.unwrap();
+    store
+        .write_connection()
+        .call(|database| {
+            database.execute_batch("PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE)")
+        })
+        .await
+        .unwrap();
+    // Keep a read-only connection alive after both Store workers close. SQLite
+    // can leave committed WAL behind when its final connection is a reader.
+    let reader =
+        rusqlite::Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    reader
+        .query_row("SELECT count(*) FROM pages", [], |row| row.get::<_, i64>(0))
+        .unwrap();
+    store
+        .create_page("Last accepted write".into())
+        .await
+        .unwrap();
+    let expected = state(store.read_connection()).await;
+    store.close().await.unwrap();
+    reader.close().unwrap();
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    let original_database = std::fs::read(&source).unwrap();
+    let original_wal = std::fs::read(&wal).unwrap();
+    // Establish that a main-file-only copy really misses the accepted write.
+    let incomplete = directory.path().join("main-file-only.db");
+    std::fs::write(&incomplete, &original_database).unwrap();
+    let incomplete_reader = Connection::open_read_only(&incomplete).await.unwrap();
+    assert!(
+        db::list_pages(&incomplete_reader, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    incomplete_reader.close().await.unwrap();
+    let backup = backup_closed_database(&source, directory.path().join("offline.db"))
+        .await
+        .unwrap();
+    let captured = Connection::open_read_only(&backup.path).await.unwrap();
+    assert_eq!(state(&captured).await, expected);
+    captured.close().await.unwrap();
+    inspect_database_backup(&backup.path).await.unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), original_database);
+    assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+    assert!(temporary_files(directory.path()).is_empty());
+}
+
+#[tokio::test]
+async fn offline_capture_errors_close_the_worker_without_creating_or_overwriting_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("notes.db");
+    let store = NotesStore::open(&source).await.unwrap();
+    store.close().await.unwrap();
+    let destination = directory.path().join("existing.db");
+    std::fs::write(&destination, b"keep existing bytes").unwrap();
+    let reader = Connection::open_read_only(&source).await.unwrap();
+    let witness = reader.clone();
+    assert!(
+        capture_and_close(reader, destination.clone())
+            .await
+            .is_err()
+    );
+    assert!(witness.call(|_| Ok(())).await.is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"keep existing bytes");
+    assert!(temporary_files(directory.path()).is_empty());
+    let missing = directory.path().join("missing.db");
+    let never_created = directory.path().join("never-created.db");
+    assert!(
+        backup_closed_database(&missing, &never_created)
+            .await
+            .is_err()
+    );
+    assert!(!missing.exists());
+    assert!(!never_created.exists());
+}
+
+#[tokio::test]
+async fn a_dropped_offline_capture_waiter_still_finishes_and_joins_its_owned_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("notes.db");
+    let store = NotesStore::open(&source).await.unwrap();
+    store
+        .create_page("Offline accepted work".into())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let reader = Connection::open_read_only(&source).await.unwrap();
+    let witness = reader.clone();
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, released) = mpsc::channel();
+    let blocking_reader = reader.clone();
+    let blocker = tokio::spawn(async move {
+        blocking_reader
+            .call(move |_| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+                Ok(())
+            })
+            .await
+    });
+    blocked.await.unwrap();
+    let destination = directory.path().join("canceled-offline.db");
+    let path = destination.clone();
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    // The public helper owns this same close routine inside its detached task;
+    // retain a witness here to verify that completion means actual closure.
+    let owner = tokio::spawn(async move {
+        let outcome = capture_and_close(reader, path).await;
+        let _ = finished.send(outcome);
+    });
+    tokio::task::yield_now().await;
+    assert!(!owner.is_finished());
+    drop(owner);
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), completion)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(witness.call(|_| Ok(())).await.is_err());
+    let captured = Connection::open_read_only(destination).await.unwrap();
+    assert_eq!(
+        db::list_pages(&captured, 10).await.unwrap()[0]
+            .title
+            .as_deref(),
+        Some("Offline accepted work")
+    );
+    captured.close().await.unwrap();
+    assert!(temporary_files(directory.path()).is_empty());
+}

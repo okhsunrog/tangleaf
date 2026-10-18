@@ -180,15 +180,58 @@ impl NotesStore {
     /// Publication never overwrites an existing path. The accepted worker job
     /// owns its temporary file and finishes cleanup even if its waiter drops.
     pub async fn backup_database(&self, destination: impl AsRef<Path>) -> Result<DatabaseBackup> {
-        let destination = destination.as_ref().to_owned();
-        self.read_connection()
-            .call_domain(move |source| -> Result<_> {
-                let transaction = source.transaction()?;
-                let metadata = read_metadata(&transaction)?;
-                write_snapshot(transaction, destination, metadata, BACKUP_RETRY_LIMIT)
-            })
-            .await
+        capture_database(self.read_connection(), destination.as_ref().to_owned()).await
     }
+}
+
+/// Capture an existing, closed workspace with a fresh read-only worker. This
+/// includes committed WAL frames even when the last connection was a reader;
+/// copying only the main database file would lose those accepted writes.
+///
+/// The host owns exclusive workspace admission for the entire operation. No
+/// migration or source journal-mode assignment runs here. Once polled, an
+/// owned task captures and explicitly closes/joins its worker even if its
+/// caller drops the future; runtime destruction is not a completed drain.
+pub async fn backup_closed_database(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<DatabaseBackup> {
+    let source = source.as_ref().to_owned();
+    let destination = destination.as_ref().to_owned();
+    tokio::spawn(async move {
+        let connection = crate::Connection::open_read_only(source).await?;
+        capture_and_close(connection, destination).await
+    })
+    .await?
+}
+
+async fn capture_and_close(
+    connection: crate::Connection,
+    destination: PathBuf,
+) -> Result<DatabaseBackup> {
+    let capture = capture_database(&connection, destination).await;
+    let close = connection.close().await;
+    match (capture, close) {
+        (Ok(backup), Ok(())) => Ok(backup),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error).context("closing offline backup reader"),
+        (Err(capture), Err(close)) => Err(capture).context(format!(
+            "offline backup reader also failed to close: {close:#}"
+        )),
+    }
+}
+
+async fn capture_database(
+    connection: &crate::Connection,
+    destination: PathBuf,
+) -> Result<DatabaseBackup> {
+    connection
+        .call_domain(move |source| -> Result<_> {
+            let transaction = source.transaction()?;
+            let metadata = read_metadata(&transaction)?;
+            write_snapshot(transaction, destination, metadata, BACKUP_RETRY_LIMIT)
+        })
+        .await
 }
 
 fn read_metadata(database: &rusqlite::Connection) -> Result<SnapshotMetadata> {

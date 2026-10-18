@@ -1,5 +1,6 @@
 #[cfg(target_os = "android")]
 mod android_tls;
+mod app_lock;
 mod attachment_protocol;
 pub mod backup;
 mod commands;
@@ -282,6 +283,11 @@ pub fn run() {
             let failure_status = startup.clone();
             registration.spawn(
                 async move {
+                    let application_lock = app_lock::ApplicationLock::acquire(&data_dir).await?;
+                    startup_lifecycle.retain_application_lock(application_lock);
+                    if startup_lifecycle.is_stopping() {
+                        return Ok(());
+                    }
                     let store = notes_core::store::NotesStore::open(&db_path).await?;
                     // Retain before any subsequent await or state installation;
                     // exit can still close this Store if initialization fails.
@@ -378,13 +384,18 @@ pub fn run() {
                         app.try_state::<commands::AppState>()
                             .map(|state| state.store.clone())
                     });
+                let mut closed = true;
                 if let Some(store) = store {
                     match store.close().await {
                         Ok(()) => tracing::info!("Workspace SQLite workers closed"),
                         Err(error) => {
+                            closed = false;
                             tracing::error!(?error, "Workspace SQLite close failed during exit");
                         }
                     }
+                }
+                if closed && let Some(startup) = &startup {
+                    startup.release_application_lock();
                 }
                 finished.store(true, Ordering::Relaxed);
                 app.exit(code.unwrap_or(0));

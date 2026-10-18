@@ -611,6 +611,72 @@ async fn dropping_capture_does_not_publish_a_partial_container_or_leave_staging(
     assert_no_partial(fixture.directory.path());
 }
 
+#[tokio::test]
+async fn offline_full_backup_preserves_the_last_accepted_content_history_and_blobs() {
+    let fixture = fixture().await;
+    notes_core::configure_sync(fixture.store.write_connection(), "https://sync.example")
+        .await
+        .unwrap();
+    let page = fixture
+        .store
+        .create_page("Before drain".into())
+        .await
+        .unwrap()
+        .value;
+    let attachment = attach(&fixture, page.uuid, b"last accepted attachment").await;
+    fixture
+        .store
+        .rename_page_if_revision(
+            page.uuid,
+            Some("Last accepted title".into()),
+            page.title_revision,
+        )
+        .await
+        .unwrap();
+    let orphan = install(&fixture.blobs, b"retained history or outbox body");
+    let expected = fingerprint(fixture.store.read_connection()).await;
+    fixture.store.close().await.unwrap();
+    assert!(
+        fixture
+            .store
+            .read_connection()
+            .call(|_| Ok(()))
+            .await
+            .is_err()
+    );
+    let destination = fixture.directory.path().join("before-restore.recovery");
+    create_recovery_backup_offline(
+        fixture.directory.path().join("notes.db"),
+        &fixture.blobs,
+        &destination,
+    )
+    .await
+    .unwrap();
+    let verified = prepare_recovery_backup(&destination, fixture.directory.path())
+        .await
+        .unwrap();
+    assert_eq!(verified.manifest().blobs.len(), 2);
+    let recovered = tempfile::tempdir().unwrap();
+    let recovered_blobs = BlobStore::new(recovered.path());
+    verified.install_blobs(&recovered_blobs).unwrap();
+    assert_eq!(
+        recovered_blobs
+            .read_verified(attachment.blob_hash, 1024)
+            .unwrap(),
+        b"last accepted attachment"
+    );
+    assert_eq!(
+        recovered_blobs.read_verified(orphan, 1024).unwrap(),
+        b"retained history or outbox body"
+    );
+    let path = recovered.path().join("notes.db");
+    fs::copy(verified.database_path(), &path).unwrap();
+    let restored = NotesStore::open(path).await.unwrap();
+    assert_eq!(fingerprint(restored.read_connection()).await, expected);
+    restored.close().await.unwrap();
+    assert_no_partial(fixture.directory.path());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn unsafe_links_are_rejected_and_only_regular_incoming_temporaries_are_omitted() {
