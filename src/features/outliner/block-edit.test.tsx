@@ -126,3 +126,27 @@ it("updates an acknowledged block without replacing its editor or losing focus",
   expect(view().state.selection.main.anchor).toBe(7);
   expect(onChange).not.toHaveBeenCalled();
 });
+
+it("consumes Undo even with empty block history instead of invoking structural history", async () => {
+  const { root, view } = mount();
+  await act(async () =>
+    root.render(<BlockEdit initial="First" onChange={() => {}} onBlur={() => {}} />),
+  );
+  const parentShortcut = vi.fn();
+  window.addEventListener("keydown", parentShortcut);
+  try {
+    const event = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      view().contentDOM.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(parentShortcut).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener("keydown", parentShortcut);
+  }
+});

@@ -61,6 +61,25 @@ const documentEditorTheme = EditorView.theme({
     backgroundColor: "color-mix(in oklab, var(--primary) 20%, transparent)",
   },
   ".cm-gutters": { display: "none" },
+  ".cm-tooltip.cm-tooltip-autocomplete": {
+    backgroundColor: "var(--popover)",
+    color: "var(--popover-foreground)",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    overflow: "hidden",
+    boxShadow: "0 4px 16px #0002",
+  },
+  ".cm-tooltip-autocomplete > ul": {
+    fontFamily: "inherit",
+    fontSize: "0.875rem",
+    padding: "4px",
+    maxHeight: "16rem",
+  },
+  ".cm-tooltip-autocomplete > ul > li": { padding: "5px 10px", borderRadius: "4px" },
+  '.cm-tooltip-autocomplete > ul > li[aria-selected="true"]': {
+    backgroundColor: "var(--accent)",
+    color: "var(--accent-foreground)",
+  },
 });
 
 function editableExtensions(readOnly: boolean) {

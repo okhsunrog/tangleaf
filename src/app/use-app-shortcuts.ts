@@ -11,7 +11,9 @@ type ShortcutActions = {
 };
 
 function isEditableTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && target.matches("input, textarea, [contenteditable=true]");
+  return (
+    target instanceof Element && target.closest("input, textarea, [contenteditable=true]") !== null
+  );
 }
 
 export function useAppShortcuts({
@@ -25,6 +27,7 @@ export function useAppShortcuts({
   useEffect(() => {
     if (!enabled) return;
     const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (!event.ctrlKey && !event.metaKey) return;
       // Every one of these shortcuts belongs to the text field the caret is in
       // when there is one: Ctrl+N and Ctrl+K are ordinary editing keys there,

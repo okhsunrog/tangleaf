@@ -1,4 +1,4 @@
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, undo, redo } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import {
@@ -13,6 +13,7 @@ import { EditorView, keymap } from "@codemirror/view";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { markdownFormatting } from "@/features/editor/markdown-formatting";
 import { minimalExternalDocumentChange } from "@/features/editor/minimal-document-change";
+import { resolveDocumentHistoryKey } from "@/features/document/document-editor-model";
 
 const externalUpdate = Annotation.define<boolean>();
 import {
@@ -150,6 +151,21 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       Prec.highest(
         EditorView.domEventHandlers({
           keydown(event, view) {
+            const historyAction = resolveDocumentHistoryKey({
+              key: event.key,
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+              altKey: event.altKey,
+              isComposing: event.isComposing || view.composing,
+            });
+            if (historyAction) {
+              if (historyAction === "undo") undo(view);
+              else redo(view);
+              event.preventDefault();
+              event.stopPropagation();
+              return true;
+            }
             const selection = view.state.selection.main;
             const handled =
               callbacksRef.current.onKeyDown?.({

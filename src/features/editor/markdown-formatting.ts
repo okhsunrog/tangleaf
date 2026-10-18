@@ -104,8 +104,8 @@ export function markdownFormatting(): Extension {
       })),
     ),
     formattingTooltip,
-    EditorView.baseTheme({
-      ".cm-tooltip:has(.markdown-formatting)": {
+    EditorView.theme({
+      ".cm-tooltip.markdown-formatting": {
         background: "var(--popover)",
         color: "var(--popover-foreground)",
         border: "1px solid var(--border)",
