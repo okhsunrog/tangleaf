@@ -1,10 +1,20 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, Prec, StateEffect, type Extension } from "@codemirror/state";
+import {
+  Annotation,
+  EditorState,
+  Prec,
+  StateEffect,
+  Transaction,
+  type Extension,
+} from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { markdownFormatting } from "@/features/editor/markdown-formatting";
+import { minimalExternalDocumentChange } from "@/features/editor/minimal-document-change";
+
+const externalUpdate = Annotation.define<boolean>();
 import {
   replaceEditorRange,
   type BlockEditKeyEvent,
@@ -178,6 +188,8 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       ),
       EditorView.updateListener.of((update) => {
         if (!update.docChanged && !update.selectionSet) return;
+        if (update.transactions.some((transaction) => transaction.annotation(externalUpdate)))
+          return;
         callbacksRef.current.onChange(
           update.state.doc.toString(),
           update.state.selection.main.from,
@@ -213,6 +225,17 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       view.destroy();
     };
   }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || view.composing || view.state.doc.toString() === initial) return;
+    const changes = minimalExternalDocumentChange(view.state.doc.toString(), initial);
+    view.dispatch({
+      changes,
+      selection: view.state.selection.map(changes),
+      annotations: [externalUpdate.of(true), Transaction.addToHistory.of(false)],
+    });
+  }, [initial]);
 
   return <div ref={mountRef} className="min-h-6 w-full" />;
 });

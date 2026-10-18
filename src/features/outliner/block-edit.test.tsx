@@ -109,3 +109,20 @@ it("uses the activation click for caret placement instead of jumping to the end"
   expect(position).toHaveBeenCalledWith({ x: 42, y: 80 });
   expect(view().state.selection.main.anchor).toBe(2);
 });
+
+it("updates an acknowledged block without replacing its editor or losing focus", async () => {
+  const { root, view } = mount();
+  const onChange = vi.fn();
+  const render = (initial: string) => (
+    <BlockEdit initial={initial} autoFocus onChange={onChange} onBlur={() => {}} />
+  );
+  await act(async () => root.render(render("First")));
+  const original = view();
+  act(() => original.dispatch({ selection: { anchor: 3 } }));
+  onChange.mockClear();
+  await act(async () => root.render(render("New First")));
+  expect(view()).toBe(original);
+  expect(view().hasFocus).toBe(true);
+  expect(view().state.selection.main.anchor).toBe(7);
+  expect(onChange).not.toHaveBeenCalled();
+});

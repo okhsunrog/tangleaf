@@ -59,7 +59,6 @@ import {
 } from "./autocomplete-menu";
 import { queryKeys } from "@/lib/query";
 import { cn } from "@/lib/utils";
-import { reconcileRemoteDraft } from "./editor-sync";
 import { useBlockDraftOverlay, usePageSessionRegistry } from "@/features/pages/page-session";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 import {
@@ -159,7 +158,6 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
       setDraftLen(draft.length);
       return;
     }
-    const decision = reconcileRemoteDraft(previous.markdown, draftRef.current, block.markdown);
     blockRef.current = block;
     sessions.acceptBlockSnapshot(block.pageUuid, block.uuid, {
       text: block.markdown,
@@ -174,7 +172,6 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     }
     draftRef.current = block.markdown;
     setDraftLen(block.markdown.length);
-    if (decision === "accept_remote" && editing) store.setEditing(null);
   }, [block, editing, sessions, store]);
 
   useEffect(() => {
@@ -821,7 +818,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
                 stateCache={store.editorStates}
                 blockUuid={block.uuid}
                 initialPointer={initialPointer.current}
-                initial={effectiveMarkdown}
+                initial={pendingSplit.current?.after ?? effectiveMarkdown}
                 onChange={onDraftChange}
                 onBlur={() => {
                   initialPointer.current = null;

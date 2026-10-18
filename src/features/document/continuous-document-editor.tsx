@@ -1,14 +1,9 @@
+import { minimalExternalDocumentChange } from "@/features/editor/minimal-document-change";
+export { minimalExternalDocumentChange } from "@/features/editor/minimal-document-change";
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import {
-  Annotation,
-  ChangeSet,
-  Compartment,
-  EditorState,
-  Prec,
-  Transaction,
-} from "@codemirror/state";
+import { Annotation, Compartment, EditorState, Prec, Transaction } from "@codemirror/state";
 import { drawSelection, EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { useResolvedDisplay } from "@/app/appearance";
@@ -39,30 +34,6 @@ type Props = {
 
 const externalDocumentUpdate = Annotation.define<boolean>();
 const MODE_RETRY_DELAYS_MS = [0, 16, 32, 64, 128, 256] as const;
-
-export function minimalExternalDocumentChange(previous: string, next: string): ChangeSet {
-  let prefix = 0;
-  const sharedLength = Math.min(previous.length, next.length);
-  while (prefix < sharedLength && previous[prefix] === next[prefix]) prefix += 1;
-
-  let suffix = 0;
-  while (
-    suffix < previous.length - prefix &&
-    suffix < next.length - prefix &&
-    previous[previous.length - suffix - 1] === next[next.length - suffix - 1]
-  ) {
-    suffix += 1;
-  }
-
-  return ChangeSet.of(
-    {
-      from: prefix,
-      to: previous.length - suffix,
-      insert: next.slice(prefix, next.length - suffix),
-    },
-    previous.length,
-  );
-}
 
 const documentEditorTheme = EditorView.theme({
   "&": {
