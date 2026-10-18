@@ -1,5 +1,6 @@
-import { completeEveryNote } from "@/features/handwriting/handwriting-session";
+import { completeEveryNote, flushAllSessions } from "@/features/handwriting/handwriting-session";
 import type { PageSessionRegistry } from "@/features/pages/page-session";
+import { completeAllHandwriting } from "@/lib/api";
 
 /**
  * Process-level drain of work that is queued but not yet stored.
@@ -12,6 +13,18 @@ import type { PageSessionRegistry } from "@/features/pages/page-session";
  */
 let sessions: PageSessionRegistry | null = null;
 let listening = false;
+
+/** Explicit data tools must refuse to proceed while any primary draft is unsaved. */
+export async function flushWorkspaceDrafts(pageSessions: PageSessionRegistry): Promise<void> {
+  const results = await Promise.allSettled([pageSessions.flushAll(), flushAllSessions()]);
+  if (results.some((result) => result.status === "rejected" || result.value === false)) {
+    throw new Error(
+      "Some notes have unsaved changes. Return to them and resolve saving before continuing.",
+    );
+  }
+  // Unlike best-effort pagehide completion, this failure must reach the user.
+  await completeAllHandwriting();
+}
 
 export function registerLifecycleFlush(pageSessions: PageSessionRegistry): void {
   sessions = pageSessions;

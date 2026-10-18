@@ -18,6 +18,44 @@ const document = (buffer: string, revision: string) => {
 };
 
 describe("PageSessionRegistry", () => {
+  it("reports failed flushes while still draining every registered owner", async () => {
+    const registry = new PageSessionRegistry();
+    const saved = vi.fn().mockResolvedValue(true);
+    registry.registerFlush(() => {
+      throw new Error("save failed");
+    });
+    registry.registerFlush(saved);
+    registry.registerFlush(async () => false);
+
+    expect(await registry.flushAll()).toBe(false);
+    expect(saved).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a retained draft with no save owner and requires the exact acknowledgement", async () => {
+    const registry = new PageSessionRegistry();
+    registry.editBlock("page", "block", "mine", persisted("base", "r1"));
+    expect(await registry.flushAll()).toBe(false);
+    registry.registerFlush(async () => {
+      const attempt = registry.beginBlockSave("page", "block")!;
+      registry.acknowledgeBlockSave("page", "block", attempt, persisted("mine", "r2"));
+      return true;
+    });
+    expect(await registry.flushAll()).toBe(true);
+  });
+
+  it("does not report a successful drain when newer text remains after acknowledgement", async () => {
+    const registry = new PageSessionRegistry();
+    registry.editDocument("page", "First", document("Base", "d1"));
+    registry.registerFlush(async () => {
+      const attempt = registry.beginDocumentSave("page")!;
+      registry.editDocument("page", "New typing", document("Base", "d1"));
+      registry.acknowledgeDocumentSave("page", attempt, document("First", "d2"));
+      return true;
+    });
+    expect(await registry.flushAll()).toBe(false);
+    expect(registry.getSnapshot("page").document?.draft).toBe("New typing");
+  });
+
   it("grants one idempotent writer lease per page and ignores stale releases", () => {
     const registry = new PageSessionRegistry();
     const first = registry.createWriterLeaseToken();

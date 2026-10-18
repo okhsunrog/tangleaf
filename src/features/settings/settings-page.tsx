@@ -40,6 +40,8 @@ import { toSettingsUpdate } from "./settings-update";
 import { ConfigurationTransferSection } from "./configuration-transfer-section";
 import { EinkWiseField } from "./einkwise-field";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
+import { flushWorkspaceDrafts } from "@/app/lifecycle-flush";
+import { usePageSessionRegistry } from "@/features/pages/page-session";
 
 type Props = {
   onBack: () => void;
@@ -58,6 +60,7 @@ export function SettingsPage({
   const [category, setCategory] = useState("appearance");
   const formRef = useRef<HTMLFormElement>(null);
   const confirm = useConfirmation();
+  const pageSessions = usePageSessionRegistry();
   const { theme, setTheme } = useTheme();
   const {
     palette,
@@ -148,6 +151,7 @@ export function SettingsPage({
     setBusy(true);
     setError("");
     try {
+      await flushWorkspaceDrafts(pageSessions);
       const path =
         action === "export"
           ? await exportData()

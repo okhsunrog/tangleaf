@@ -118,8 +118,28 @@ export class PageSessionRegistry {
    * debounced autosave has no chance to fire, and one failing draft must not
    * stop the others from being stored.
    */
-  async flushAll(): Promise<void> {
-    await Promise.allSettled([...this.#flushes].map((flush) => flush()));
+  async flushAll(): Promise<boolean> {
+    const results = await Promise.allSettled(
+      [...this.#flushes].map((flush) => {
+        try {
+          return Promise.resolve(flush());
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }),
+    );
+    if (results.some((result) => result.status === "rejected" || result.value === false)) {
+      return false;
+    }
+    // A view can unmount after a failed save, leaving a retained draft without
+    // a registered owner. Success requires acknowledgements, not just settled
+    // flush callbacks, before backup or workspace replacement may continue.
+    return [...this.#sessions.values()].every(
+      ({ snapshot }) =>
+        snapshot.title === null &&
+        snapshot.document === null &&
+        Object.keys(snapshot.blocks).length === 0,
+    );
   }
 
   createWriterLeaseToken(): WriterLeaseToken {
