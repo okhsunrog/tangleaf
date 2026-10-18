@@ -501,7 +501,7 @@ export type DocumentUnitDraft = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "mutation_committed"; commit: CommitNotice } | { kind: "pages_changed"; page_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "mutation_committed"; commit: CommitNotice } | { kind: "pages_changed"; page_uuids: string[] } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" };
 
 export type DomainEventMessage = DomainEvent;
 

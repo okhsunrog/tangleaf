@@ -146,9 +146,6 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         ...event.page_uuids.map((uuid) => invalidate(queryKeys.handwritingStatus(uuid))),
       ]);
       return;
-    case "history_changed":
-      await invalidate(queryKeys.history);
-      return;
     case "settings_changed":
       await invalidate(queryKeys.settings);
       return;
@@ -162,8 +159,6 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
     case "server_ai_changed":
       await invalidate(queryKeys.serverAi);
       return;
-    case "workspace_changed":
-      await invalidate(queryKeys.root);
   }
 }
 

@@ -421,15 +421,29 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryData(queryKeys.block("deleted"))).toBeUndefined();
   });
 
-  it("invalidates the complete backend cache after a workspace replacement", async () => {
+  it("refreshes the complete active backend cache after a committed workspace replacement", async () => {
     const client = new QueryClient();
-    client.setQueryData(queryKeys.settings, { windowDecorationMode: "native" });
-    client.setQueryData(queryKeys.history, [1, 0]);
-
-    await applyDomainEvent(client, { kind: "workspace_changed" });
-
-    expect(client.getQueryState(queryKeys.settings)?.isInvalidated).toBe(true);
-    expect(client.getQueryState(queryKeys.history)?.isInvalidated).toBe(true);
+    const keys = [queryKeys.settings, queryKeys.history, queryKeys.backlinks("old-page")];
+    const observers = keys.map((queryKey) => {
+      client.setQueryData(queryKey, "old workspace");
+      return new QueryObserver(client, {
+        queryKey,
+        queryFn: async () => "replacement workspace",
+        staleTime: Infinity,
+      });
+    });
+    const unsubscribe = observers.map((observer) => observer.subscribe(() => undefined));
+    client.setQueryData(["layout"], { sidebar: true });
+    try {
+      await applyDomainEvent(client, committed({}, true));
+      for (const observer of observers) {
+        expect(observer.getCurrentResult().data).toBe("replacement workspace");
+      }
+      expect(client.getQueryData(["layout"])).toEqual({ sidebar: true });
+    } finally {
+      for (const dispose of unsubscribe) dispose();
+      client.clear();
+    }
   });
 
   it("invalidates server AI state after a remote setting mutation", async () => {

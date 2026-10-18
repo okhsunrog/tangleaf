@@ -341,6 +341,12 @@
   Регрессии проверяют одновременную WAL запись, порядок ссылок/journal/alias/block refs,
   отсутствующего owner и границы IN-пакетов при 1k/10k несвязанных блоков.
 
+- После переноса bulk-путей удалены больше нигде не создаваемые `WorkspaceChanged` и
+  `HistoryChanged`: Rust union, bindings и frontend branches. Замена workspace и изменения
+  истории проверяются через фактические commit notices, включая active refresh и stale-response
+  guards. Прошли 61 frontend test, 47 Tauri lib tests (1 ignored), Clippy с `-D warnings`,
+  scoped format/lint/type check.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

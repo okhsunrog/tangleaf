@@ -123,11 +123,9 @@ pub enum DomainEvent {
     PagesChanged {
         page_uuids: Vec<uuid::Uuid>,
     },
-    HistoryChanged,
     SettingsChanged,
     SyncStatusChanged,
     ServerAiChanged,
-    WorkspaceChanged,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type, tauri_specta::Event)]
