@@ -199,6 +199,7 @@ pub async fn set_block_content_if_revision(
 }
 
 #[doc(hidden)]
+#[tracing::instrument(level = "debug", skip_all, fields(markdown_bytes = content.markdown.len()))]
 pub async fn set_block_content_if_revision_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
@@ -207,6 +208,7 @@ pub async fn set_block_content_if_revision_with_ops(
 ) -> Result<AppliedMutation<(Block, bool)>> {
     conn.call_domain(
         move |database| -> crate::CoreResult<AppliedMutation<(Block, bool)>> {
+            let started = std::time::Instant::now();
             let transaction = database.transaction()?;
             let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
             let block = transaction
@@ -214,7 +216,18 @@ pub async fn set_block_content_if_revision_with_ops(
                 .optional()?
                 .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
             if block.markdown == content.markdown {
+                let planning_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                let commit_started = std::time::Instant::now();
                 transaction.commit()?;
+                tracing::debug!(
+                    changed = false,
+                    planning_ms,
+                    apply_ms = 0.0,
+                    result_ms = 0.0,
+                    commit_ms = commit_started.elapsed().as_secs_f64() * 1_000.0,
+                    transaction_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                    "content transaction completed"
+                );
                 return Ok(AppliedMutation {
                     value: (block, false),
                     operations: Vec::new(),
@@ -231,9 +244,24 @@ pub async fn set_block_content_if_revision_with_ops(
                 uuid,
                 markdown: content.markdown,
             })];
+            let planning_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let apply_started = std::time::Instant::now();
             operation::apply_local_kinds_in_transaction(&transaction, operations.clone())?;
+            let apply_ms = apply_started.elapsed().as_secs_f64() * 1_000.0;
+            let result_started = std::time::Instant::now();
             let block = transaction.query_row(&sql, [uuid], row_to_block)?;
+            let result_ms = result_started.elapsed().as_secs_f64() * 1_000.0;
+            let commit_started = std::time::Instant::now();
             transaction.commit()?;
+            tracing::debug!(
+                changed = true,
+                planning_ms,
+                apply_ms,
+                result_ms,
+                commit_ms = commit_started.elapsed().as_secs_f64() * 1_000.0,
+                transaction_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                "content transaction completed"
+            );
             Ok(AppliedMutation {
                 value: (block, graph_changed),
                 operations,
