@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send + 'static>;
 
@@ -106,33 +107,31 @@ impl Connection {
         E: Into<anyhow::Error> + Send + 'static,
     {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // Capture at submission, when this future is polled, rather than when
+        // the handle or future was created. The worker thread has its own
+        // tracing context, including for SQLite's statement-profile callback.
+        let span = tracing::Span::current();
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let queued_at = Instant::now();
         self.worker
             .sender
             .send(WorkerMessage::Call(Box::new(move |connection| {
-                let started = std::time::Instant::now();
-                // One bad job must not unwind the worker thread: the connection
-                // is shared by the whole process, and losing it would fail every
-                // later call for the rest of the run. A panic mid-transaction
-                // still rolls back as the transaction is dropped.
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    function(connection).map_err(Into::into)
-                }))
-                .unwrap_or_else(|payload| {
-                    Err(anyhow!("SQLite job panicked: {}", panic_message(&*payload)))
+                let started = Instant::now();
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let _entered = span.enter();
+                    // One bad job must not unwind the worker thread. A panic
+                    // mid-transaction still rolls back when the transaction is
+                    // dropped. Dropping the receiving future does not cancel
+                    // an accepted job or skip its diagnostic events.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        function(connection).map_err(Into::into)
+                    }))
+                    .unwrap_or_else(|payload| {
+                        Err(anyhow!("SQLite job panicked: {}", panic_message(&*payload)))
+                    });
+                    CallTimings::new(queued_at, started, Instant::now()).report(caller);
+                    let _ = result_tx.send(outcome);
                 });
-                // There is one connection for the whole process, so a slow job is not slow for
-                // its own caller — it is slow for everything, and from the outside that looks
-                // like the app hanging rather than like a query taking its time. Name the caller
-                // so the log points at the command rather than at this file.
-                let elapsed = started.elapsed();
-                if elapsed >= SLOW_CALL {
-                    tracing::warn!(
-                        caller = %caller,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        "slow database call blocked the connection"
-                    );
-                }
-                let _ = result_tx.send(outcome);
             })))
             .map_err(|_| anyhow!("SQLite connection worker has stopped"))?;
         result_rx
@@ -141,14 +140,67 @@ impl Connection {
     }
 }
 
-/// A call that holds the single connection for this long is reported. Chosen to be quiet in
-/// normal use — the slowest ordinary operations here are tens of milliseconds — while still
-/// catching anything a person would perceive as a stall.
-const SLOW_CALL: std::time::Duration = std::time::Duration::from_millis(500);
+/// Report calls that either wait in the worker queue or occupy the connection
+/// for this long. These are separate causes, even if both affect the same call.
+const SLOW_CALL: Duration = Duration::from_millis(500);
+
+struct CallTimings {
+    queue: Duration,
+    execution: Duration,
+    worker_total: Duration,
+}
+
+impl CallTimings {
+    fn new(queued_at: Instant, started: Instant, finished: Instant) -> Self {
+        Self {
+            queue: started.duration_since(queued_at),
+            execution: finished.duration_since(started),
+            worker_total: finished.duration_since(queued_at),
+        }
+    }
+
+    fn report(&self, caller: &'static std::panic::Location<'static>) {
+        // Queue time includes channel submission and worker scheduling, not a
+        // SQLite lock wait. Execution includes the closure, panic handling and
+        // tracing-context entry; any SQLite busy/lock wait happens here. Total
+        // ends before logging/result delivery and excludes the awaiting Tokio
+        // task's scheduling delay, IPC and UI work.
+        let queue_ms = self.queue.as_secs_f64() * 1_000.0;
+        let execution_ms = self.execution.as_secs_f64() * 1_000.0;
+        let worker_total_ms = self.worker_total.as_secs_f64() * 1_000.0;
+        tracing::debug!(
+            caller = %caller,
+            queue_ms,
+            execution_ms,
+            worker_total_ms,
+            "database call completed"
+        );
+        if self.queue >= SLOW_CALL {
+            tracing::warn!(
+                caller = %caller,
+                queue_ms,
+                execution_ms,
+                worker_total_ms,
+                "database call waited in worker queue"
+            );
+        }
+        if self.execution >= SLOW_CALL {
+            tracing::warn!(
+                caller = %caller,
+                queue_ms,
+                execution_ms,
+                worker_total_ms,
+                // Preserve the existing slow-call field's execution meaning.
+                elapsed_ms = self.execution.as_millis() as u64,
+                "slow database call blocked the connection"
+            );
+        }
+    }
+}
 
 /// Individual statements are far smaller than whole calls; this catches the one statement that
 /// explains a slow call, without logging a line per row in a loop of fast ones.
-const SLOW_STATEMENT: std::time::Duration = std::time::Duration::from_millis(200);
+const SLOW_STATEMENT: Duration = Duration::from_millis(200);
 
 /// Log the SQL of any single statement that runs long. `profile` reports each statement once it
 /// finishes, with the text SQLite actually executed, so a slow call can be attributed to the
@@ -160,16 +212,21 @@ fn install_statement_profile(connection: &mut rusqlite::Connection) {
             let rusqlite::trace::TraceEvent::Profile(statement, elapsed) = event else {
                 return;
             };
-            if elapsed < SLOW_STATEMENT {
-                return;
+            if elapsed >= SLOW_STATEMENT {
+                report_statement_profile(&statement.sql(), elapsed);
             }
-            let sql = statement.sql();
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis() as u64,
-                sql = %sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>(),
-                "slow SQL statement"
-            );
         }),
+    );
+}
+
+fn report_statement_profile(sql: &str, elapsed: Duration) {
+    if elapsed < SLOW_STATEMENT {
+        return;
+    }
+    tracing::warn!(
+        elapsed_ms = elapsed.as_millis() as u64,
+        sql = %sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>(),
+        "slow SQL statement"
     );
 }
 
@@ -184,75 +241,330 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::fmt::Debug;
+    use std::task::{Poll, Waker};
+    use tracing::Instrument;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::registry::LookupSpan;
 
     #[derive(Debug, thiserror::Error)]
     #[error("typed domain failure")]
     struct DomainFailure;
 
-    /// Captures the fields of every `warn` event, so a test can assert what the log would say.
-    #[derive(Clone, Default)]
-    struct CapturedWarnings(Arc<std::sync::Mutex<Vec<String>>>);
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        fields: BTreeMap<String, String>,
+        spans: Vec<String>,
+    }
 
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturedWarnings {
+    impl CapturedEvent {
+        fn message_contains(&self, message: &str) -> bool {
+            self.fields
+                .get("message")
+                .is_some_and(|value| value.contains(message))
+        }
+
+        fn milliseconds(&self, name: &str) -> f64 {
+            self.fields[name].parse().expect("numeric timing field")
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl CapturedEvents {
+        fn dispatch(&self) -> tracing::Dispatch {
+            // tracing-core's single-dispatch fast path registers a new
+            // callsite against the current thread's dispatcher. Other tests
+            // can first hit that callsite on an untraced worker while this
+            // scoped subscriber exists elsewhere, caching Interest::never.
+            // Keep a second registered dispatcher alive so interest is
+            // aggregated across dispatchers. It is never installed as a
+            // thread-local or global default and receives no events.
+            static INTEREST_ANCHOR: std::sync::OnceLock<tracing::Dispatch> =
+                std::sync::OnceLock::new();
+            INTEREST_ANCHOR.get_or_init(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+            });
+            tracing::Dispatch::new(tracing_subscriber::registry().with(self.clone()))
+        }
+
+        fn snapshot(&self) -> Vec<CapturedEvent> {
+            self.0.lock().expect("events").clone()
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for CapturedEvents
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
+            context: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if *event.metadata().level() != tracing::Level::WARN {
-                return;
-            }
-            struct Collect(String);
+            struct Collect(BTreeMap<String, String>);
             impl tracing::field::Visit for Collect {
                 fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
-                    self.0.push_str(&format!("{}={value:?} ", field.name()));
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
                 }
             }
-            let mut collected = Collect(String::new());
+            let mut collected = Collect(BTreeMap::new());
             event.record(&mut collected);
-            self.0.lock().expect("warnings").push(collected.0);
+            let spans = context
+                .event_scope(event)
+                .map(|scope| {
+                    scope
+                        .from_root()
+                        .map(|span| span.name().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.0.lock().expect("events").push(CapturedEvent {
+                level: *event.metadata().level(),
+                fields: collected.0,
+                spans,
+            });
         }
     }
 
     #[tokio::test]
-    async fn a_slow_call_names_the_caller_and_the_statement() {
-        use tracing_subscriber::layer::SubscriberExt;
-
-        // The warnings are emitted on the worker thread, so a thread-local subscriber would see
-        // nothing; this is the only test in the crate that installs a global one.
-        let warnings = CapturedWarnings::default();
-        let subscriber = tracing_subscriber::registry().with(warnings.clone());
-        tracing::subscriber::set_global_default(subscriber).expect("install subscriber");
-
+    async fn scoped_dispatch_and_command_span_follow_each_job_without_leaking() {
         let connection = Connection::open_in_memory().await.expect("open");
+        let first = CapturedEvents::default();
+        let first_dispatch = first.dispatch();
+        let span = tracing::dispatcher::with_default(&first_dispatch, || {
+            tracing::info_span!("editing_command")
+        });
         connection
             .call(|database| {
-                // Long enough to trip both thresholds, and expressed in SQL so the statement
-                // profile has something to report.
-                database.execute_batch(
-                    "CREATE TABLE slow AS
-                       WITH RECURSIVE counter(n) AS (
-                         SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 1500000
-                       )
-                       SELECT n FROM counter",
-                )
+                database.execute_batch("CREATE TABLE values_table (value INTEGER NOT NULL)")?;
+                // Exercise the same reporter used by SQLite's profile callback
+                // without depending on a particular machine's query speed.
+                report_statement_profile("SELECT   1", SLOW_STATEMENT);
+                Ok(())
             })
+            .instrument(span)
+            .with_subscriber(first_dispatch)
             .await
-            .expect("slow call");
+            .expect("first scoped call");
 
-        let warnings = warnings.0.lock().expect("warnings").clone();
+        let first_events = first.snapshot();
         assert!(
-            warnings
+            first_events
                 .iter()
-                .any(|line| line.contains("slow database call") && line.contains("sqlite.rs")),
-            "expected a slow-call warning naming this file, got {warnings:?}"
+                .all(|event| event.spans == ["editing_command"])
+        );
+        let profile = first_events
+            .iter()
+            .find(|event| {
+                event.message_contains("slow SQL statement")
+                    && event.fields.get("sql").is_some_and(|sql| sql == "SELECT 1")
+            })
+            .expect("profile event on the submitting subscriber");
+        assert_eq!(profile.fields["sql"], "SELECT 1");
+        let completed = first_events
+            .iter()
+            .find(|event| event.message_contains("database call completed"))
+            .expect("completed event");
+        assert!(completed.fields["caller"].contains("sqlite.rs"));
+
+        let second = CapturedEvents::default();
+        connection
+            .call(|_| {
+                tracing::info!("second subscriber's call");
+                Ok(())
+            })
+            .with_subscriber(second.dispatch())
+            .await
+            .expect("second scoped call");
+        assert_eq!(first.snapshot().len(), first_events.len());
+        let second_events = second.snapshot();
+        assert!(
+            second_events
+                .iter()
+                .any(|event| event.message_contains("second subscriber's call"))
         );
         assert!(
-            warnings
+            second_events
                 .iter()
-                .any(|line| line.contains("slow SQL statement") && line.contains("RECURSIVE")),
-            "expected a slow-statement warning carrying the SQL, got {warnings:?}"
+                .any(|event| event.message_contains("database call completed"))
+        );
+        assert!(second_events.iter().all(|event| event.spans.is_empty()));
+
+        connection
+            .call(|_| {
+                tracing::info!("unscoped call");
+                Ok(())
+            })
+            .await
+            .expect("unscoped call");
+        assert_eq!(first.snapshot().len(), first_events.len());
+        assert_eq!(second.snapshot().len(), second_events.len());
+    }
+
+    #[test]
+    fn timings_separate_queue_and_execution_and_warn_independently() {
+        let events = CapturedEvents::default();
+        let dispatch = events.dispatch();
+        let base = Instant::now();
+        let cases = [
+            (Duration::from_millis(70), Duration::from_millis(20)),
+            (SLOW_CALL, Duration::from_millis(10)),
+            (Duration::from_millis(10), SLOW_CALL),
+            (SLOW_CALL, SLOW_CALL),
+        ];
+        for (queue, execution) in cases {
+            let timings = CallTimings::new(base, base + queue, base + queue + execution);
+            assert_eq!(timings.queue, queue);
+            assert_eq!(timings.execution, execution);
+            assert_eq!(timings.worker_total, queue + execution);
+            tracing::dispatcher::with_default(&dispatch, || {
+                timings.report(std::panic::Location::caller());
+            });
+        }
+        let events = events.snapshot();
+        let completions: Vec<_> = events
+            .iter()
+            .filter(|event| event.level == tracing::Level::DEBUG)
+            .collect();
+        assert_eq!(completions.len(), cases.len());
+        for (event, (queue, execution)) in completions.iter().zip(cases) {
+            assert_eq!(
+                event.milliseconds("queue_ms"),
+                queue.as_secs_f64() * 1_000.0
+            );
+            assert_eq!(
+                event.milliseconds("execution_ms"),
+                execution.as_secs_f64() * 1_000.0
+            );
+            assert_eq!(
+                event.milliseconds("worker_total_ms"),
+                (queue + execution).as_secs_f64() * 1_000.0
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message_contains("waited in worker queue"))
+                .count(),
+            2
+        );
+        let slow_calls: Vec<_> = events
+            .iter()
+            .filter(|event| event.message_contains("slow database call"))
+            .collect();
+        assert_eq!(slow_calls.len(), 2);
+        assert!(
+            slow_calls
+                .iter()
+                .all(|event| event.fields["elapsed_ms"] == "500")
+        );
+    }
+
+    #[test]
+    fn statement_profile_reports_only_statements_at_the_threshold() {
+        let events = CapturedEvents::default();
+        tracing::dispatcher::with_default(&events.dispatch(), || {
+            report_statement_profile("SELECT 0", SLOW_STATEMENT - Duration::from_nanos(1));
+            report_statement_profile("SELECT\n  1", SLOW_STATEMENT);
+        });
+        let events = events.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fields["sql"], "SELECT 1");
+        assert_eq!(events[0].fields["elapsed_ms"], "200");
+    }
+
+    #[tokio::test]
+    async fn waiting_in_the_worker_queue_is_measured_separately() {
+        let connection = Connection::open_in_memory().await.expect("open");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut blocker = Box::pin(connection.call(move |_| {
+            entered_tx.send(()).expect("signal worker entry");
+            release_rx.recv().expect("release worker");
+            Ok(())
+        }));
+        let mut context = std::task::Context::from_waker(Waker::noop());
+        assert!(matches!(blocker.as_mut().poll(&mut context), Poll::Pending));
+        entered_rx.recv().expect("blocker owns connection");
+
+        let events = CapturedEvents::default();
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let mut queued = Box::pin(
+            connection
+                .call(move |_| {
+                    ran_tx.send(()).expect("signal queued job");
+                    Ok(())
+                })
+                .with_subscriber(events.dispatch()),
+        );
+        assert!(matches!(queued.as_mut().poll(&mut context), Poll::Pending));
+        let queued_after = Instant::now();
+        assert_eq!(ran_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let released_before = Instant::now();
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocker finished");
+        queued.await.expect("queued job finished");
+        ran_rx.recv().expect("queued job ran");
+
+        let events = events.snapshot();
+        let completed = events
+            .iter()
+            .find(|event| event.message_contains("database call completed"))
+            .expect("queued call timing");
+        // This lower bound comes from the latches, with no minimum workload
+        // duration or upper bound tied to the speed of the test machine.
+        let known_wait_ms = released_before.duration_since(queued_after).as_secs_f64() * 1_000.0;
+        assert!(completed.milliseconds("queue_ms") >= known_wait_ms);
+        let total_parts =
+            completed.milliseconds("queue_ms") + completed.milliseconds("execution_ms");
+        assert!((completed.milliseconds("worker_total_ms") - total_parts).abs() < 0.000_001);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_queued_future_does_not_cancel_the_accepted_job() {
+        let connection = Connection::open_in_memory().await.expect("open");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut blocker = Box::pin(connection.call(move |database| {
+            database.execute_batch("CREATE TABLE values_table (value INTEGER NOT NULL)")?;
+            entered_tx.send(()).expect("signal worker entry");
+            release_rx.recv().expect("release worker");
+            Ok(())
+        }));
+        let mut context = std::task::Context::from_waker(Waker::noop());
+        assert!(matches!(blocker.as_mut().poll(&mut context), Poll::Pending));
+        entered_rx.recv().expect("blocker owns connection");
+
+        let events = CapturedEvents::default();
+        let mut queued = Box::pin(
+            connection
+                .call(|database| {
+                    database.execute("INSERT INTO values_table (value) VALUES (42)", [])?;
+                    Ok(())
+                })
+                .with_subscriber(events.dispatch()),
+        );
+        assert!(matches!(queued.as_mut().poll(&mut context), Poll::Pending));
+        drop(queued);
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocker finished");
+        let value: i64 = connection
+            .call(|database| {
+                database.query_row("SELECT value FROM values_table", [], |row| row.get(0))
+            })
+            .await
+            .expect("accepted write finished before the next call");
+        assert_eq!(value, 42);
+        assert!(
+            events
+                .snapshot()
+                .iter()
+                .any(|event| event.message_contains("database call completed"))
         );
     }
 

@@ -392,6 +392,7 @@ fn split_placement(
 }
 
 #[doc(hidden)]
+#[tracing::instrument(level = "debug", skip_all, fields(parts = parts.len()))]
 pub async fn split_block_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
@@ -403,6 +404,7 @@ pub async fn split_block_with_ops(
     }
     conn.call_domain(
         move |database| -> crate::CoreResult<AppliedMutation<(Vec<Block>, bool)>> {
+            let started = std::time::Instant::now();
             let transaction = database.transaction()?;
             let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
             let source = transaction
@@ -446,13 +448,31 @@ pub async fn split_block_with_ops(
             // the batch atomically, then reconcile once before capturing undo
             // guards; no operation here depends on an intermediate tree.
             let inverse = history::capture_inverse_kinds(&transaction, &kinds)?;
+            let planning = started.elapsed();
+            let applying = std::time::Instant::now();
             operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds.clone())?;
+            let apply = applying.elapsed();
+            let recording = std::time::Instant::now();
             history::record_action(&transaction, "split block", kinds.clone(), inverse)?;
+            let history = recording.elapsed();
+            let reading = std::time::Instant::now();
             let blocks = result_uuids
                 .into_iter()
                 .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            let result = reading.elapsed();
+            let committing = std::time::Instant::now();
             transaction.commit()?;
+            tracing::debug!(
+                operations = kinds.len(),
+                planning_ms = planning.as_secs_f64() * 1000.0,
+                apply_ms = apply.as_secs_f64() * 1000.0,
+                history_ms = history.as_secs_f64() * 1000.0,
+                result_ms = result.as_secs_f64() * 1000.0,
+                commit_ms = committing.elapsed().as_secs_f64() * 1000.0,
+                transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "split transaction completed"
+            );
             Ok(AppliedMutation {
                 value: (blocks, graph_changed),
                 operations: kinds,

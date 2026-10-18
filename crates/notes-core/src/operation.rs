@@ -1649,6 +1649,9 @@ impl ApplyEffects {
         transaction: &rusqlite::Transaction<'_>,
     ) -> rusqlite::Result<DeferredApplyStats> {
         self.ensure_structure_current(transaction)?;
+        let references_started = std::time::Instant::now();
+        let pending_aliases = self.pending_page_links.len();
+        let pending_blocks = self.pending_block_refs.len();
         // First update already-materialized references for changed aliases.
         // Pending Markdown is projected afterwards against the final alias
         // state, avoiding an alias-by-reference second pass during imports.
@@ -1660,6 +1663,13 @@ impl ApplyEffects {
             replace_block_refs(transaction, block_uuid, &markdown, timestamp)?;
             self.stats.reference_projections += 1;
         }
+        tracing::debug!(
+            pending_aliases,
+            pending_blocks,
+            references_ms = references_started.elapsed().as_secs_f64() * 1000.0,
+            structure_reconciliations = self.stats.structure_reconciliations,
+            "deferred projections completed"
+        );
         Ok(self.stats)
     }
 }
@@ -2411,6 +2421,7 @@ struct StructureRow {
 }
 
 fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let started = std::time::Instant::now();
     let existing = {
         let mut statement = transaction.prepare(
             "SELECT uuid, existence_hlc, page_uuid, parent_uuid, order_key, structure_hlc,
@@ -2439,6 +2450,7 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
             .query_map([], |row| row.get::<_, uuid::Uuid>(0))?
             .collect::<rusqlite::Result<HashSet<_>>>()?
     };
+    let mut intents_read = 0usize;
     let mut intents = {
         let mut statement = transaction.prepare(
             "SELECT block_uuid, page_uuid, parent_uuid, order_key, hlc
@@ -2456,6 +2468,7 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
                     },
                 ))
             })?
+            .inspect(|_| intents_read += 1)
             .filter_map(|result| match result {
                 Ok((uuid, intent))
                     if existing.contains_key(&uuid) && pages.contains(&intent.page_uuid) =>
@@ -2467,6 +2480,8 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
             })
             .collect::<rusqlite::Result<HashMap<_, _>>>()?
     };
+    let read = started.elapsed();
+    let resolving = std::time::Instant::now();
     let pages_by_block = intents
         .iter()
         .map(|(uuid, intent)| (*uuid, intent.page_uuid))
@@ -2482,6 +2497,9 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
         }
     }
     break_structure_cycles(&mut intents);
+    let resolve = resolving.elapsed();
+    let materializing = std::time::Instant::now();
+    let mut blocks_written = 0usize;
     for (uuid, intent) in intents {
         let updated_at = sql_hlc(intent.hlc.clone(), 4)?.timestamp_seconds();
         // Reconciliation walks every block in the workspace, but a structural operation changes
@@ -2512,7 +2530,19 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
                 updated_at,
             ],
         )?;
+        blocks_written += 1;
     }
+    tracing::debug!(
+        blocks_read = existing.len(),
+        pages_read = pages.len(),
+        intents_read,
+        blocks_written,
+        read_ms = read.as_secs_f64() * 1000.0,
+        resolve_ms = resolve.as_secs_f64() * 1000.0,
+        materialize_ms = materializing.elapsed().as_secs_f64() * 1000.0,
+        structure_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "structure projection completed"
+    );
     Ok(())
 }
 

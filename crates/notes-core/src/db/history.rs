@@ -790,8 +790,10 @@ pub async fn redo_history(conn: &Connection) -> Result<HistoryMoveResult> {
     move_history(conn, false).await
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(undo = undo))]
 async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult> {
     conn.call_domain(move |database| -> anyhow::Result<HistoryMoveResult> {
+        let started = std::time::Instant::now();
         let source = if undo { "history_undo" } else { "history_redo" };
         let target = if undo { "history_redo" } else { "history_undo" };
         let transaction = database.transaction()?;
@@ -827,6 +829,8 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
             return Ok(HistoryMoveResult::Skipped);
         }
         let kinds = selected.operations.clone();
+        let validation = started.elapsed();
+        let applying = std::time::Instant::now();
         if action == "split block" {
             // Split only inserts/removes siblings and changes their order keys.
             // Neither direction needs intermediate structure projections, just
@@ -835,6 +839,8 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
         } else {
             operation::apply_local_kinds_in_transaction(&transaction, kinds.clone())?;
         }
+        let apply = applying.elapsed();
+        let recording = std::time::Instant::now();
         let next_guards = capture_history_guards(&transaction, &kinds)?;
         if undo {
             forward.guards = next_guards;
@@ -861,7 +867,18 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
             ),
             rusqlite::params![action_uuid, action, forward_json, inverse_json],
         )?;
+        let history = recording.elapsed();
+        let committing = std::time::Instant::now();
         transaction.commit()?;
+        tracing::debug!(
+            operations = kinds.len(),
+            validation_ms = validation.as_secs_f64() * 1000.0,
+            apply_ms = apply.as_secs_f64() * 1000.0,
+            history_ms = history.as_secs_f64() * 1000.0,
+            commit_ms = committing.elapsed().as_secs_f64() * 1000.0,
+            transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "history transaction completed"
+        );
         Ok(HistoryMoveResult::Applied)
     })
     .await

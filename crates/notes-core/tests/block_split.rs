@@ -518,9 +518,25 @@ async fn large_paragraph_split_and_history_each_reconcile_once() {
 /// Set TANGLEAF_BENCH_DATABASE and TANGLEAF_BENCH_BLOCK, then run this ignored test.
 /// TANGLEAF_BENCH_PARTS may point to a JSON string array produced by the UI's
 /// paragraph splitter to exercise the long-block Split action instead of Enter.
+/// TANGLEAF_BENCH_ROUNDS defaults to 30 independent copies per synchronous policy.
+/// TANGLEAF_BENCH_SYNCHRONOUS accepts NORMAL, FULL, or BOTH (default); BOTH alternates
+/// policy order each round. The source should be a stable database snapshot.
+/// Only disposable copies receive the PRAGMA override. Reports median and p95;
+/// 30 samples are not sufficient to estimate a stable p99.
+/// RUST_LOG enables opt-in phase diagnostics for a separate profiling run;
+/// leave it unset for timing comparisons to avoid log-output overhead.
 #[tokio::test]
 #[ignore = "requires a database and source block; edits disposable copies only"]
 async fn benchmark_split_on_database_copy() {
+    if let Ok(filter) = std::env::var("RUST_LOG") {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_new(filter).expect("valid RUST_LOG filter"),
+            )
+            .with_test_writer()
+            .try_init()
+            .expect("install benchmark tracing subscriber");
+    }
     let source_path = std::env::var("TANGLEAF_BENCH_DATABASE").expect("database path");
     let uuid = std::env::var("TANGLEAF_BENCH_BLOCK")
         .expect("block UUID")
@@ -529,100 +545,171 @@ async fn benchmark_split_on_database_copy() {
     let paragraphs: Option<Vec<String>> = std::env::var("TANGLEAF_BENCH_PARTS")
         .ok()
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
+    let rounds = std::env::var("TANGLEAF_BENCH_ROUNDS")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("positive number of benchmark rounds")
+        })
+        .unwrap_or(30);
+    assert!(rounds > 0, "TANGLEAF_BENCH_ROUNDS must be positive");
+    let policies = match std::env::var("TANGLEAF_BENCH_SYNCHRONOUS")
+        .unwrap_or_else(|_| "BOTH".into())
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "NORMAL" => vec![("NORMAL", 1i64)],
+        "FULL" => vec![("FULL", 2)],
+        "BOTH" => vec![("NORMAL", 1), ("FULL", 2)],
+        _ => panic!("TANGLEAF_BENCH_SYNCHRONOUS must be NORMAL, FULL, or BOTH"),
+    };
     let source = rusqlite::Connection::open_with_flags(
         source_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    for round in 1..=3 {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("benchmark.db");
-        source
-            .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
-            .unwrap();
-        let connection = db::open(path).await.unwrap();
-        let block = db::get_block(&connection, uuid).await.unwrap().unwrap();
-        let original = block.markdown.clone();
-        let parts = paragraphs
-            .clone()
-            .unwrap_or_else(|| vec![original.clone(), String::new(), String::new()]);
-        let part_count = parts.len();
-        count_tree_scans(&connection, true).await;
-        let start = std::time::Instant::now();
-        let split = db::split_block_with_ops(
-            &connection,
-            uuid,
-            parts
+    let mut timings = Vec::with_capacity(rounds * policies.len());
+    for round in 1..=rounds {
+        let mut run_policies = policies.clone();
+        if round % 2 == 0 {
+            run_policies.reverse();
+        }
+        for (mode, expected_synchronous) in run_policies {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("benchmark.db");
+            source
+                .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                .unwrap();
+            let connection = db::open(path).await.unwrap();
+            let (synchronous, journal_mode) = connection
+                .call(move |database| {
+                    database.pragma_update(None, "synchronous", expected_synchronous)?;
+                    let synchronous = database
+                        .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?;
+                    let journal_mode =
+                        database.pragma_query_value(None, "journal_mode", |row| {
+                            row.get::<_, String>(0)
+                        })?;
+                    Ok((synchronous, journal_mode))
+                })
+                .await
+                .unwrap();
+            assert_eq!(synchronous, expected_synchronous);
+            assert!(journal_mode.eq_ignore_ascii_case("wal"));
+            let block = db::get_block(&connection, uuid).await.unwrap().unwrap();
+            let original = block.markdown.clone();
+            let parts = paragraphs
+                .clone()
+                .unwrap_or_else(|| vec![original.clone(), String::new(), String::new()]);
+            let part_count = parts.len();
+            let contents = parts
                 .iter()
                 .cloned()
                 .map(|markdown| BlockContent { markdown })
-                .collect(),
-            block.markdown_revision,
-        )
-        .await
-        .unwrap();
-        let elapsed = start.elapsed();
-        let scans = count_tree_scans(&connection, false).await;
-        println!(
-            "round={round} parts={part_count} source_bytes={} split_ms={:.2} operations={} tree_scans={scans}",
-            original.len(),
-            elapsed.as_secs_f64() * 1_000.0,
-            split.operations.len()
-        );
-        assert_eq!(
-            split
-                .value
-                .0
-                .iter()
-                .map(|block| &block.markdown)
-                .collect::<Vec<_>>(),
-            parts.iter().collect::<Vec<_>>()
-        );
-        assert!(
-            split
-                .value
-                .0
-                .windows(2)
-                .all(|pair| pair[0].order_key < pair[1].order_key)
-        );
-        let start = std::time::Instant::now();
-        assert_eq!(
-            db::undo_history(&connection).await.unwrap(),
-            db::HistoryMoveResult::Applied
-        );
-        let undo_ms = start.elapsed().as_secs_f64() * 1_000.0;
-        assert_eq!(
-            db::get_block(&connection, uuid)
-                .await
-                .unwrap()
-                .unwrap()
-                .markdown,
-            original
-        );
-        for added in split.value.0.iter().skip(1) {
-            assert!(
-                db::get_block(&connection, added.uuid)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
-        let start = std::time::Instant::now();
-        assert_eq!(
-            db::redo_history(&connection).await.unwrap(),
-            db::HistoryMoveResult::Applied
-        );
-        let redo_ms = start.elapsed().as_secs_f64() * 1_000.0;
-        for restored in &split.value.0 {
+                .collect();
+            // Keep the worker's normal PROFILE tracing intact during measurements.
+            // Deterministic tests above independently assert structural scan counts.
+            let start = std::time::Instant::now();
+            let split = db::split_block_with_ops(
+                &connection,
+                uuid,
+                contents,
+                block.markdown_revision.clone(),
+            )
+            .await
+            .unwrap();
+            let split_ms = start.elapsed().as_secs_f64() * 1_000.0;
             assert_eq!(
-                db::get_block(&connection, restored.uuid)
+                split
+                    .value
+                    .0
+                    .iter()
+                    .map(|block| &block.markdown)
+                    .collect::<Vec<_>>(),
+                parts.iter().collect::<Vec<_>>()
+            );
+            assert!(
+                split
+                    .value
+                    .0
+                    .windows(2)
+                    .all(|pair| pair[0].order_key < pair[1].order_key)
+            );
+            let start = std::time::Instant::now();
+            let undo = db::undo_history(&connection).await.unwrap();
+            let undo_ms = start.elapsed().as_secs_f64() * 1_000.0;
+            assert_eq!(undo, db::HistoryMoveResult::Applied);
+            let restored = db::get_block(&connection, uuid).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    &restored.markdown,
+                    &restored.order_key,
+                    restored.page_uuid,
+                    restored.parent_uuid
+                ),
+                (
+                    &original,
+                    &block.order_key,
+                    block.page_uuid,
+                    block.parent_uuid
+                ),
+            );
+            for added in split.value.0.iter().skip(1) {
+                assert!(
+                    db::get_block(&connection, added.uuid)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let start = std::time::Instant::now();
+            let redo = db::redo_history(&connection).await.unwrap();
+            let redo_ms = start.elapsed().as_secs_f64() * 1_000.0;
+            assert_eq!(redo, db::HistoryMoveResult::Applied);
+            for expected in &split.value.0 {
+                let restored = db::get_block(&connection, expected.uuid)
                     .await
                     .unwrap()
-                    .unwrap()
-                    .markdown,
-                restored.markdown
+                    .unwrap();
+                assert_eq!(
+                    (
+                        &restored.markdown,
+                        &restored.order_key,
+                        restored.page_uuid,
+                        restored.parent_uuid
+                    ),
+                    (
+                        &expected.markdown,
+                        &expected.order_key,
+                        expected.page_uuid,
+                        expected.parent_uuid
+                    ),
+                );
+            }
+            println!(
+                "mode={mode} synchronous={synchronous} journal_mode={journal_mode} round={round} parts={part_count} source_bytes={} operations={} split_ms={split_ms:.2} undo_ms={undo_ms:.2} redo_ms={redo_ms:.2}",
+                original.len(),
+                split.operations.len(),
+            );
+            timings.push((mode, [split_ms, undo_ms, redo_ms]));
+        }
+    }
+    for (mode, _) in policies {
+        for (index, action) in ["split", "undo", "redo"].into_iter().enumerate() {
+            let mut samples = timings
+                .iter()
+                .filter(|(sample_mode, _)| *sample_mode == mode)
+                .map(|(_, values)| values[index])
+                .collect::<Vec<_>>();
+            samples.sort_by(f64::total_cmp);
+            let count = samples.len();
+            let median = (samples[(count - 1) / 2] + samples[count / 2]) / 2.0;
+            // Nearest-rank percentile; retain individual samples for later analysis.
+            let p95 = samples[(count * 95).div_ceil(100) - 1];
+            println!(
+                "summary mode={mode} action={action} samples={count} median_ms={median:.2} p95_ms={p95:.2}",
             );
         }
-        println!("round={round} undo_ms={undo_ms:.2} redo_ms={redo_ms:.2}");
     }
 }
