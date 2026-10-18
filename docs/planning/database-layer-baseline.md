@@ -433,6 +433,44 @@ Production policy этим benchmark не менялась.
 `report.md`, `analysis.json`, `quiet-mixed-release.log`, `content-release.log`,
 `execution.json`, `provenance.json`, source manifests/patches и reproduction scripts.
 
+## Этап 5: AI-хранилище и постоянные настройки
+
+Отдельный release workload меняет только policy AI-файла; notes writer явно оставлен NORMAL
+в обоих случаях. По три свежие пары файлов и десять циклов на пару, всего 30 samples/policy;
+пауза после цикла — 400 мс, порядок N/F, F/N, N/F. В каждом fixture 32 блока и одна страница,
+33 односоставных документа, синтетические ортогональные векторы размерности 768, одна entity
+и по одному mention edge на источник. Модель, провайдер, сеть и пользовательская база не участвуют.
+
+| Фаза, мс                           | NORMAL p50 | NORMAL p95 | FULL p50 | FULL p95 |
+| ---------------------------------- | ---------- | ---------- | -------- | -------- |
+| Постоянные AI controls             | 0,172      | 1,414      | 1,774    | 5,246    |
+| Полный цикл, пять write commits    | 7,178      | 10,451     | 14,307   | 18,202   |
+| Запись двух vectors                | 0,638      | 0,946      | 2,159    | 2,943    |
+| Commit extraction                  | 0,245      | 0,557      | 1,469    | 2,007    |
+| Search/status/content verification | 2,073      | 3,003      | 2,089    | 2,905    |
+
+Цикл включает revision-safe правку исходного блока, изменение controls, reconcile embedding
+sources/jobs, запись двух embeddings (блок и page preview), reconcile и commit одного extraction
+job, поиск и точную проверку. Подготовка синтетических векторов не входит в write timer;
+весь цикл включает правку и проверочные чтения. FULL добавил 1,602 мс к медиане control
+и 7,129 мс к пятикоммитному циклу. Такой абсолютный расход приемлем для этого ограниченного
+сценария; стоимость ingestion большого корпуса, модели и Android им не установлена.
+
+Все шесть fixtures прошли close/reopen, quick_check и foreign_key_check. Остались 33 vectors,
+33 extraction states, одна entity, 33 mentions/edges, без queued/failed jobs. Последние
+controls отличаются от defaults и сохраняются при reopen с другими заданными defaults;
+результат vector search соответствует текущему тексту. Все шесть passive checkpoints:
+busy=0, checkpointed_frames=frames, 346–348 frames. Время последнего checkpoint не является
+полной стоимостью синхронизации. Этот запуск также не является power-loss испытанием.
+
+Хост/файловая система те же, что выше. Прямой запуск бинарника без параллельных builds/tests
+занял 25,42 с. HEAD `db9f9719d0cebeef4453e72a0cddf75fc571045a`, неизменны все 186 core/dependency
+source hashes. SHA-256 бинарника:
+`ec399183596a14fe689419f561ef5f2e1ec2dbc526dc98890a6683d881f46c38`.
+Несвязанный Tauri WIP сохранён отдельно в provenance. Артефакты:
+`stage5/measurements/current-ai/{report.md,analysis.json,ai-release.log,execution.json,provenance.json}`.
+Предыдущий бинарник до усиления проверки nondefault controls не использовался для таймингов.
+
 ## Воспроизведение
 
 Использовать стабильный snapshot и JSON-массив частей без публикации содержимого заметок:
