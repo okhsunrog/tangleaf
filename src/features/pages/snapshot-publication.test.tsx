@@ -252,9 +252,26 @@ describe.each(["block", "document"] as const)("%s editor snapshot publication", 
 
 function changed(client: QueryClient) {
   return applyDomainEvent(client, {
-    kind: "blocks_changed",
-    block_uuids: ["block"],
-    container_uuids: ["page"],
+    kind: "mutation_committed",
+    commit: {
+      commitVersion: 1,
+      changes: {
+        changedPages: [],
+        deletedPages: [],
+        affectedPages: ["page"],
+        blocks: [
+          {
+            uuid: "block",
+            before: { pageUuid: "page", parentUuid: null, orderKey: "a0" },
+            after: { pageUuid: "page", parentUuid: null, orderKey: "a0" },
+          },
+        ],
+        graphChangedContent: [],
+        attachmentOwners: [],
+        handwritingPages: [],
+        historyChanged: false,
+      },
+    },
   });
 }
 

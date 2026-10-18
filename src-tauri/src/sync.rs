@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use notes_blob::{BlobHash, BlobStore, BlobStoreError};
-use notes_core::{Connection, acknowledge_server_ops, apply_sequenced_batch, export_sync_snapshot};
+use notes_core::{Connection, export_sync_snapshot};
 use notes_protocol::{ClientMessage, SequencedOp, ServerMessage};
 use notes_sync::{HttpTransport, SyncClient, SyncSnapshot, SyncTransport, TransportError};
 use serde::Serialize;
@@ -668,25 +668,11 @@ async fn synchronize_http(
         http: transport,
         blob_store,
     };
-    let stats = SyncClient::new(connection.clone())
+    SyncClient::new(connection.clone())
+        .with_commit_observer(crate::commands::commit_publisher(app))
         .with_batch_size(SYNC_BATCH_SIZE)
         .sync_until_idle(&mut transport)
         .await?;
-    let operations = stats
-        .applied_operations
-        .iter()
-        .map(|applied| applied.operation.kind.clone())
-        .collect::<Vec<_>>();
-    let graph_changed = stats
-        .applied_operations
-        .iter()
-        .filter(|applied| applied.graph_changed)
-        .filter_map(|applied| match &applied.operation.kind {
-            notes_core::OpKind::BlockSetMarkdown(payload) => Some(payload.uuid),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    crate::commands::emit_events_for_ops(app, connection, &operations, &graph_changed).await;
     Ok(())
 }
 
@@ -702,13 +688,14 @@ async fn handle_server_message(
             apply_server_operations(app, connection, transport, blob_store, ops).await
         }
         ServerMessage::Ack { ops } => {
-            acknowledge_server_ops(
-                connection,
-                ops.into_iter()
-                    .map(|operation| (operation.envelope.op_id, operation.seq))
-                    .collect(),
-            )
-            .await?;
+            notes_core::store::NotesStore::new(connection.clone())
+                .with_commit_observer(crate::commands::commit_publisher(app))
+                .acknowledge_server_ops(
+                    ops.into_iter()
+                        .map(|operation| (operation.envelope.op_id, operation.seq))
+                        .collect(),
+                )
+                .await?;
             Ok(())
         }
         ServerMessage::Pong => Ok(()),
@@ -737,21 +724,10 @@ async fn apply_server_operations(
         .iter()
         .map(|operation| (operation.seq, operation.envelope.clone()))
         .collect();
-    let outcomes = apply_sequenced_batch(connection, sequenced).await?;
-    let mut applied = Vec::new();
-    let mut graph_changed = Vec::new();
-    for (operation, outcome) in operations.into_iter().zip(outcomes) {
-        if !outcome.applied {
-            continue;
-        }
-        if outcome.graph_changed
-            && let notes_core::OpKind::BlockSetMarkdown(payload) = &operation.envelope.kind
-        {
-            graph_changed.push(payload.uuid);
-        }
-        applied.push(operation.envelope.kind);
-    }
-    crate::commands::emit_events_for_ops(app, connection, &applied, &graph_changed).await;
+    notes_core::store::NotesStore::new(connection.clone())
+        .with_commit_observer(crate::commands::commit_publisher(app))
+        .apply_sequenced_batch(sequenced)
+        .await?;
     Ok(())
 }
 

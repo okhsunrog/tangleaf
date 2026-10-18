@@ -141,63 +141,6 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
         ...event.page_uuids.map((uuid) => invalidate(queryKeys.handwritingStatus(uuid))),
       ]);
       return;
-    case "blocks_changed":
-      await Promise.all([
-        invalidate(queryKeys.pageDocumentRoot),
-        invalidate(queryKeys.pageRenderRoot),
-        ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
-        ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
-      ]);
-      return;
-    case "pages_deleted": {
-      for (const uuid of event.page_uuids) {
-        queryClient.removeQueries({ queryKey: queryKeys.page(uuid), exact: true });
-        queryClient.removeQueries({ queryKey: queryKeys.pageDocument(uuid), exact: true });
-        queryClient.removeQueries({ queryKey: queryKeys.pageRender(uuid), exact: true });
-        queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
-      }
-      await Promise.all([
-        invalidate(queryKeys.pages),
-        invalidate(queryKeys.journals),
-        invalidate(queryKeys.attachmentsRoot),
-        invalidate(queryKeys.graphRoot),
-        invalidate(queryKeys.backlinksRoot),
-      ]);
-      return;
-    }
-    case "blocks_deleted": {
-      for (const uuid of event.block_uuids) {
-        queryClient.removeQueries({ queryKey: queryKeys.block(uuid), exact: true });
-        queryClient.removeQueries({ queryKey: queryKeys.children(uuid), exact: true });
-      }
-      await Promise.all([
-        invalidate(queryKeys.pageDocumentRoot),
-        invalidate(queryKeys.pageRenderRoot),
-        ...event.container_uuids.map((uuid) => invalidate(queryKeys.children(uuid))),
-        invalidate(queryKeys.attachmentsRoot),
-        invalidate(queryKeys.graphRoot),
-        invalidate(queryKeys.backlinksRoot),
-      ]);
-      return;
-    }
-    case "graph_changed":
-      await Promise.all([invalidate(queryKeys.graphRoot), invalidate(queryKeys.backlinksRoot)]);
-      return;
-    case "structure_changed":
-      await Promise.all([
-        invalidate(queryKeys.pageDocumentRoot),
-        invalidate(queryKeys.pageRenderRoot),
-        ...event.block_uuids.map((uuid) => invalidate(queryKeys.block(uuid))),
-        invalidate(queryKeys.childrenRoot),
-      ]);
-      return;
-    case "attachments_changed":
-      await Promise.all([
-        invalidate(queryKeys.attachmentImagesRoot),
-        invalidate(queryKeys.pageRenderRoot),
-        ...event.owner_uuids.map((uuid) => invalidate(queryKeys.attachments(uuid))),
-      ]);
-      return;
     case "history_changed":
       await invalidate(queryKeys.history);
       return;

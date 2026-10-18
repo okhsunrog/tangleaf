@@ -333,11 +333,18 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.pages, []);
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
 
-    await applyDomainEvent(client, {
-      kind: "blocks_changed",
-      block_uuids: ["block-a"],
-      container_uuids: ["parent-a"],
-    });
+    await applyDomainEvent(
+      client,
+      committed({
+        blocks: [
+          {
+            uuid: "block-a",
+            before: placement("page-a", "parent-a"),
+            after: placement("page-a", "parent-a"),
+          },
+        ],
+      }),
+    );
 
     expect(client.getQueryState(queryKeys.block("block-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.block("block-b"))?.isInvalidated).toBe(false);
@@ -352,11 +359,10 @@ describe("domain event query invalidation", () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.block("deleted"), { uuid: "deleted" });
 
-    await applyDomainEvent(client, {
-      kind: "blocks_deleted",
-      block_uuids: ["deleted"],
-      container_uuids: [],
-    });
+    await applyDomainEvent(
+      client,
+      committed({ blocks: [{ uuid: "deleted", before: placement("page-a"), after: null }] }),
+    );
 
     expect(client.getQueryData(queryKeys.block("deleted"))).toBeUndefined();
   });
@@ -388,10 +394,18 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.graph(null), { items: [], edges: [] });
     client.setQueryData(queryKeys.pageRender("page-a"), { document: { revision: "d1" } });
 
-    await applyDomainEvent(client, {
-      kind: "structure_changed",
-      block_uuids: ["moved"],
-    });
+    await applyDomainEvent(
+      client,
+      committed({
+        blocks: [
+          {
+            uuid: "moved",
+            before: placement("page-a", "parent-a"),
+            after: placement("page-a", "parent-b"),
+          },
+        ],
+      }),
+    );
 
     expect(client.getQueryState(queryKeys.children("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.children("parent-b"))?.isInvalidated).toBe(true);
@@ -406,10 +420,10 @@ describe("domain event query invalidation", () => {
     client.setQueryData(queryKeys.attachmentImages(["attachment-a"]), []);
     client.setQueryData(queryKeys.pageRender("page-a"), { document: { revision: "d1" } });
 
-    await applyDomainEvent(client, {
-      kind: "attachments_changed",
-      owner_uuids: ["parent-a"],
-    });
+    await applyDomainEvent(
+      client,
+      committed({ attachmentOwners: ["parent-a"], affectedPages: ["page-a"] }),
+    );
 
     expect(client.getQueryState(queryKeys.attachments("parent-a"))?.isInvalidated).toBe(true);
     expect(client.getQueryState(queryKeys.attachments("parent-b"))?.isInvalidated).toBe(false);
@@ -658,23 +672,22 @@ describe("backend snapshot freshness", () => {
     }
   });
 
-  it("restarts a first read for legacy block events too", async () => {
+  it("restarts an owner's first render read after committed attachment changes", async () => {
     const pending = observeDeferred(queryKeys.pageRender("page-a"));
     try {
       const oldRead = pending.observer.refetch();
-      const updating = applyDomainEvent(pending.client, {
-        kind: "blocks_changed",
-        block_uuids: ["block-a"],
-        container_uuids: ["page-a"],
-      });
+      const updating = applyDomainEvent(
+        pending.client,
+        committed({ attachmentOwners: ["block-a"], affectedPages: ["page-a"] }),
+      );
       expect(pending.reads).toHaveLength(2);
-      pending.reads[1].resolve("after legacy write");
+      pending.reads[1].resolve("after attachment replacement");
       await updating;
-      pending.reads[0].resolve("before legacy write");
+      pending.reads[0].resolve("before attachment replacement");
       await oldRead;
 
-      expect(pending.observer.getCurrentResult().data).toBe("after legacy write");
-      expect(pending.observed).not.toContain("before legacy write");
+      expect(pending.observer.getCurrentResult().data).toBe("after attachment replacement");
+      expect(pending.observed).not.toContain("before attachment replacement");
     } finally {
       pending.dispose();
     }

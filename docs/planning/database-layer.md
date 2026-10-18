@@ -245,6 +245,20 @@
   concurrent captures сохраняют точные параграфы/sequence, ошибка BlockCreate не оставляет
   пустую страницу, history/outbox/HLC или продвижение серверного oplog.
 
+- Remote/unsequenced/sequenced Apply и ACK теперь проходят Store с исходными Op IDs/HLC,
+  role-based outbox policy и прежним cursor/dedup поведением. Отдельный durable-progress flag
+  учитывает applied_ops/cursor/outbox без выдуманных content facts. Повтор без фактической
+  записи тихий; служебный commit может иметь пустой ChangeSet. Sequence overflow отклоняется
+  до первой записи. Ошибка позднего Apply/ACK и попытка второй пачки отравляют команду.
+  Full helper сохранён для изолированных bulk путей, без лишнего tracking.
+  SyncClient и Tauri HTTP/WS используют ordered commit observer. Удалены оставшиеся
+  input-derived mapper, post-commit enrichment, 6 мёртвых event variants и frontend branches;
+  race-тесты переведены на фактические committed changes, bindings перегенерированы.
+  Прошли 10 remote-store, 4 poison/Full unit, 13 sync regression и 11 sync-client тестов;
+  отдельный consumer-тест проверяет old/new containers и тихие ACK/cursor commits.
+  Общий core: 392 passed / 4 ignored; frontend: 684/684; общий all-target Clippy пяти crates
+  и `vp check` проходят. Bulk import/bootstrap, sync configuration и raw ink ещё переносятся.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

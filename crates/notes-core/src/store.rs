@@ -3,7 +3,9 @@
 
 use crate::changes::ChangeSet;
 use crate::db::{self, HistoryMoveResult};
-use crate::operation::{self, DeferredApplyStats, OpKind, ProjectionPolicy};
+use crate::operation::{
+    self, ApplyOutcome, DeferredApplyStats, Op, OpKind, Origin, ProjectionPolicy,
+};
 use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
@@ -85,6 +87,33 @@ impl NotesStore {
             .await
     }
 
+    /// Apply original envelopes without authoring replacement IDs or clocks.
+    pub async fn apply_batch(
+        &self,
+        operations: &[Op],
+        origin: Origin,
+    ) -> anyhow::Result<Committed<Vec<ApplyOutcome>>> {
+        let operations = operations.to_vec();
+        self.write(move |write| write.apply_replicated_batch(&operations, origin))
+            .await
+    }
+
+    pub async fn apply_sequenced_batch(
+        &self,
+        operations: Vec<(u64, Op)>,
+    ) -> anyhow::Result<Committed<Vec<ApplyOutcome>>> {
+        self.write(move |write| write.apply_sequenced_batch(&operations))
+            .await
+    }
+
+    pub async fn acknowledge_server_ops(
+        &self,
+        acknowledgements: Vec<(uuid::Uuid, u64)>,
+    ) -> anyhow::Result<Committed<()>> {
+        self.write(move |write| write.acknowledge_server_ops(&acknowledgements))
+            .await
+    }
+
     pub(crate) async fn write<T, E>(
         &self,
         command: impl FnOnce(&mut NotesTransaction<'_, '_>) -> Result<T, E> + Send + 'static,
@@ -111,6 +140,7 @@ impl NotesStore {
                     projection_stats: DeferredApplyStats::default(),
                     applied: false,
                     failed: false,
+                    durable_changed: false,
                     structure_mode,
                 };
                 let value = command(&mut transaction).map_err(Into::into)?;
@@ -121,9 +151,10 @@ impl NotesStore {
                     changes,
                     operations,
                     projection_stats,
+                    durable_changed,
                     ..
                 } = transaction;
-                let commit_version = if !operations.is_empty() || !changes.is_empty() {
+                let commit_version = if durable_changed || !changes.is_empty() {
                     Some(sql.query_row(
                         "UPDATE store_state SET version = version + 1
                          WHERE singleton = 1 RETURNING version",
@@ -151,6 +182,7 @@ impl NotesStore {
                 }
                 tracing::debug!(
                     operations = operations.len(),
+                    durable_changed,
                     commit_version,
                     structure_reconciliations = projection_stats.structure_reconciliations,
                     full_structure_reconciliations =
@@ -187,7 +219,15 @@ pub(crate) struct NotesTransaction<'tx, 'connection> {
     projection_stats: DeferredApplyStats,
     applied: bool,
     failed: bool,
+    // Replication can advance applied_ops/cursor/outbox while every public
+    // content projection remains unchanged. Such writes still own a commit.
+    durable_changed: bool,
     structure_mode: operation::StructureProjectionMode,
+}
+
+enum ReplicationBatch<'a> {
+    Unsequenced(&'a [Op], Origin),
+    Sequenced(&'a [(u64, Op)]),
 }
 
 impl<'connection> NotesTransaction<'_, 'connection> {
@@ -252,9 +292,83 @@ impl<'connection> NotesTransaction<'_, 'connection> {
             self.changes = applied.changes;
             self.changes.history_changed |= history_changed;
             self.operations = applied.operations.into_iter().map(|op| op.kind).collect();
+            self.durable_changed |= !self.operations.is_empty();
             self.projection_stats = applied.stats;
             self.applied = true;
             Ok(applied.stats)
+        })();
+        self.failed |= result.is_err();
+        result
+    }
+
+    pub(crate) fn apply_replicated_batch(
+        &mut self,
+        operations: &[Op],
+        origin: Origin,
+    ) -> CoreResult<Vec<ApplyOutcome>> {
+        self.apply_replication(ReplicationBatch::Unsequenced(operations, origin))
+    }
+
+    pub(crate) fn apply_sequenced_batch(
+        &mut self,
+        operations: &[(u64, Op)],
+    ) -> CoreResult<Vec<ApplyOutcome>> {
+        self.apply_replication(ReplicationBatch::Sequenced(operations))
+    }
+
+    fn apply_replication(&mut self, batch: ReplicationBatch<'_>) -> CoreResult<Vec<ApplyOutcome>> {
+        let result = (|| {
+            if self.failed || self.applied {
+                return Err(CoreError::invalid(
+                    "a store command must apply one ordered batch",
+                ));
+            }
+            let applied = match batch {
+                ReplicationBatch::Unsequenced(operations, origin) => {
+                    operation::apply_batch_in_transaction(
+                        self.sql,
+                        operations,
+                        origin,
+                        self.structure_mode,
+                        true,
+                    )?
+                }
+                ReplicationBatch::Sequenced(operations) => {
+                    operation::apply_sequenced_batch_in_transaction(
+                        self.sql,
+                        operations,
+                        self.structure_mode,
+                        true,
+                    )?
+                }
+            };
+            let history_changed = self.changes.history_changed;
+            self.changes = applied.changes;
+            self.changes.history_changed |= history_changed;
+            self.operations = applied.operations;
+            self.projection_stats = applied.stats;
+            self.durable_changed |= applied.durable_changed;
+            self.applied = true;
+            Ok(applied.outcomes)
+        })();
+        self.failed |= result.is_err();
+        result
+    }
+
+    pub(crate) fn acknowledge_server_ops(
+        &mut self,
+        acknowledgements: &[(uuid::Uuid, u64)],
+    ) -> CoreResult<()> {
+        let result = (|| {
+            if self.failed || self.applied {
+                return Err(CoreError::invalid(
+                    "a store command must apply one ordered batch",
+                ));
+            }
+            self.durable_changed |=
+                operation::acknowledge_server_ops_in_transaction(self.sql, acknowledgements)?;
+            self.applied = true;
+            Ok(())
         })();
         self.failed |= result.is_err();
         result

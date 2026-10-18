@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
+use notes_core::store::{CommitNotice, NotesStore};
 use notes_core::{
-    Connection, Op, acknowledge_server_ops, apply_sequenced_batch, configure_sync, pending_outbox,
-    quarantine_outbox_op, sync_cursor,
+    Connection, Op, configure_sync, pending_outbox, quarantine_outbox_op, sync_cursor,
 };
 use notes_protocol::SequencedOp;
 use std::collections::HashMap;
@@ -138,8 +138,9 @@ pub struct SyncStats {
     pub received: usize,
     pub applied: usize,
     pub cursor: u64,
-    /// Remote operations that changed this replica during the sync pass.
-    /// Hosts use this to invalidate only the affected UI queries.
+    /// Newly accepted remote envelopes, retained for diagnostics/compatibility.
+    /// A losing LWW operation may change no public content. Hosts publish UI
+    /// invalidations through the commit observer's actual ChangeSet instead.
     pub applied_operations: Vec<AppliedRemoteOperation>,
 }
 
@@ -152,15 +153,27 @@ pub struct AppliedRemoteOperation {
 #[derive(Clone)]
 pub struct SyncClient {
     conn: Connection,
+    store: NotesStore,
     batch_size: u32,
 }
 
 impl SyncClient {
     pub fn new(conn: Connection) -> Self {
         Self {
+            store: NotesStore::new(conn.clone()),
             conn,
             batch_size: 256,
         }
+    }
+
+    /// Publish the actual transaction facts before the next queued writer runs.
+    /// The observer belongs to this client, not to persistent application state.
+    pub fn with_commit_observer(
+        mut self,
+        observer: impl Fn(&CommitNotice) + Send + Sync + 'static,
+    ) -> Self {
+        self.store = self.store.with_commit_observer(observer);
+        self
     }
 
     pub async fn enable(conn: Connection, server_url: &str) -> Result<Self> {
@@ -182,14 +195,14 @@ impl SyncClient {
         if !outbox.is_empty() {
             transport.prepare_push(&outbox).await?;
             let accepted = self.push_batch(transport, outbox).await?;
-            acknowledge_server_ops(
-                &self.conn,
-                accepted
-                    .iter()
-                    .map(|operation| (operation.envelope.op_id, operation.seq))
-                    .collect(),
-            )
-            .await?;
+            self.store
+                .acknowledge_server_ops(
+                    accepted
+                        .iter()
+                        .map(|operation| (operation.envelope.op_id, operation.seq))
+                        .collect(),
+                )
+                .await?;
         }
 
         self.catch_up(transport, &mut stats).await?;
@@ -290,7 +303,7 @@ impl SyncClient {
                 .iter()
                 .map(|item| (item.seq, item.envelope.clone()))
                 .collect::<Vec<_>>();
-            let outcomes = apply_sequenced_batch(&self.conn, sequenced).await?;
+            let outcomes = self.store.apply_sequenced_batch(sequenced).await?.value;
             stats.received += batch.len();
             stats.applied += outcomes.iter().filter(|outcome| outcome.applied).count();
             stats.applied_operations.extend(
@@ -501,6 +514,82 @@ mod tests {
             .await
             .expect("enable sync");
         (directory, connection, client)
+    }
+
+    #[tokio::test]
+    async fn sync_observer_publishes_actual_move_containers_and_quiet_ack_progress() {
+        let (_left_dir, left, left_sync) = client("notices").await;
+        let (_right_dir, right, right_sync) = client("notices").await;
+        import_sync_snapshot(&right, export_sync_snapshot(&left, 0).await.unwrap())
+            .await
+            .unwrap();
+        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CommitNotice>::new()));
+        let observed = notices.clone();
+        let right_sync = right_sync
+            .with_batch_size(2)
+            .with_commit_observer(move |notice| observed.lock().unwrap().push(notice.clone()));
+        let page = db::create_page(&left, "Remote".into()).await.unwrap();
+        let parent = db::create_block(
+            &left,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Bullet,
+            "Parent".into(),
+        )
+        .await
+        .unwrap();
+        let child = db::create_block(
+            &left,
+            page.uuid,
+            Some(parent.uuid),
+            None,
+            BlockStyle::Bullet,
+            "Child".into(),
+        )
+        .await
+        .unwrap();
+        let mut server = LoopbackServer::new();
+        left_sync.sync_until_idle(&mut server).await.unwrap();
+        right_sync.sync_until_idle(&mut server).await.unwrap();
+        let initial_count = notices.lock().unwrap().len();
+        assert_eq!(initial_count, 2, "one notice per committed pull batch");
+
+        db::move_block(&left, child.uuid, None, None).await.unwrap();
+        left_sync.sync_until_idle(&mut server).await.unwrap();
+        right_sync.sync_until_idle(&mut server).await.unwrap();
+        {
+            let notices = notices.lock().unwrap();
+            assert_eq!(notices.len(), initial_count + 1);
+            let moved = &notices.last().unwrap().changes.blocks;
+            assert_eq!(moved.len(), 1);
+            assert_eq!(moved[0].uuid, child.uuid);
+            assert_eq!(
+                moved[0].before.as_ref().unwrap().parent_uuid,
+                Some(parent.uuid)
+            );
+            assert_eq!(moved[0].after.as_ref().unwrap().parent_uuid, None);
+        }
+
+        let before_ack = notices.lock().unwrap().len();
+        db::create_page(&right, "Own write".into()).await.unwrap();
+        right_sync.sync_until_idle(&mut server).await.unwrap();
+        let notices = notices.lock().unwrap();
+        assert_eq!(
+            notices.len(),
+            before_ack + 2,
+            "ack and cursor advance each commit once"
+        );
+        assert!(
+            notices[before_ack..]
+                .iter()
+                .all(|notice| notice.changes.is_empty())
+        );
+        assert!(
+            notices
+                .windows(2)
+                .all(|pair| pair[0].commit_version < pair[1].commit_version)
+        );
     }
 
     #[tokio::test]

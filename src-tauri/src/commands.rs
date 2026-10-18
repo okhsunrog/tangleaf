@@ -124,26 +124,6 @@ pub enum DomainEvent {
     PagesChanged {
         page_uuids: Vec<uuid::Uuid>,
     },
-    BlocksChanged {
-        block_uuids: Vec<uuid::Uuid>,
-        container_uuids: Vec<uuid::Uuid>,
-    },
-    PagesDeleted {
-        page_uuids: Vec<uuid::Uuid>,
-    },
-    BlocksDeleted {
-        block_uuids: Vec<uuid::Uuid>,
-        container_uuids: Vec<uuid::Uuid>,
-    },
-    GraphChanged {
-        content_uuids: Vec<uuid::Uuid>,
-    },
-    StructureChanged {
-        block_uuids: Vec<uuid::Uuid>,
-    },
-    AttachmentsChanged {
-        owner_uuids: Vec<uuid::Uuid>,
-    },
     HistoryChanged,
     SettingsChanged,
     SyncStatusChanged,

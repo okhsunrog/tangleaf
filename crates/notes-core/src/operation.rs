@@ -14,6 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+#[cfg(test)]
+mod replicated_store_tests;
 mod structure;
 #[cfg(test)]
 mod structure_activation_tests;
@@ -321,6 +323,16 @@ pub(crate) struct TrackedLocalBatchApply {
     pub operations: Vec<Op>,
     pub stats: DeferredApplyStats,
     pub changes: crate::ChangeSet,
+}
+
+/// Apply preserves externally supplied operation identities and clocks. Durable
+/// replication progress can change even when no observable content does.
+pub(crate) struct ReplicatedBatchApply {
+    pub outcomes: Vec<ApplyOutcome>,
+    pub operations: Vec<OpKind>,
+    pub changes: crate::ChangeSet,
+    pub stats: DeferredApplyStats,
+    pub durable_changed: bool,
 }
 
 /// Projection scheduling is an execution policy, independent of a history label.
@@ -725,118 +737,160 @@ pub async fn apply_sequenced_batch(
     conn: &Connection,
     operations: Vec<(u64, Op)>,
 ) -> Result<Vec<ApplyOutcome>> {
-    apply_sequenced_batch_with_projection_mode(
-        conn,
-        operations,
-        StructureProjectionMode::Components,
-    )
-    .await
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .apply_sequenced_batch(operations)
+        .await?
+        .value)
 }
 
+#[cfg(test)]
 async fn apply_sequenced_batch_with_projection_mode(
     conn: &Connection,
     operations: Vec<(u64, Op)>,
     structure_mode: StructureProjectionMode,
 ) -> Result<Vec<ApplyOutcome>> {
-    for (_, operation) in &operations {
-        validate(operation)?;
-    }
     conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
-        if structure_mode == StructureProjectionMode::Components {
-            require_initialized_structure_projection(&transaction)?;
-        }
-        let mut cursor = transaction
-            .query_row(
-                "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|value| {
-                value.parse::<u64>().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let mut outcomes = Vec::with_capacity(operations.len());
-        let mut effects = ApplyEffects::deferred();
-        effects.structure_mode = structure_mode;
-        for (seq, operation) in operations {
-            if seq <= cursor {
-                let operation_at_seq = transaction
-                    .query_row(
-                        "SELECT op_id FROM applied_ops WHERE seq = ?1",
-                        [seq as i64],
-                        |row| row.get::<_, uuid::Uuid>(0),
-                    )
-                    .optional()?;
-                if operation_at_seq.is_some_and(|op_id| op_id != operation.op_id) {
-                    return Err(CoreError::sync_conflict(format!(
-                        "server sequence {seq} is assigned to multiple operations"
-                    )));
-                }
-                outcomes.push(ApplyOutcome::default());
-                continue;
-            }
-            if seq != cursor.saturating_add(1) {
-                return Err(CoreError::sync_sequence_gap(cursor.saturating_add(1), seq));
-            }
-            let existing = transaction
-                .query_row(
-                    "SELECT seq FROM applied_ops WHERE op_id = ?1",
-                    [&operation.op_id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .optional()?;
-            if let Some(Some(existing_seq)) = existing
-                && existing_seq as u64 != seq
-            {
-                return Err(CoreError::sync_conflict(format!(
-                    "operation {} has server sequences {existing_seq} and {seq}",
-                    operation.op_id
-                )));
-            }
-            let outcome = if existing.is_some() {
-                ApplyOutcome::default()
-            } else {
-                let graph_changes_before = effects.graph_changed_blocks.len();
-                let affected_uuids =
-                    apply_one_with_effects(&transaction, &operation, &mut effects)?;
-                observe_hlc(&transaction, &operation.hlc)?;
-                ApplyOutcome {
-                    applied: true,
-                    affected_uuids,
-                    graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
-                }
-            };
-            transaction.execute(
-                "INSERT INTO applied_ops(op_id, seq) VALUES (?1, ?2)
-                 ON CONFLICT(op_id) DO UPDATE SET seq = excluded.seq",
-                rusqlite::params![operation.op_id, seq as i64],
-            )?;
-            transaction.execute(
-                "DELETE FROM sync_outbox WHERE op_id = ?1",
-                [&operation.op_id],
-            )?;
-            cursor = cursor.max(seq);
-            outcomes.push(outcome);
-        }
-        effects.finish(&transaction)?;
-        transaction.execute(
-            "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [cursor.to_string()],
-        )?;
+        let applied =
+            apply_sequenced_batch_in_transaction(&transaction, &operations, structure_mode, false)?;
         transaction.commit()?;
-        Ok(outcomes)
+        Ok(applied.outcomes)
     })
     .await
+}
+
+fn validate_server_sequence(seq: u64) -> CoreResult<i64> {
+    i64::try_from(seq)
+        .map_err(|_| CoreError::invalid("server sequence exceeds SQLite integer range"))
+}
+
+pub(crate) fn apply_sequenced_batch_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    operations: &[(u64, Op)],
+    structure_mode: StructureProjectionMode,
+    tracked: bool,
+) -> CoreResult<ReplicatedBatchApply> {
+    // Validate every tuple before even acknowledging an earlier local write.
+    for (seq, operation) in operations {
+        validate_server_sequence(*seq)?;
+        validate(operation)?;
+    }
+    if structure_mode == StructureProjectionMode::Components {
+        require_initialized_structure_projection(transaction)?;
+    }
+    let original_cursor = transaction
+        .query_row(
+            "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let mut cursor = original_cursor
+        .as_deref()
+        .map(|value| {
+            value.parse::<u64>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut outcomes = Vec::with_capacity(operations.len());
+    let mut applied_operations = Vec::new();
+    let mut durable_changed = false;
+    let mut effects = ApplyEffects::deferred();
+    effects.structure_mode = structure_mode;
+    effects.changes = tracked.then(ChangeTracker::default);
+    for (seq, operation) in operations {
+        let seq = *seq;
+        if seq <= cursor {
+            let operation_at_seq = transaction
+                .query_row(
+                    "SELECT op_id FROM applied_ops WHERE seq = ?1",
+                    [seq as i64],
+                    |row| row.get::<_, uuid::Uuid>(0),
+                )
+                .optional()?;
+            if operation_at_seq.is_some_and(|op_id| op_id != operation.op_id) {
+                return Err(CoreError::sync_conflict(format!(
+                    "server sequence {seq} is assigned to multiple operations"
+                )));
+            }
+            outcomes.push(ApplyOutcome::default());
+            continue;
+        }
+        if seq != cursor.saturating_add(1) {
+            return Err(CoreError::sync_sequence_gap(cursor.saturating_add(1), seq));
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT seq FROM applied_ops WHERE op_id = ?1",
+                [&operation.op_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        if let Some(Some(existing_seq)) = existing
+            && existing_seq as u64 != seq
+        {
+            return Err(CoreError::sync_conflict(format!(
+                "operation {} has server sequences {existing_seq} and {seq}",
+                operation.op_id
+            )));
+        }
+        let outcome = if existing.is_some() {
+            ApplyOutcome::default()
+        } else {
+            let graph_changes_before = effects.graph_changed_blocks.len();
+            let affected_uuids = apply_one_with_effects(transaction, operation, &mut effects)?;
+            observe_hlc(transaction, &operation.hlc)?;
+            if tracked {
+                applied_operations.push(operation.kind.clone());
+            }
+            ApplyOutcome {
+                applied: true,
+                affected_uuids,
+                graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
+            }
+        };
+        transaction.execute(
+            "INSERT INTO applied_ops(op_id, seq) VALUES (?1, ?2)
+                 ON CONFLICT(op_id) DO UPDATE SET seq = excluded.seq",
+            rusqlite::params![operation.op_id, seq as i64],
+        )?;
+        transaction.execute(
+            "DELETE FROM sync_outbox WHERE op_id = ?1",
+            [&operation.op_id],
+        )?;
+        cursor = cursor.max(seq);
+        durable_changed = true;
+        outcomes.push(outcome);
+    }
+    let stats = effects.finish_projections(transaction)?;
+    let changes = effects
+        .changes
+        .take()
+        .map(|tracker| tracker.finish(transaction))
+        .transpose()?
+        .unwrap_or_default();
+    let cursor = cursor.to_string();
+    // Preserve cursor-row creation and normalization, but an identical UPSERT
+    // is not progress merely because SQLite reports one matching row.
+    durable_changed |= original_cursor.as_deref() != Some(cursor.as_str());
+    transaction.execute(
+        "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [cursor],
+    )?;
+    Ok(ReplicatedBatchApply {
+        outcomes,
+        operations: applied_operations,
+        changes,
+        stats,
+        durable_changed,
+    })
 }
 
 pub async fn acknowledge_server_op(conn: &Connection, op_id: uuid::Uuid, seq: u64) -> Result<()> {
@@ -847,19 +901,38 @@ pub async fn acknowledge_server_ops(
     conn: &Connection,
     acknowledgements: Vec<(uuid::Uuid, u64)>,
 ) -> Result<()> {
-    conn.call(move |database| {
-        let transaction = database.transaction()?;
-        for (op_id, seq) in acknowledgements {
-            transaction.execute(
-                "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
-                rusqlite::params![op_id, seq as i64],
-            )?;
-            transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])?;
-        }
-        transaction.commit()?;
-        Ok(())
-    })
-    .await
+    crate::store::NotesStore::new(conn.clone())
+        .acknowledge_server_ops(acknowledgements)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn acknowledge_server_ops_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    acknowledgements: &[(uuid::Uuid, u64)],
+) -> CoreResult<bool> {
+    for (_, seq) in acknowledgements {
+        validate_server_sequence(*seq)?;
+    }
+    let mut durable_changed = false;
+    for (op_id, seq) in acknowledgements {
+        let seq = *seq as i64;
+        let previous = transaction
+            .query_row(
+                "SELECT seq FROM applied_ops WHERE op_id = ?1",
+                [op_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        durable_changed |= previous.is_some_and(|previous| previous != Some(seq));
+        transaction.execute(
+            "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
+            rusqlite::params![op_id, seq],
+        )?;
+        durable_changed |=
+            transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])? != 0;
+    }
+    Ok(durable_changed)
 }
 
 pub async fn export_sync_snapshot(conn: &Connection, seq: u64) -> Result<SyncSnapshot> {
@@ -1510,13 +1583,10 @@ pub async fn apply_batch(
     operations: &[Op],
     origin: Origin,
 ) -> Result<Vec<ApplyOutcome>> {
-    apply_batch_with_projection_mode(
-        conn,
-        operations,
-        origin,
-        StructureProjectionMode::Components,
-    )
-    .await
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .apply_batch(operations, origin)
+        .await?
+        .value)
 }
 
 async fn apply_batch_with_projection_mode(
@@ -1525,64 +1595,95 @@ async fn apply_batch_with_projection_mode(
     origin: Origin,
     structure_mode: StructureProjectionMode,
 ) -> Result<Vec<ApplyOutcome>> {
-    for operation in operations {
-        validate(operation)?;
-    }
     let operations = operations.to_vec();
     conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
-        if structure_mode == StructureProjectionMode::Components {
-            require_initialized_structure_projection(&transaction)?;
-        }
-        let publishes = publishes_authored_ops(&transaction)?;
-        let mut outcomes = Vec::with_capacity(operations.len());
-        let mut effects = ApplyEffects::deferred();
-        effects.structure_mode = structure_mode;
-        for operation in operations {
-            let exists = transaction
-                .query_row(
-                    "SELECT 1 FROM applied_ops WHERE op_id = ?1",
-                    [&operation.op_id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if exists {
-                outcomes.push(ApplyOutcome::default());
-                continue;
-            }
-            let graph_changes_before = effects.graph_changed_blocks.len();
-            let affected_uuids = apply_one_with_effects(&transaction, &operation, &mut effects)?;
-            transaction.execute(
-                "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
-                [&operation.op_id],
-            )?;
-            if origin == Origin::Local && publishes {
-                transaction.execute(
-                    "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![
-                        operation.op_id,
-                        encode_persisted_envelope(&operation).map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                        })?,
-                        chrono::Utc::now().timestamp(),
-                    ],
-                )?;
-            }
-            if origin == Origin::Remote {
-                observe_hlc(&transaction, &operation.hlc)?;
-            }
-            outcomes.push(ApplyOutcome {
-                applied: true,
-                affected_uuids,
-                graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
-            });
-        }
-        effects.finish(&transaction)?;
+        let applied =
+            apply_batch_in_transaction(&transaction, &operations, origin, structure_mode, false)?;
         transaction.commit()?;
-        Ok(outcomes)
+        Ok(applied.outcomes)
     })
     .await
+}
+
+pub(crate) fn apply_batch_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    operations: &[Op],
+    origin: Origin,
+    structure_mode: StructureProjectionMode,
+    tracked: bool,
+) -> CoreResult<ReplicatedBatchApply> {
+    for operation in operations {
+        validate(operation)?;
+    }
+    if structure_mode == StructureProjectionMode::Components {
+        require_initialized_structure_projection(transaction)?;
+    }
+    let publishes = publishes_authored_ops(transaction)?;
+    let mut outcomes = Vec::with_capacity(operations.len());
+    let mut applied_operations = Vec::new();
+    let mut durable_changed = false;
+    let mut effects = ApplyEffects::deferred();
+    effects.structure_mode = structure_mode;
+    effects.changes = tracked.then(ChangeTracker::default);
+    for operation in operations {
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM applied_ops WHERE op_id = ?1",
+                [&operation.op_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            outcomes.push(ApplyOutcome::default());
+            continue;
+        }
+        let graph_changes_before = effects.graph_changed_blocks.len();
+        let affected_uuids = apply_one_with_effects(transaction, operation, &mut effects)?;
+        transaction.execute(
+            "INSERT INTO applied_ops(op_id, seq) VALUES (?1, NULL)",
+            [&operation.op_id],
+        )?;
+        if origin == Origin::Local && publishes {
+            transaction.execute(
+                "INSERT INTO sync_outbox(op_id, envelope, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    operation.op_id,
+                    encode_persisted_envelope(operation).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?,
+                    chrono::Utc::now().timestamp(),
+                ],
+            )?;
+        }
+        if origin == Origin::Remote {
+            observe_hlc(transaction, &operation.hlc)?;
+        }
+        durable_changed = true;
+        if tracked {
+            applied_operations.push(operation.kind.clone());
+        }
+        outcomes.push(ApplyOutcome {
+            applied: true,
+            affected_uuids,
+            graph_changed: effects.graph_changed_blocks.len() > graph_changes_before,
+        });
+    }
+    let stats = effects.finish_projections(transaction)?;
+    let changes = effects
+        .changes
+        .take()
+        .map(|tracker| tracker.finish(transaction))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(ReplicatedBatchApply {
+        outcomes,
+        operations: applied_operations,
+        changes,
+        stats,
+        durable_changed,
+    })
 }
 
 fn validate(operation: &Op) -> CoreResult<()> {
@@ -1889,13 +1990,6 @@ impl ApplyEffects {
 
     fn discard_block_refs(&mut self, block_uuid: uuid::Uuid) {
         self.pending_block_refs.remove(&block_uuid);
-    }
-
-    fn finish(
-        mut self,
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> rusqlite::Result<DeferredApplyStats> {
-        self.finish_projections(transaction)
     }
 
     fn finish_projections(
