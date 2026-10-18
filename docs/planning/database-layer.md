@@ -1,7 +1,8 @@
 # Слой хранения Tangleaf: проект и план перехода
 
-Дата: 18 октября 2026. Статус: основные входы этапа 4 перенесены; идёт runtime этапа 5,
-проверки этапов 0 и 3 продолжаются.
+Дата: 18 октября 2026. Статус: основные входы этапов 1–4 и runtime/restore этапа 5 реализованы;
+идёт итоговая проверка, закрывается late ink staging и измеряется release UI. Аппаратная
+приёмка Android/BOOX и power-loss остаётся отдельной.
 Исходный аудит выполнен на `28c8c46`, включая оптимизацию Split из `8ad0e47`.
 
 ## Ход реализации
@@ -453,6 +454,22 @@
   завершает рукописную публикацию. Отказ save, конфликт, новый ввод во время acknowledgement
   и unmounted draft без save owner не дают продолжить действие под видом сохранённого состояния.
   Best-effort lifecycle flush не меняется в строгую блокировку выхода. 33 frontend tests проходят.
+- Физический restore (`d3bf871`) теперь имеет проверяемые preview/одноразовый token, приватную
+  миграцию/readiness до drain, общий close barrier с Exit, offline before-restore backup после
+  последней принятой записи, additive blobs и atomic file replacement после WAL sealing.
+  Неотменяемая accepted-задача сохраняет staging/результат, Exit ждёт её завершения. Отказ до
+  rename, post-rename fsync error и panic с неизвестным результатом различаются; после drain
+  нужен restart. Нельзя продолжать работать с закрытым Store. UI (`e2aecd4`) показывает состав
+  копии, подтверждение замены, mismatch workspace, страховочную копию и обязательный restart;
+  учитывает draft failure и неоднозначный IPC failure. Host: 83 tests, 2 ignored helpers,
+  дополнительный sidecar test и Clippy проходят; frontend: 706/706, `vp check` чистый.
+  Реальная GUI-проверка этого пути ещё впереди. Поддерживается running workspace; invalid
+  current DB, произвольный сторонний SQLite writer и аппаратные гарантии этим не покрыты.
+- Серверный fault/reopen (`ec9c5f0`) проверяет окно notes commit → неудачная публикация в oplog
+  и окно durable oplog append → notes ACK. После явного close/join обоих workers настоящий
+  reopen/replay сохраняет исходные IDs/HLC/content/history, доводит outbox, не создаёт sequence
+  gaps или дубликаты операций. Два сценария проходят; production fix не потребовался. Это
+  детерминированная модель границ отказа, не power-loss и не idempotency повторного tool call.
 
 ## Решение и масштаб
 

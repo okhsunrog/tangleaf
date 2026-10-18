@@ -203,6 +203,36 @@ and measurements. Tests verify actual opener settings and explicit close/reopen.
 publication remains a separate durable boundary; FULL is not a transaction across files/stores,
 and the measurements do not establish power-loss survival or Android/BOOX performance.
 
+Full `.recovery` backups are separate from portable `.notes` content export. They contain a
+standalone SQLite snapshot, a versioned manifest and verified content-addressed attachment files,
+including references retained only by history or pending/quarantined outbox. A shared blob deletion
+lease spans snapshot and file capture. Native ink records/chunks and local bookkeeping remain in
+the SQLite snapshot; this is not a replay from `applied_ops`.
+
+Physical restore of a running workspace uses a privately copied/verified source. Before issuing
+a one-shot preview token, it opens/migrates that copy through the current Store, checks primary
+read decoders and retained ink graphs, closes it and seals a ready database. Current primary data
+is untouched during preparation. Commit is owned independently of its IPC waiter; the same gate
+orders it against Exit. After the shared drain, an offline SQLite snapshot captures the last
+accepted writes in a before-restore recovery backup, even when WAL remains after the final reader.
+Verified incoming blobs install additively; the old database is checkpointed/sealed before sidecar
+retirement, then a synced same-filesystem file atomically replaces it. No live Store is swapped:
+the closed process must restart, which creates fresh backend and frontend state.
+
+Failure results distinguish unchanged data, published data with an unconfirmed directory sync,
+and an unknown publication state after a task panic/transport failure. Every completed drain
+requires restart. The terminal UI prevents returning to the closed workspace. The application
+lock protects cooperating app processes, not arbitrary external SQLite clients; those must be
+stopped before physical restore. Desktop can select a recovery folder; Android currently restores
+only app-local backups. Device settings are separate and remain unchanged.
+
+Validation preserves explicitly unavailable (`root_id=NULL`) ink versions as unavailable; it
+does not invent missing graph bytes. Present retained roots are checked with the existing native
+decoder, including per-root 128 MiB decoded recovery budget. A root beyond that supported budget
+is refused during preparation before drain; ordinary backup capture and existing Undo validation
+do not gain that limit. The validator is not an exhaustive decoder of every latent LWW intent.
+Restore from a startup-failed/corrupt current workspace is not this running-workspace flow.
+
 ## 4. Operation and apply model
 
 The current operation format is version 7. Compatible text-only version 6 envelopes remain
