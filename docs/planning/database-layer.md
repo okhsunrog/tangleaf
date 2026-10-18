@@ -172,6 +172,10 @@
   21 block-command, 22 history/archive, 11 document и 2 Tauri-теста проходят, Clippy чистый.
   Удалён оставшийся async action-wrapper без production callers; in-transaction адаптер
   пока обслуживает ещё не перенесённые операции. Sparse placement по-прежнему отдельный шаг.
+- Ensure/append журнала используют Store и одну ordered Apply group. Preview остаётся чтением
+  без создания страницы; пустой capture отклоняется до ensure. Явный ensure, deterministic
+  identity, append и прежняя history grouping сохранены. 4 новых transaction-теста и 11
+  прежних journal/identity тестов проходят; Tauri domain events 2/2, signatures не менялись.
 
 ## Решение и масштаб
 

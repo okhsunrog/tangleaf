@@ -69,36 +69,13 @@ pub async fn ensure_journal_with_ops(
     conn: &Connection,
     date: JournalDate,
 ) -> Result<AppliedMutation<Page>> {
-    conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<Page>> {
-            let transaction = database.transaction()?;
-            if let Some(journal) = get_journal_in_database(&transaction, &date)? {
-                transaction.commit()?;
-                return Ok(AppliedMutation {
-                    value: journal,
-                    operations: Vec::new(),
-                });
-            }
-            let workspace_uuid = transaction_workspace_uuid(&transaction)?;
-            let page_uuid = journal_page_uuid(workspace_uuid, &date);
-            let operations = vec![OpKind::PageCreate(PageCreate {
-                uuid: page_uuid,
-                kind: PageKind::Journal { date: date.clone() },
-                title: None,
-                layout: PageLayout::Outline,
-                created_at: chrono::Utc::now().timestamp(),
-            })];
-            apply_local_action_in_transaction(&transaction, "ensure journal", operations.clone())?;
-            let journal = get_journal_in_database(&transaction, &date)?
-                .ok_or_else(|| crate::CoreError::not_found("ensured journal page disappeared"))?;
-            transaction.commit()?;
-            Ok(AppliedMutation {
-                value: journal,
-                operations,
-            })
-        },
-    )
-    .await
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .ensure_journal(date)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn list_journals(
@@ -145,14 +122,52 @@ pub async fn append_to_journal_with_ops(
     content: BlockContent,
     style: BlockStyle,
 ) -> Result<AppliedMutation<Block>> {
-    if content.markdown.trim().is_empty() {
-        return Err(crate::CoreError::invalid("journal capture cannot be blank").into());
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .append_to_journal(date, content, style)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
+}
+
+impl crate::store::NotesStore {
+    pub async fn ensure_journal(&self, date: JournalDate) -> Result<crate::store::Committed<Page>> {
+        self.write(move |write| -> crate::CoreResult<Page> {
+            if let Some(journal) = get_journal_in_database(write.sql(), &date)? {
+                return Ok(journal);
+            }
+            let workspace_uuid = transaction_workspace_uuid(write.sql())?;
+            let page_uuid = journal_page_uuid(workspace_uuid, &date);
+            write.apply_action(
+                "ensure journal",
+                vec![OpKind::PageCreate(PageCreate {
+                    uuid: page_uuid,
+                    kind: PageKind::Journal { date: date.clone() },
+                    title: None,
+                    layout: PageLayout::Outline,
+                    created_at: chrono::Utc::now().timestamp(),
+                })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            get_journal_in_database(write.sql(), &date)?
+                .ok_or_else(|| crate::CoreError::not_found("ensured journal page disappeared"))
+        })
+        .await
     }
-    conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<Block>> {
-            let transaction = database.transaction()?;
-            let existing = get_journal_in_database(&transaction, &date)?;
-            let workspace_uuid = transaction_workspace_uuid(&transaction)?;
+
+    pub async fn append_to_journal(
+        &self,
+        date: JournalDate,
+        content: BlockContent,
+        style: BlockStyle,
+    ) -> Result<crate::store::Committed<Block>> {
+        if content.markdown.trim().is_empty() {
+            return Err(crate::CoreError::invalid("journal capture cannot be blank").into());
+        }
+        self.write(move |write| -> crate::CoreResult<Block> {
+            let existing = get_journal_in_database(write.sql(), &date)?;
+            let workspace_uuid = transaction_workspace_uuid(write.sql())?;
             let page_uuid = journal_page_uuid(workspace_uuid, &date);
             let now = chrono::Utc::now().timestamp();
             let mut kinds = Vec::new();
@@ -166,7 +181,8 @@ pub async fn append_to_journal_with_ops(
                 }));
             }
 
-            let last_order_key = transaction
+            let last_order_key = write
+                .sql()
                 .query_row(
                     "SELECT order_key FROM blocks
                   WHERE page_uuid = ?1 AND parent_uuid IS NULL
@@ -187,17 +203,16 @@ pub async fn append_to_journal_with_ops(
                 created_at: now,
             }));
 
-            apply_local_action_in_transaction(&transaction, "append to journal", kinds.clone())?;
-            let block = get_block_in_database(&transaction, block_uuid)?
-                .ok_or_else(|| crate::CoreError::not_found("appended journal block disappeared"))?;
-            transaction.commit()?;
-            Ok(AppliedMutation {
-                value: block,
-                operations: kinds,
-            })
-        },
-    )
-    .await
+            write.apply_action(
+                "append to journal",
+                kinds,
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            get_block_in_database(write.sql(), block_uuid)?
+                .ok_or_else(|| crate::CoreError::not_found("appended journal block disappeared"))
+        })
+        .await
+    }
 }
 
 fn get_journal_in_database(

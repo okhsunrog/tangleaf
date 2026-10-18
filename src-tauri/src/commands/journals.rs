@@ -7,14 +7,11 @@ pub async fn ensure_journal(
     state: State<'_, AppState>,
     date: notes_core::JournalDate,
 ) -> CommandResult<db::Page> {
-    let applied = db::ensure_journal_with_ops(&state.conn, date)
+    let committed = observed_store(&app, &state)
+        .ensure_journal(date)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -47,12 +44,9 @@ pub async fn append_to_journal(
     content: db::BlockContent,
     style: BlockStyle,
 ) -> CommandResult<db::Block> {
-    let applied = db::append_to_journal_with_ops(&state.conn, date, content, style)
+    let committed = observed_store(&app, &state)
+        .append_to_journal(date, content, style)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    // The journals query contains only page/date metadata, not block previews. Existing
-    // journals therefore need only the BlocksChanged invalidation emitted above.
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(applied.value)
+    Ok(committed.value)
 }
