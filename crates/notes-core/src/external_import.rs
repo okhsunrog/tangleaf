@@ -975,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_import_publishes_one_replacement_and_exact_retry_performs_no_dml() {
-        let (_file, connection) = database().await;
+        let (file, connection) = database().await;
         operation::configure_sync(&connection, "https://sync.example")
             .await
             .unwrap();
@@ -1004,11 +1004,36 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        connection
-            .call(|database| database.execute_batch("PRAGMA query_only=ON"))
+        // IMMEDIATE takes a write reservation even for an exact retry. Check
+        // actual row mutations and an independent reader's data_version rather
+        // than query_only, which rejects the reservation before any planning.
+        let reader = Connection::open_read_only(file.path()).await.unwrap();
+        let changes = connection
+            .call(|database| Ok(database.total_changes()))
+            .await
+            .unwrap();
+        let data_version = reader
+            .call(|database| {
+                database.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            })
             .await
             .unwrap();
         let repeated = store.apply_external_import(input).await.unwrap();
+        assert_eq!(
+            connection
+                .call(|database| Ok(database.total_changes()))
+                .await
+                .unwrap(),
+            changes
+        );
+        assert_eq!(
+            reader
+                .call(|database| database
+                    .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0)))
+                .await
+                .unwrap(),
+            data_version
+        );
         assert_eq!(
             repeated.value,
             ExternalImportOutcome::ExactNoOp { receipt_uuid }
@@ -1027,6 +1052,8 @@ mod tests {
             snapshot
         );
         assert_eq!(notices.lock().unwrap().len(), 1);
+        reader.close().await.unwrap();
+        connection.close().await.unwrap();
     }
 
     #[tokio::test]
