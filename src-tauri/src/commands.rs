@@ -26,6 +26,8 @@ mod attachments;
 pub use attachments::*;
 mod data;
 pub use data::*;
+mod recovery;
+pub use recovery::*;
 mod domain_events;
 pub(crate) use domain_events::*;
 mod lifecycle;

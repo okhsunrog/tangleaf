@@ -67,6 +67,15 @@ impl StartupLifecycle {
             .application_lock = None;
     }
 
+    pub(crate) fn application_lock(&self) -> Option<Arc<crate::app_lock::ApplicationLock>> {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .application_lock
+            .clone()
+    }
+
     /// Called immediately after open returns, without an intervening await.
     /// The lifecycle retains ownership even if state installation then panics.
     pub(crate) fn retain_store(&self, store: &NotesStore) {

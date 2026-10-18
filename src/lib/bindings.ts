@@ -168,6 +168,24 @@ export const commands = {
 	commitLogseqImport: (sessionUuid: string, onProgress: Channel<LogseqImportProgress>) => typedError<LogseqImportCommitResult, CommandError>(__TAURI_INVOKE("commit_logseq_import", { sessionUuid, onProgress })),
 	discardLogseqImport: (sessionUuid: string) => __TAURI_INVOKE<boolean>("discard_logseq_import", { sessionUuid }),
 	createBackup: () => typedError<string, CommandError>(__TAURI_INVOKE("create_backup")),
+	listRecoveryBackups: () => typedError<RecoveryBackupEntry[], CommandError>(__TAURI_INVOKE("list_recovery_backups")),
+	prepareRecoveryRestore: (sourcePath: string) => typedError<RecoveryRestorePreview, CommandError>(__TAURI_INVOKE("prepare_recovery_restore", { sourcePath })),
+	chooseRecoveryRestore: () => typedError<{
+	token: string,
+	createdAt: number,
+	workspaceUuid: string,
+	currentWorkspaceUuid: string,
+	workspaceDiffers: boolean,
+	commitVersion: number,
+	schemaVersion: number,
+	databaseBytes: number,
+	blobCount: number,
+	blobBytes: number,
+	pageCount: number,
+	blockCount: number,
+} | null, CommandError>(__TAURI_INVOKE("choose_recovery_restore")),
+	discardRecoveryRestore: (token: string) => typedError<null, CommandError>(__TAURI_INVOKE("discard_recovery_restore", { token })),
+	commitRecoveryRestore: (token: string) => typedError<RecoveryRestoreResult, CommandError>(__TAURI_INVOKE("commit_recovery_restore", { token })),
 	attachFile: (location: AttachmentOwner) => typedError<{
 	uuid: string,
 	owner: AttachmentOwner,
@@ -760,6 +778,38 @@ export type PageRenderSnapshot = {
 	document: PageDocumentSnapshot,
 	images: AttachmentImageDescriptor[],
 };
+
+export type RecoveryBackupEntry = {
+	path: string,
+	createdAt: number,
+	databaseBytes: number,
+	blobCount: number,
+};
+
+export type RecoveryRestorePreview = {
+	token: string,
+	createdAt: number,
+	workspaceUuid: string,
+	currentWorkspaceUuid: string,
+	workspaceDiffers: boolean,
+	commitVersion: number,
+	schemaVersion: number,
+	databaseBytes: number,
+	blobCount: number,
+	blobBytes: number,
+	pageCount: number,
+	blockCount: number,
+};
+
+export type RecoveryRestoreResult = {
+	status: RecoveryRestoreStatus,
+	restartRequired: boolean,
+	beforeRestoreBackupPath: string | null,
+	error: string | null,
+	warning: string | null,
+};
+
+export type RecoveryRestoreStatus = "unchanged" | "restored" | "published_durability_uncertain" | "unknown";
 
 export type SafeAreaInsets = {
 	top: number | null,

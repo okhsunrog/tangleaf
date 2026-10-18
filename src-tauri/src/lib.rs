@@ -7,6 +7,7 @@ mod commands;
 mod settings;
 mod startup;
 mod sync;
+mod workspace;
 
 use std::sync::{Arc, RwLock};
 use tauri::Manager;
@@ -87,6 +88,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::commit_logseq_import,
             commands::discard_logseq_import,
             commands::create_backup,
+            commands::list_recovery_backups,
+            commands::prepare_recovery_restore,
+            commands::choose_recovery_restore,
+            commands::discard_recovery_restore,
+            commands::commit_recovery_restore,
             commands::attach_file,
             commands::list_attachments,
             commands::resolve_attachment_images,
@@ -216,6 +222,9 @@ pub fn run() {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("resolving app data dir");
             std::fs::create_dir_all(&data_dir).expect("creating data dir");
+            let shutdown = workspace::WorkspaceShutdown::default();
+            app.manage(shutdown.clone());
+            app.manage(backup::RecoveryRuntime::new(data_dir.clone(), shutdown));
             let blob_store = notes_blob::BlobStore::new(data_dir.clone());
             // v2: previews switched from lossless to lossy WebP; the old
             // lossless blobs would never be referenced again, so drop the dir.
@@ -369,42 +378,31 @@ pub fn run() {
             if let Some(startup) = &startup {
                 startup.stop();
             }
+            let recovery = app
+                .try_state::<backup::RecoveryRuntime>()
+                .map(|state| state.inner().clone());
+            let restore_completion = recovery
+                .as_ref()
+                .and_then(backup::RecoveryRuntime::begin_exit);
+            let shutdown = app
+                .try_state::<workspace::WorkspaceShutdown>()
+                .map(|state| state.inner().clone());
             let app = app.clone();
             let finished = finished.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(startup) = &startup
-                    && let Err(error) = startup.wait().await
-                {
-                    tracing::warn!(%error, "Startup finished with an error before exit drain");
-                }
-                if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
-                    // A timed-out waiter does not stop spawn_blocking work.
-                    // Confirm every raw connection has drained before closing
-                    // the text workers, including on publication failure.
-                    if let Err(error) = ink.shutdown().await {
-                        tracing::warn!(?error, "Ink drained; publication retained for recovery");
-                    }
-                }
-                sync::finish_before_exit(&app).await;
-                let store = startup
-                    .as_ref()
-                    .and_then(startup::StartupLifecycle::opened_store)
-                    .or_else(|| {
-                        app.try_state::<commands::AppState>()
-                            .map(|state| state.store.clone())
-                    });
-                let mut closed = true;
-                if let Some(store) = store {
-                    match store.close().await {
-                        Ok(()) => tracing::info!("Workspace SQLite workers closed"),
-                        Err(error) => {
-                            closed = false;
-                            tracing::error!(?error, "Workspace SQLite close failed during exit");
+                backup::RecoveryRuntime::wait_before_exit(restore_completion).await;
+                if let Some(shutdown) = shutdown {
+                    shutdown.begin(app.clone());
+                    match shutdown.wait().await {
+                        Ok(_) => {
+                            // A closed token retained by recovery keeps its
+                            // independent lock through publication and exit.
+                            if let Some(startup) = startup {
+                                startup.release_application_lock();
+                            }
                         }
+                        Err(error) => tracing::error!(%error, "Workspace close failed during exit"),
                     }
-                }
-                if closed && let Some(startup) = &startup {
-                    startup.release_application_lock();
                 }
                 finished.store(true, Ordering::Relaxed);
                 app.exit(code.unwrap_or(0));

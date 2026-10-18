@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 
 const FORMAT: &str = "tangleaf-recovery";
 const VERSION: u32 = 1;
+mod recovery;
+pub(crate) use recovery::RecoveryRuntime;
+pub use recovery::{
+    RecoveryBackupEntry, RecoveryRestorePreview, RecoveryRestoreResult, RecoveryRestoreStatus,
+};
 const MANIFEST: &str = "manifest.json";
 const DATABASE: &str = "notes.db";
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
