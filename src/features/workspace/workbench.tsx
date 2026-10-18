@@ -315,17 +315,7 @@ function PaneSurface({
   const controller = useWorkspaceController();
   switch (content.kind) {
     case PaneContentKind.Home:
-      return (
-        <HomeView
-          creating={props.creatingNote}
-          journalBusy={props.journalBusy}
-          onCreate={controller.createNewNote}
-          onCapture={controller.captureJournal}
-          onOpenJournal={controller.openJournal}
-          onOpenContent={controller.openContent}
-          onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
-        />
-      );
+      return <HomeView paneId={paneId} />;
     case PaneContentKind.AllNotes:
       return <AllNotesView />;
     case PaneContentKind.Page:
@@ -335,10 +325,9 @@ function PaneSurface({
     case PaneContentKind.JournalDay:
       return (
         <EmptyJournalView
+          paneId={paneId}
           date={content.date}
           busy={props.journalBusy}
-          onCapture={controller.captureJournal}
-          onOpenAllNotes={() => controller.openAllNotes(currentDisposition)}
           onOpenDate={(date, disposition) =>
             controller.openJournal(date, disposition ?? currentDisposition)
           }

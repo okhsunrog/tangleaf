@@ -20,7 +20,6 @@ import {
   exportData,
   getSyncStatus,
   importData,
-  listPages,
   loadSettings,
   resetSettings,
   restartApp,
@@ -99,10 +98,6 @@ export function SettingsPage({
   const settingsQuery = useQuery({ queryKey: queryKeys.settings, queryFn: loadSettings });
   const syncQuery = useQuery({ queryKey: queryKeys.syncStatus, queryFn: getSyncStatus });
   const syncPresentation = syncQuery.data ? presentSyncStatus(syncQuery.data) : null;
-  const startupPagesQuery = useQuery({
-    queryKey: [...queryKeys.pages, "settings-startup"],
-    queryFn: () => listPages({ filter: "notes", limit: 10_000 }),
-  });
 
   useEffect(() => {
     if (settingsQuery.data) setSettings(settingsQuery.data);
@@ -287,7 +282,7 @@ export function SettingsPage({
       >
         {[
           ["appearance", "Appearance"],
-          ["editor", "Editing & startup"],
+          ["editor", "Editing"],
           ["search", "Search"],
           ["server", "Server & sync"],
           ["data", "Data & transfer"],
@@ -484,68 +479,6 @@ export function SettingsPage({
         </div>
         <div hidden={category !== "editor"} className="space-y-7">
           <HandwritingPreferenceField />
-
-          <SettingsSection
-            title="Startup"
-            description="Choose what this device shows when Tangleaf opens. Dashboard is the calm default; your notes are never changed by this choice."
-          >
-            <Field label="Open on launch">
-              <SettingsSelect<SettingsSnapshot["startupView"]>
-                label="Open on launch"
-                value={settings.startupView}
-                onValueChange={(startupView) => {
-                  setSettings((current) =>
-                    current
-                      ? {
-                          ...current,
-                          startupView,
-                          startupPageUuid:
-                            startupView === "specific_page"
-                              ? (current.startupPageUuid ??
-                                startupPagesQuery.data?.[0]?.uuid ??
-                                null)
-                              : current.startupPageUuid,
-                        }
-                      : current,
-                  );
-                  setMessage("");
-                }}
-                options={[
-                  { value: "dashboard", label: "Dashboard" },
-                  { value: "last_session", label: "Restore last session" },
-                  { value: "today", label: "Today's journal" },
-                  { value: "specific_page", label: "A specific note" },
-                ]}
-              />
-            </Field>
-            {settings.startupView === "specific_page" && (
-              <Field
-                label="Startup note"
-                hint={
-                  startupPagesQuery.data?.length
-                    ? "If this note is deleted, Tangleaf safely falls back to Dashboard."
-                    : "Create a note before choosing it as your startup page."
-                }
-              >
-                <SettingsSelect
-                  label="Startup note"
-                  value={settings.startupPageUuid}
-                  disabled={!startupPagesQuery.data?.length}
-                  placeholder={
-                    startupPagesQuery.data?.length ? "Choose a note" : "No notes available"
-                  }
-                  onValueChange={(value) => update("startupPageUuid", value)}
-                  options={(startupPagesQuery.data ?? []).map((page) => ({
-                    value: page.uuid,
-                    label: page.title ?? "Untitled note",
-                  }))}
-                />
-              </Field>
-            )}
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Favorites, recent notes, and the restored session stay on this device.
-            </p>
-          </SettingsSection>
         </div>
         <div hidden={category !== "search"} className="space-y-7">
           <SettingsSection

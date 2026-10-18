@@ -3,7 +3,14 @@ export { minimalExternalDocumentChange } from "@/features/editor/minimal-documen
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { Annotation, Compartment, EditorState, Prec, Transaction } from "@codemirror/state";
+import {
+  Annotation,
+  Compartment,
+  EditorState,
+  Prec,
+  StateEffect,
+  Transaction,
+} from "@codemirror/state";
 import { drawSelection, EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { useResolvedDisplay } from "@/app/appearance";
@@ -18,7 +25,10 @@ import { documentLinkCompletion } from "./document-completion";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
 
+export type DocumentEditorSession = { state: EditorState | null; focused: boolean };
+
 type Props = {
+  editorSession?: DocumentEditorSession;
   value: string;
   readOnly: boolean;
   focusRequest: number;
@@ -107,6 +117,7 @@ export function applyDocumentHistoryAction(
 }
 
 export function ContinuousDocumentEditor({
+  editorSession,
   value,
   readOnly,
   focusRequest,
@@ -175,113 +186,119 @@ export function ContinuousDocumentEditor({
       modeRetryAttempt = 0;
       modeRetryTimer = setTimeout(applyModeAfterComposition, 0);
     };
-    const state = EditorState.create({
-      doc: initialValueRef.current,
-      extensions: [
-        markdown({
-          base: markdownLanguage,
-          extensions: notesLinkMarkdownExtension,
-        }),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        history(),
-        markdownFormatting(),
-        documentLinkCompletion,
-        EditorView.lineWrapping,
-        EditorView.contentAttributes.of({
-          "aria-label": "Document Markdown",
-          autocapitalize: "sentences",
-          autocomplete: "off",
-          autocorrect: "on",
-          spellcheck: "true",
-        }),
-        modeCompartment.of(documentAuthoringExtensions(mode)),
-        editableCompartment.of(editableExtensions(readOnly)),
-        cursorCompartment.of(cursorExtensions(displayRef.current)),
-        Prec.highest(
-          EditorView.domEventHandlers({
-            keydown(event, view) {
-              const action = resolveDocumentHistoryKey({
-                key: event.key,
+    const extensions = [
+      markdown({
+        base: markdownLanguage,
+        extensions: notesLinkMarkdownExtension,
+      }),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      history(),
+      markdownFormatting(),
+      documentLinkCompletion,
+      EditorView.lineWrapping,
+      EditorView.contentAttributes.of({
+        "aria-label": "Document Markdown",
+        autocapitalize: "sentences",
+        autocomplete: "off",
+        autocorrect: "on",
+        spellcheck: "true",
+      }),
+      modeCompartment.of(documentAuthoringExtensions(mode)),
+      editableCompartment.of(editableExtensions(readOnly)),
+      cursorCompartment.of(cursorExtensions(displayRef.current)),
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown(event, view) {
+            const action = resolveDocumentHistoryKey({
+              key: event.key,
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+              altKey: event.altKey,
+              isComposing: event.isComposing || view.composing,
+            });
+            if (!action) return false;
+            applyDocumentHistoryAction(view, action);
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          },
+          compositionend(_event, view) {
+            queueMicrotask(() => {
+              callbacksRef.current.onCompositionEnd(view.state.doc.toString());
+            });
+            scheduleModeAfterComposition();
+            return false;
+          },
+          blur() {
+            callbacksRef.current.onBlur();
+            scheduleModeAfterComposition();
+            return false;
+          },
+          // Resolved on mousedown, before CodeMirror's own default handling would place the
+          // caret and retroactively reveal the link's raw source — the decoration state must
+          // reflect what the user actually saw when they clicked, not what it becomes after.
+          mousedown(event, view) {
+            const { onOpenMarkdownLink, pageUuid: contextPageUuid } = callbacksRef.current;
+            if (!onOpenMarkdownLink || !contextPageUuid) return false;
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos === null) return false;
+            const resolved = resolveDocumentLinkClickDisposition(
+              view.state,
+              pos,
+              {
+                button: event.button,
                 ctrlKey: event.ctrlKey,
                 metaKey: event.metaKey,
                 shiftKey: event.shiftKey,
-                altKey: event.altKey,
-                isComposing: event.isComposing || view.composing,
-              });
-              if (!action) return false;
-              applyDocumentHistoryAction(view, action);
-              event.preventDefault();
-              event.stopPropagation();
-              return true;
-            },
-            compositionend(_event, view) {
-              queueMicrotask(() => {
-                callbacksRef.current.onCompositionEnd(view.state.doc.toString());
-              });
-              scheduleModeAfterComposition();
-              return false;
-            },
-            blur() {
-              callbacksRef.current.onBlur();
-              scheduleModeAfterComposition();
-              return false;
-            },
-            // Resolved on mousedown, before CodeMirror's own default handling would place the
-            // caret and retroactively reveal the link's raw source — the decoration state must
-            // reflect what the user actually saw when they clicked, not what it becomes after.
-            mousedown(event, view) {
-              const { onOpenMarkdownLink, pageUuid: contextPageUuid } = callbacksRef.current;
-              if (!onOpenMarkdownLink || !contextPageUuid) return false;
-              const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-              if (pos === null) return false;
-              const resolved = resolveDocumentLinkClickDisposition(
-                view.state,
-                pos,
-                {
-                  button: event.button,
-                  ctrlKey: event.ctrlKey,
-                  metaKey: event.metaKey,
-                  shiftKey: event.shiftKey,
-                },
-                pendingModeRef.current,
-              );
-              if (!resolved) return false;
-              event.preventDefault();
-              void onOpenMarkdownLink({
-                context: { kind: "note", presentation: "live_preview", pageUuid: contextPageUuid },
-                disposition: resolved.disposition,
-                target: resolved.target,
-              });
-              return true;
-            },
-          }),
-        ),
-        EditorView.updateListener.of((update) => {
-          if (
-            appliedModeRef.current !== pendingModeRef.current &&
-            !update.view.composing &&
-            !update.view.compositionStarted
-          ) {
-            queueMicrotask(applyPendingMode);
-          }
-          if (!update.docChanged) return;
-          if (
-            update.transactions.some((transaction) =>
-              transaction.annotation(externalDocumentUpdate),
-            )
-          ) {
-            return;
-          }
-          callbacksRef.current.onChange(update.state.doc.toString(), update.view.composing);
+              },
+              pendingModeRef.current,
+            );
+            if (!resolved) return false;
+            event.preventDefault();
+            void onOpenMarkdownLink({
+              context: { kind: "note", presentation: "live_preview", pageUuid: contextPageUuid },
+              disposition: resolved.disposition,
+              target: resolved.target,
+            });
+            return true;
+          },
         }),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
-        documentEditorTheme,
-      ],
-    });
+      ),
+      EditorView.updateListener.of((update) => {
+        if (
+          appliedModeRef.current !== pendingModeRef.current &&
+          !update.view.composing &&
+          !update.view.compositionStarted
+        ) {
+          queueMicrotask(applyPendingMode);
+        }
+        if (!update.docChanged) return;
+        if (
+          update.transactions.some((transaction) => transaction.annotation(externalDocumentUpdate))
+        ) {
+          return;
+        }
+        callbacksRef.current.onChange(update.state.doc.toString(), update.view.composing);
+      }),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
+      documentEditorTheme,
+    ];
+    const freshState = EditorState.create({ doc: initialValueRef.current, extensions });
+    const cached = editorSession?.state;
+    const state =
+      cached?.doc.toString() === initialValueRef.current
+        ? cached.update({ effects: StateEffect.reconfigure.of(extensions) }).state
+        : freshState;
     view = new EditorView({ state, parent });
     viewRef.current = view;
+    if (editorSession?.focused && !readOnly) view.focus();
     applyPendingModeRef.current = applyPendingMode;
     return () => {
+      if (editorSession) {
+        editorSession.state = view.state;
+        editorSession.focused = view.hasFocus;
+      }
       destroyed = true;
       clearModeRetry();
       applyPendingModeRef.current = () => undefined;

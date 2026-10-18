@@ -19,7 +19,6 @@ import {
   getJournal,
   getPage,
   getPageByTitle,
-  loadSettings,
   redo,
   undo,
   type Content,
@@ -44,7 +43,6 @@ import {
 } from "@/features/workspace/workspace-model";
 import type { WorkspaceController } from "@/features/workspace/workspace-controller";
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
-import { restoreWorkspaceSession } from "@/features/workspace/workspace-store";
 import { usePageSessionRegistry } from "./page-session";
 import { usePageNavigationStore } from "./page-navigation-store";
 
@@ -66,7 +64,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
   const creatingNoteRef = useRef(false);
   const journalBusyRef = useRef(false);
   const navigationEpochRef = useRef(0);
-  const startupAppliedRef = useRef(false);
   const activeContent = activePane.content;
   const activePageUuid =
     activeContent.kind === PaneContentKind.Page
@@ -243,45 +240,6 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     },
     [openTarget, queryClient, showEditor],
   );
-
-  useEffect(() => {
-    if (!ready || startupAppliedRef.current) return;
-    startupAppliedRef.current = true;
-    void (async () => {
-      try {
-        const settings = await queryClient.fetchQuery({
-          queryKey: queryKeys.settings,
-          queryFn: loadSettings,
-        });
-        switch (settings.startupView) {
-          case "dashboard":
-            return;
-          case "last_session":
-            if (restoreWorkspaceSession()) showEditor();
-            return;
-          case "today":
-            await openJournal(todayJournalDate());
-            return;
-          case "specific_page": {
-            if (!settings.startupPageUuid) return;
-            const page = await queryClient.fetchQuery({
-              queryKey: queryKeys.page(settings.startupPageUuid),
-              queryFn: () => getPage(settings.startupPageUuid as string),
-            });
-            if (!page) {
-              notifyInfo("The configured startup note no longer exists. Opened Dashboard instead.");
-              return;
-            }
-            queryClient.setQueryData(queryKeys.page(page.uuid), page);
-            openTarget(pageTarget(page.uuid), currentDisposition);
-            showEditor();
-          }
-        }
-      } catch (error) {
-        notifyError("startup", error);
-      }
-    })();
-  }, [openJournal, openTarget, queryClient, ready, showEditor]);
 
   const captureJournal = useCallback(
     async (date: JournalDate, markdown: string, openAfterCapture = false) => {

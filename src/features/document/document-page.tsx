@@ -17,13 +17,18 @@ import {
   type PersistedDocumentSnapshot,
 } from "@/features/pages/page-session";
 import { DocumentCodec } from "./document-codec";
-import { ContinuousDocumentEditor, type DocumentAuthoringMode } from "./continuous-document-editor";
+import {
+  ContinuousDocumentEditor,
+  type DocumentAuthoringMode,
+  type DocumentEditorSession,
+} from "./continuous-document-editor";
 import { documentUnitsForSave } from "./document-save-model";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 import type { BlockAnchor } from "@/features/markdown/rehype-block-anchors";
 import type { DocumentRange } from "./document-codec";
 
 type Props = {
+  editorSession?: DocumentEditorSession;
   pageUuid: string;
   editing: boolean;
   canEdit: boolean;
@@ -58,6 +63,7 @@ export function pageDocumentToPersisted(snapshot: PageDocumentSnapshot): Persist
 }
 
 export function DocumentPage({
+  editorSession,
   pageUuid,
   editing,
   canEdit,
@@ -92,6 +98,7 @@ export function DocumentPage({
 
   return (
     <LoadedDocumentPage
+      editorSession={editorSession}
       pageUuid={pageUuid}
       persisted={persisted}
       editing={editing}
@@ -114,6 +121,7 @@ type LoadedProps = Props & {
 };
 
 function LoadedDocumentPage({
+  editorSession,
   pageUuid,
   persisted,
   editing,
@@ -298,6 +306,7 @@ function LoadedDocumentPage({
             </p>
           )}
           <ContinuousDocumentEditor
+            editorSession={editorSession}
             value={buffer}
             readOnly={!canEdit || !editing}
             focusRequest={focusRequest}

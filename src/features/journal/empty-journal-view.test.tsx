@@ -1,6 +1,9 @@
+import { createInitialWorkspaceState } from "@/features/workspace/workspace-model";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EmptyJournalView } from "./empty-journal-view";
+
+vi.mock("./journal-entry", () => ({ JournalEntry: () => <div>Journal editor</div> }));
 
 describe("EmptyJournalView", () => {
   it("previews a missing date without forcing the mobile keyboard open", () => {
@@ -8,14 +11,13 @@ describe("EmptyJournalView", () => {
       <EmptyJournalView
         date="2026-07-17"
         busy={false}
-        onCapture={async () => true}
-        onOpenAllNotes={() => undefined}
+        paneId={createInitialWorkspaceState().primaryPaneId}
         onOpenDate={() => undefined}
       />,
     );
 
-    expect(html).toContain("This date is only being previewed");
-    expect(html).toContain('aria-label="Write the first entry for journal 2026-07-17"');
+    expect(html).not.toContain("Save first entry");
+    expect(html).toContain("Journal editor");
     expect(html).not.toContain("autofocus");
   });
 
@@ -24,13 +26,11 @@ describe("EmptyJournalView", () => {
       <EmptyJournalView
         date="2026-07-17"
         busy
-        onCapture={async () => true}
-        onOpenAllNotes={() => undefined}
+        paneId={createInitialWorkspaceState().primaryPaneId}
         onOpenDate={() => undefined}
       />,
     );
 
-    expect(html).toContain('aria-busy="true"');
-    expect(html.match(/disabled=""/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(html.match(/disabled=""/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });
