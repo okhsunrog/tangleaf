@@ -427,6 +427,15 @@
   Прошли 10 recovery, 8 core snapshot и 6 portable tests, scoped/core и host all-target Clippy.
   Проверки публикации выполнены на Linux; POSIX/Windows paths реализованы, другие ОС не проверены.
 
+- Аналогичный lifecycle error path закрыт у AI Store: migration/generation/vec table/первичная
+  control запись принадлежат одному владельцу открытия; любая ошибка дренирует/join worker
+  до возврата. Три регрессии проходят реальные поздние ошибки, затем проверяют закрытый handle
+  и безопасный retry. Добавлен отдельный NORMAL/FULL workload AI-файла: persistent control,
+  reconcile/jobs, synthetic 768-dimensional embeddings/search и extraction results, без модели
+  или сети. Короткий сценарий обеих политик проверяет 33 документа, vectors/entities/mentions,
+  control и reopen; 59 AI lib tests passed / 1 ignored, all-target Clippy чистый.
+  Production durability пока не менялась; release-сравнение AI выполняется следующим шагом.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

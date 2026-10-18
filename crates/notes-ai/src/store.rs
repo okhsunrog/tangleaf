@@ -231,63 +231,96 @@ impl AiStore {
         )
         .await
         .context("opening server AI database")?;
-        connection
-            .call(|database| {
-                migrations()
-                    .to_latest(database)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-            })
-            .await
-            .context("applying server AI database migrations")?;
-
-        let configured_identity = identity.clone();
-        let (generation_id, table_name) = connection
-            .call(move |database| {
-                let existing = database
-                    .query_row(
-                        "SELECT id, table_name FROM index_generations
-                         WHERE identity = ?1 AND dimensions = ?2
-                           AND status IN ('building', 'active')
-                         ORDER BY status = 'active' DESC, created_at DESC LIMIT 1",
-                        rusqlite::params![configured_identity, dimensions as i64],
-                        |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .optional()?;
-                if let Some(existing) = existing {
-                    return Ok(existing);
-                }
-                let generation_id = uuid::Uuid::now_v7();
-                let table_name = vector_table_name(generation_id);
-                database.execute(
-                    "INSERT INTO index_generations
-                       (id, identity, dimensions, table_name, status, created_at)
-                     VALUES (?1, ?2, ?3, ?4, 'building', unixepoch())",
-                    rusqlite::params![
-                        generation_id,
-                        configured_identity,
-                        dimensions as i64,
-                        table_name
-                    ],
-                )?;
-                Ok((generation_id, table_name))
-            })
-            .await?;
-        ensure_vector_table(&connection, &table_name, dimensions).await?;
-        let store = Self {
+        Self::initialize_connection(
             connection,
             identity,
             dimensions,
-            generation_id,
-            table_name,
-            #[cfg(test)]
-            reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(test)]
-            extraction_reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        };
-        if initialize_control {
-            store.set_control(default_control).await?;
+            initialize_control,
+            default_control,
+        )
+        .await
+    }
+
+    async fn initialize_connection(
+        connection: Connection,
+        identity: String,
+        dimensions: usize,
+        initialize_control: bool,
+        default_control: AiControl,
+    ) -> Result<Self> {
+        let initialized = async {
+            connection
+                .call(|database| {
+                    migrations()
+                        .to_latest(database)
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+                })
+                .await
+                .context("applying server AI database migrations")?;
+
+            let configured_identity = identity.clone();
+            let (generation_id, table_name) = connection
+                .call(move |database| {
+                    let existing = database
+                        .query_row(
+                            "SELECT id, table_name FROM index_generations
+                         WHERE identity = ?1 AND dimensions = ?2
+                           AND status IN ('building', 'active')
+                         ORDER BY status = 'active' DESC, created_at DESC LIMIT 1",
+                            rusqlite::params![configured_identity, dimensions as i64],
+                            |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .optional()?;
+                    if let Some(existing) = existing {
+                        return Ok(existing);
+                    }
+                    let generation_id = uuid::Uuid::now_v7();
+                    let table_name = vector_table_name(generation_id);
+                    database.execute(
+                        "INSERT INTO index_generations
+                       (id, identity, dimensions, table_name, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'building', unixepoch())",
+                        rusqlite::params![
+                            generation_id,
+                            configured_identity,
+                            dimensions as i64,
+                            table_name
+                        ],
+                    )?;
+                    Ok((generation_id, table_name))
+                })
+                .await?;
+            ensure_vector_table(&connection, &table_name, dimensions).await?;
+            let store = Self {
+                connection: connection.clone(),
+                identity,
+                dimensions,
+                generation_id,
+                table_name,
+                #[cfg(test)]
+                reconcile_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                #[cfg(test)]
+                extraction_reconcile_scans: std::sync::Arc::new(
+                    std::sync::atomic::AtomicUsize::new(0),
+                ),
+            };
+            if initialize_control {
+                store.set_control(default_control).await?;
+            }
+            Ok::<Self, anyhow::Error>(store)
         }
-        Ok(store)
+        .await;
+        match initialized {
+            Ok(store) => Ok(store),
+            // Startup still owns this worker when no AiStore can be returned.
+            // Complete its drain/join before reporting the initialization error.
+            Err(error) => match connection.close().await {
+                Ok(()) => Err(error),
+                Err(close) => Err(error.context(format!(
+                    "AI SQLite initialization cleanup also failed: {close:#}"
+                ))),
+            },
+        }
     }
 
     pub fn identity(&self) -> &str {
@@ -1803,6 +1836,10 @@ pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: u
     digest.update(b"cosine:provider-normalized:input-v1");
     format!("sha256:{}", hex::encode(digest.finalize()))
 }
+
+#[cfg(test)]
+#[path = "store/durability_tests.rs"]
+mod durability_tests;
 
 #[cfg(test)]
 mod tests {
