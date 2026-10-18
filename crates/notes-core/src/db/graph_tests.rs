@@ -354,6 +354,189 @@ async fn backlinks_discovery_and_hydration_share_one_wal_snapshot() {
 }
 
 #[tokio::test]
+async fn backlinks_snapshot_preserves_source_order_reference_scope_and_distinct_page_kinds() {
+    let (_directory, connection) = fixture(0).await;
+    let date = "2026-10-18".parse::<crate::JournalDate>().unwrap();
+    let journal_uuid = crate::journal_page_uuid(workspace_uuid(&connection).await.unwrap(), &date);
+    operation::apply_local_kinds(
+        &connection,
+        vec![
+            OpKind::PageAliasSet(crate::PageAliasSet {
+                uuid: id(2),
+                alias: crate::PageAlias::new("Target alias").unwrap(),
+                present: true,
+            }),
+            block(
+                id(32),
+                id(1),
+                Some(id(10)),
+                &format!("[[Target]] [[Target alias]] (({})) (({}))", id(20), id(20)),
+            ),
+            block(id(33), id(3), None, "[[Target alias]]"),
+            OpKind::PageCreate(PageCreate {
+                uuid: journal_uuid,
+                title: None,
+                kind: PageKind::Journal { date },
+                layout: PageLayout::Document,
+                created_at: 10,
+            }),
+            block(id(34), journal_uuid, None, "[[Target]]"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    for (target, expected) in [
+        (id(2), vec![id(30), id(32), id(33), id(34)]),
+        (id(20), vec![id(30), id(32)]),
+    ] {
+        let snapshot = find_backlinks_snapshot(&connection, target).await.unwrap();
+        assert_eq!(
+            snapshot
+                .blocks
+                .iter()
+                .map(|block| block.uuid)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            find_backlinks(&connection, target).await.unwrap(),
+            snapshot
+                .blocks
+                .iter()
+                .cloned()
+                .map(Content::Block)
+                .collect::<Vec<_>>()
+        );
+        let owner_uuids = snapshot
+            .blocks
+            .iter()
+            .map(|block| block.page_uuid)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            snapshot
+                .pages
+                .iter()
+                .map(|page| page.uuid)
+                .collect::<Vec<_>>(),
+            owner_uuids.into_iter().collect::<Vec<_>>()
+        );
+        if target == id(2) {
+            assert!(
+                snapshot
+                    .pages
+                    .iter()
+                    .any(|page| page.uuid == journal_uuid && page.kind.is_journal())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn backlinks_snapshot_keeps_a_missing_owner_explicit_without_losing_its_source() {
+    let (_directory, connection) = fixture(0).await;
+    let empty = find_backlinks_snapshot(&connection, id(99)).await.unwrap();
+    assert!(empty.blocks.is_empty() && empty.pages.is_empty());
+    // A healthy workspace cannot contain this state because of the FK. Keep
+    // the read model useful if an imported/externally altered file does.
+    connection
+        .call(|database| {
+            database.pragma_update(None, "foreign_keys", false)?;
+            database.execute("DELETE FROM pages WHERE uuid = ?1", [id(1)])?;
+            database.pragma_update(None, "foreign_keys", true)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let snapshot = find_backlinks_snapshot(&connection, id(2)).await.unwrap();
+    assert_eq!(
+        snapshot
+            .blocks
+            .iter()
+            .map(|block| block.uuid)
+            .collect::<Vec<_>>(),
+        [id(30)]
+    );
+    assert!(snapshot.pages.is_empty());
+}
+
+#[tokio::test]
+async fn backlinks_snapshot_source_blocks_and_owner_pages_share_one_wal_snapshot() {
+    let (directory, connection) = fixture(0).await;
+    let (pause, writer) = writer(&directory, "FROM pages WHERE uuid IN (");
+    observe(&connection, Some(pause)).await;
+    let result = find_backlinks_snapshot(&connection, id(2)).await.unwrap();
+    let stats = observed(&connection).await;
+    writer.join().unwrap().unwrap();
+    assert!(stats.writer_committed);
+    assert_eq!(result.blocks.len(), 1);
+    assert!(result.blocks[0].markdown.starts_with("[[Target]]"));
+    assert_eq!(result.pages.len(), 1);
+    assert_eq!(result.pages[0].uuid, result.blocks[0].page_uuid);
+    assert_eq!(result.pages[0].title.as_deref(), Some("Source"));
+    assert!(
+        find_backlinks_snapshot(&connection, id(2))
+            .await
+            .unwrap()
+            .blocks
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn backlinks_snapshot_chunked_queries_stay_bounded_with_unrelated_roots() {
+    let mut counts = Vec::new();
+    for unrelated in [1_000, 10_000] {
+        let (_directory, connection) = fixture(unrelated).await;
+        let mut kinds = vec![page(id(90), "Batch target")];
+        for offset in 0..=UUID_READ_CHUNK_SIZE {
+            let owner = id(1_000_000 + offset as u128);
+            kinds.push(page(owner, &format!("Batch owner {offset}")));
+            kinds.push(block(
+                id(50_000 + offset as u128),
+                owner,
+                None,
+                "[[Batch target]]",
+            ));
+        }
+        kinds.push(block(id(60_000), id(1_000_000), None, "[[Batch target]]"));
+        kinds.push(block(id(60_001), id(1_000_000), None, "[[Batch target]]"));
+        operation::apply_local_kinds(&connection, kinds)
+            .await
+            .unwrap();
+        observe(&connection, None).await;
+        let snapshot = find_backlinks_snapshot(&connection, id(90)).await.unwrap();
+        let stats = observed(&connection).await;
+        assert_eq!(snapshot.blocks.len(), UUID_READ_CHUNK_SIZE + 3);
+        assert_eq!(snapshot.pages.len(), UUID_READ_CHUNK_SIZE + 1);
+        assert!(
+            snapshot
+                .blocks
+                .windows(2)
+                .all(|pair| pair[0].uuid < pair[1].uuid)
+        );
+        assert!(
+            snapshot
+                .pages
+                .windows(2)
+                .all(|pair| pair[0].uuid < pair[1].uuid)
+        );
+        assert_eq!(stats.queries.len(), 5); // discovery, two block chunks, two page chunks
+        for query in &stats.queries {
+            assert!(query.matches('?').count() <= UUID_READ_CHUNK_SIZE);
+            assert!(
+                query.contains(" IN (")
+                    || query
+                        .contains("source_block_uuid FROM page_links WHERE target_page_uuid = ?1")
+            );
+        }
+        assert_eq!(stats.rows, 2 * snapshot.blocks.len() + snapshot.pages.len());
+        counts.push((stats.queries.len(), stats.rows));
+    }
+    assert_eq!(counts[0], counts[1]);
+}
+
+#[tokio::test]
 async fn ancestor_target_and_traversal_share_one_wal_snapshot() {
     let (directory, connection) = fixture(0).await;
     let (pause, writer) = writer(&directory, "WITH RECURSIVE ancestors");

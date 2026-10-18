@@ -264,9 +264,14 @@ async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSe
   if (changes.graphChangedContent.length) {
     invalidations.push(invalidateFamily(queryKeys.graphRoot));
   }
-  // Backlink results embed complete source blocks, including Markdown and
-  // revisions, even when the graph's labels and edge sets stay unchanged.
-  if (changes.blocks.length || changes.graphChangedContent.length) {
+  // Backlink snapshots embed complete source blocks and their owning pages,
+  // even when the graph's labels and edge sets stay unchanged.
+  if (
+    changes.blocks.length ||
+    changes.changedPages.length ||
+    changes.deletedPages.length ||
+    changes.graphChangedContent.length
+  ) {
     invalidations.push(invalidateFamily(queryKeys.backlinksRoot));
   }
   if (changes.attachmentOwners.length) {

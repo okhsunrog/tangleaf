@@ -47,7 +47,10 @@ pub use document::{
     PageDocumentReplaceOutcome, PageDocumentSnapshot, get_page_document, replace_page_document,
     replace_page_document_with_outcome,
 };
-pub use graph::{find_backlinks, graph_snapshot, neighbors, read_ancestors, read_subtree};
+pub use graph::{
+    BacklinksSnapshot, find_backlinks, find_backlinks_snapshot, graph_snapshot, neighbors,
+    read_ancestors, read_subtree,
+};
 pub use history::{HistoryMoveResult, HistoryStatus, history_status, redo_history, undo_history};
 pub use journals::{
     JournalListLimit, append_to_journal, append_to_journal_with_ops, ensure_journal,

@@ -332,6 +332,15 @@
   с блокированным SQL job и reopen, вместе с двумя cancellation/admission тестами (3/3).
   Финальное закрытие Store подключится после координации raw ink, а не раньше неё.
 
+- Backlinks render теперь получает один нормализованный DTO: source blocks и уникальные
+  страницы-владельцы прочитаны в одной read-транзакции, hydration разбита на IN-пакеты по 256.
+  Frontend больше не запускает getPage для каждой исходной страницы; отсутствующий owner
+  показан явно, без бесконечного loading. Click-time navigation по-прежнему определяет текущую
+  страницу блока. Обновление Page metadata также инвалидирует backlinks snapshot.
+  Core graph suite — 16/16, frontend backlinks/query — 51/51; scoped format/lint/type check чистые.
+  Регрессии проверяют одновременную WAL запись, порядок ссылок/journal/alias/block refs,
+  отсутствующего owner и границы IN-пакетов при 1k/10k несвязанных блоков.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

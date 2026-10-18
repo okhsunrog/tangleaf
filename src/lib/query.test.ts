@@ -146,6 +146,21 @@ describe("domain event query invalidation", () => {
     for (const key of unrelated) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
   });
 
+  it.each(["changedPages", "deletedPages"] as const)(
+    "refreshes embedded backlink owner pages on %s even when graph edges stay equal",
+    async (kind) => {
+      const client = new QueryClient();
+      const backlinks = queryKeys.backlinks("target-page");
+      const graph = queryKeys.graph(null);
+      client.setQueryData(backlinks, { blocks: [], pages: [{ uuid: "source-page" }] });
+      client.setQueryData(graph, {});
+      await applyDomainEvent(client, committed({ [kind]: ["source-page"] }));
+      expect(client.getQueryState(backlinks)?.isInvalidated).toBe(true);
+      expect(client.getQueryState(graph)?.isInvalidated).toBe(false);
+      client.clear();
+    },
+  );
+
   it("removes deleted page and block snapshots and refreshes graph and attachments when changed", async () => {
     const client = new QueryClient();
     const removed = [

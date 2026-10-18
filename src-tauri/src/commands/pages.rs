@@ -222,8 +222,8 @@ pub async fn neighbors(
 pub async fn find_backlinks(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
-) -> CommandResult<Vec<db::Content>> {
-    db::find_backlinks(state.store.read_connection(), uuid)
+) -> CommandResult<db::BacklinksSnapshot> {
+    db::find_backlinks_snapshot(state.store.read_connection(), uuid)
         .await
         .map_err(err)
 }

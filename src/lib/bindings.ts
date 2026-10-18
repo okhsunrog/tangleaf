@@ -150,7 +150,7 @@ export const commands = {
 	cancelChat: (requestId: string) => __TAURI_INVOKE<boolean>("cancel_chat", { requestId }),
 	listPages: (filter: "notes" | "journals" | "all" | null, limit: number | null) => typedError<Page[], CommandError>(__TAURI_INVOKE("list_pages", { filter, limit })),
 	deletePage: (uuid: string) => typedError<boolean, CommandError>(__TAURI_INVOKE("delete_page", { uuid })),
-	findBacklinks: (uuid: string) => typedError<Content[], CommandError>(__TAURI_INVOKE("find_backlinks", { uuid })),
+	findBacklinks: (uuid: string) => typedError<BacklinksSnapshot, CommandError>(__TAURI_INVOKE("find_backlinks", { uuid })),
 	graphSnapshot: (focusUuid: string | null) => typedError<GraphSnapshot, CommandError>(__TAURI_INVOKE("graph_snapshot", { focusUuid })),
 	exportData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("export_data")),
 	importData: () => typedError<string | null, CommandError>(__TAURI_INVOKE("import_data")),
@@ -306,6 +306,16 @@ export type AttachmentImageDescriptor = {
 export type AttachmentImageMime = "image/gif" | "image/jpeg" | "image/png" | "image/webp";
 
 export type AttachmentOwner = { kind: "page"; uuid: string } | { kind: "block"; uuid: string };
+
+/**
+ *  Source blocks and their distinct owning pages from one read snapshot.
+ *  Blocks retain backlink UUID order; pages use UUID order. An absent owning
+ *  page is omitted explicitly rather than represented by a placeholder page.
+ */
+export type BacklinksSnapshot = {
+	blocks: Block[],
+	pages: Page[],
+};
 
 export type Block = {
 	uuid: string,

@@ -89,18 +89,67 @@ fn neighbor_uuids(
 
 pub async fn find_backlinks(conn: &Connection, uuid: Uuid) -> Result<Vec<Content>> {
     read_graph(conn, move |transaction| {
-        let mut statement = transaction.prepare_cached(
+        let uuids = backlink_uuids(transaction, uuid)?;
+        get_contents_in_transaction(transaction, &uuids)
+    })
+    .await
+}
+
+/// Source blocks and their distinct owning pages from one read snapshot.
+/// Blocks retain backlink UUID order; pages use UUID order. An absent owning
+/// page is omitted explicitly rather than represented by a placeholder page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BacklinksSnapshot {
+    pub blocks: Vec<Block>,
+    pub pages: Vec<Page>,
+}
+
+pub async fn find_backlinks_snapshot(conn: &Connection, uuid: Uuid) -> Result<BacklinksSnapshot> {
+    read_graph(conn, move |transaction| {
+        let uuids = backlink_uuids(transaction, uuid)?;
+        let mut by_uuid = blocks::read_blocks_by_uuid(transaction, &uuids)?;
+        let blocks = uuids
+            .into_iter()
+            .filter_map(|uuid| by_uuid.remove(&uuid))
+            .collect::<Vec<_>>();
+        let page_uuids = blocks
+            .iter()
+            .map(|block| block.page_uuid)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut pages = Vec::with_capacity(page_uuids.len());
+        for chunk in page_uuids.chunks(UUID_READ_CHUNK_SIZE) {
+            let sql = format!(
+                "SELECT {PAGE_COLUMNS} FROM pages WHERE uuid IN ({}) ORDER BY pages.uuid",
+                placeholders(chunk.len())
+            );
+            pages.extend(
+                transaction
+                    .prepare_cached(&sql)?
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), row_to_page)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        Ok(BacklinksSnapshot { blocks, pages })
+    })
+    .await
+}
+
+fn backlink_uuids(
+    transaction: &rusqlite::Transaction<'_>,
+    uuid: Uuid,
+) -> rusqlite::Result<Vec<Uuid>> {
+    transaction
+        .prepare_cached(
             "SELECT source_block_uuid FROM page_links WHERE target_page_uuid = ?1
              UNION
              SELECT source_block_uuid FROM block_refs WHERE target_block_uuid = ?1
              ORDER BY 1",
-        )?;
-        let uuids = statement
-            .query_map([uuid], |row| row.get::<_, Uuid>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        get_contents_in_transaction(transaction, &uuids)
-    })
-    .await
+        )?
+        .query_map([uuid], |row| row.get(0))?
+        .collect()
 }
 
 pub async fn read_ancestors(conn: &Connection, uuid: Uuid) -> Result<Vec<Content>> {
