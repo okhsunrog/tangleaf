@@ -762,7 +762,7 @@ async fn create_and_delete_history_failures_roll_back_content_and_bookkeeping() 
 }
 
 #[tokio::test]
-async fn legacy_middle_insertion_keeps_full_ordinal_batch_and_immediate_history_policy() {
+async fn middle_insertion_keeps_neighbor_keys_and_immediate_history_policy() {
     let f = fixture(BlockStyle::Paragraph).await;
     let second = db::create_block(
         &f.connection,
@@ -784,8 +784,7 @@ async fn legacy_middle_insertion_keeps_full_ordinal_batch_and_immediate_history_
     )
     .await
     .unwrap();
-    // Sparse placement is a separate change: keep create + moves for all three.
-    assert_eq!(inserted.operations.len(), 4);
+    assert_eq!(inserted.operations.len(), 1);
     let blocks = db::list_block_children(&f.connection, f.block.page_uuid, None)
         .await
         .unwrap();
@@ -793,12 +792,10 @@ async fn legacy_middle_insertion_keeps_full_ordinal_batch_and_immediate_history_
         blocks.iter().map(|block| block.uuid).collect::<Vec<_>>(),
         [f.block.uuid, inserted.value.uuid, second.uuid]
     );
-    for (index, block) in blocks.iter().enumerate() {
-        assert_eq!(
-            block.order_key,
-            notes_core::OrderKey::from_ordinal(index + 1)
-        );
-    }
+    assert_eq!(blocks[0], f.block);
+    assert_eq!(blocks[2], second);
+    assert!(blocks[0].order_key < blocks[1].order_key);
+    assert!(blocks[1].order_key < blocks[2].order_key);
     let payload = f
         .connection
         .call(|database| {
@@ -863,8 +860,9 @@ async fn queued_reorders_use_current_sibling_order_and_return_each_intermediate_
     let (first, next) = tokio::join!(first, next);
     let first = first.unwrap();
     let next = next.unwrap();
-    assert_eq!(first.value.order_key, notes_core::OrderKey::from_ordinal(2));
-    assert_eq!(next.value.order_key, notes_core::OrderKey::from_ordinal(1));
+    assert!(f.block.order_key < first.value.order_key);
+    assert!(first.value.order_key < second.order_key);
+    assert!(next.value.order_key < f.block.order_key);
     assert_eq!(
         root_uuids(&f).await,
         [third.uuid, f.block.uuid, second.uuid]
@@ -887,8 +885,7 @@ async fn queued_reorders_use_current_sibling_order_and_return_each_intermediate_
         );
     }
     let after = bookkeeping(&f.connection).await;
-    // Keep the existing full ordinal sibling batches until placement migration.
-    assert_eq!(after.outbox, before.outbox + 6);
+    assert_eq!(after.outbox, before.outbox + 2);
     assert_eq!(after.undo, before.undo + 2);
     assert_eq!(after.version, before.version + 2);
     assert_eq!(f.notices.lock().unwrap().len(), 2);
@@ -1159,13 +1156,13 @@ async fn every_structural_command_rolls_back_all_rows_after_a_late_history_failu
 }
 
 #[tokio::test]
-async fn legacy_structural_adapters_preserve_full_ordinal_batches_and_skip_boundary_operations() {
+async fn legacy_structural_adapters_move_one_block_and_skip_boundary_operations() {
     let f = fixture(BlockStyle::Paragraph).await;
     let second = child(&f, None, "Second").await;
     let reordered = db::reorder_block_with_ops(&f.connection, second.uuid, ReorderDirection::Up)
         .await
         .unwrap();
-    assert_eq!(reordered.operations.len(), 2);
+    assert_eq!(reordered.operations.len(), 1);
     assert_eq!(root_uuids(&f).await, [second.uuid, f.block.uuid]);
     let moved = db::move_block_with_ops(&f.connection, f.block.uuid, Some(second.uuid), None)
         .await
@@ -1175,7 +1172,7 @@ async fn legacy_structural_adapters_preserve_full_ordinal_batches_and_skip_bound
     let outdented = db::outdent_block_with_ops(&f.connection, f.block.uuid)
         .await
         .unwrap();
-    assert_eq!(outdented.operations.len(), 2);
+    assert_eq!(outdented.operations.len(), 1);
     assert_eq!(root_uuids(&f).await, [second.uuid, f.block.uuid]);
     let indented = db::indent_block_with_ops(&f.connection, f.block.uuid)
         .await

@@ -94,6 +94,201 @@ fn read_block_children(
         .collect()
 }
 
+#[derive(Clone)]
+struct SiblingPosition {
+    uuid: uuid::Uuid,
+    order_key: OrderKey,
+}
+
+#[derive(Clone, Copy)]
+enum SiblingInsertion {
+    End,
+    Before(uuid::Uuid),
+    After(uuid::Uuid),
+}
+
+fn row_to_sibling_position(row: &rusqlite::Row<'_>) -> rusqlite::Result<SiblingPosition> {
+    Ok(SiblingPosition {
+        uuid: row.get(0)?,
+        order_key: row.get(1)?,
+    })
+}
+
+/// An indexed seek returns one neighboring anchor, never sibling Markdown.
+fn sibling_neighbor(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    anchor: Option<&SiblingPosition>,
+    backwards: bool,
+    excluded_uuid: Option<uuid::Uuid>,
+) -> rusqlite::Result<Option<SiblingPosition>> {
+    let comparison = if backwards { "<" } else { ">" };
+    let order = if backwards { "DESC" } else { "ASC" };
+    let bound = if anchor.is_some() {
+        format!(" AND (order_key, uuid) {comparison} (?4, ?5)")
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "SELECT uuid, order_key FROM blocks
+          WHERE page_uuid = ?1 AND parent_uuid IS ?2 AND uuid IS NOT ?3{bound}
+          ORDER BY order_key {order}, uuid {order} LIMIT 1"
+    );
+    if let Some(anchor) = anchor {
+        transaction.query_row(
+            &sql,
+            rusqlite::params![
+                page_uuid,
+                parent_uuid,
+                excluded_uuid,
+                anchor.order_key,
+                anchor.uuid
+            ],
+            row_to_sibling_position,
+        )
+    } else {
+        transaction.query_row(
+            &sql,
+            rusqlite::params![page_uuid, parent_uuid, excluded_uuid],
+            row_to_sibling_position,
+        )
+    }
+    .optional()
+}
+
+fn allocate_sibling_keys(
+    lower: Option<&OrderKey>,
+    upper: Option<&OrderKey>,
+    count: usize,
+) -> Option<Vec<OrderKey>> {
+    if upper.is_some() {
+        return OrderKey::between(lower, upper, count);
+    }
+    let Some(lower) = lower else {
+        return Some((1..=count).map(OrderKey::from_ordinal).collect());
+    };
+    let mut previous = lower.clone();
+    (0..count)
+        .map(|_| {
+            let next = previous.after();
+            if next == previous {
+                return None;
+            }
+            previous = next.clone();
+            Some(next)
+        })
+        .collect()
+}
+
+/// Reserve a gap for created or moved siblings. Existing siblings are loaded
+/// only when that precise gap is tied/exhausted and must be rebalanced.
+fn sibling_placement(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    insertion: SiblingInsertion,
+    excluded_uuid: Option<uuid::Uuid>,
+    count: usize,
+    invalid_anchor: crate::CoreError,
+) -> crate::CoreResult<(Vec<OrderKey>, Vec<OpKind>)> {
+    if count == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let (lower, upper) = match insertion {
+        SiblingInsertion::End => (
+            sibling_neighbor(
+                transaction,
+                page_uuid,
+                parent_uuid,
+                None,
+                true,
+                excluded_uuid,
+            )?,
+            None,
+        ),
+        SiblingInsertion::Before(uuid) | SiblingInsertion::After(uuid) => {
+            let anchor = transaction
+                .query_row(
+                    "SELECT uuid, order_key FROM blocks
+                  WHERE uuid = ?1 AND page_uuid = ?2 AND parent_uuid IS ?3 AND uuid IS NOT ?4",
+                    rusqlite::params![uuid, page_uuid, parent_uuid, excluded_uuid],
+                    row_to_sibling_position,
+                )
+                .optional()?
+                .ok_or(invalid_anchor)?;
+            if matches!(insertion, SiblingInsertion::After(_)) {
+                let upper = sibling_neighbor(
+                    transaction,
+                    page_uuid,
+                    parent_uuid,
+                    Some(&anchor),
+                    false,
+                    excluded_uuid,
+                )?;
+                (Some(anchor), upper)
+            } else {
+                let lower = sibling_neighbor(
+                    transaction,
+                    page_uuid,
+                    parent_uuid,
+                    Some(&anchor),
+                    true,
+                    excluded_uuid,
+                )?;
+                (lower, Some(anchor))
+            }
+        }
+    };
+    if let Some(keys) = allocate_sibling_keys(
+        lower.as_ref().map(|anchor| &anchor.order_key),
+        upper.as_ref().map(|anchor| &anchor.order_key),
+        count,
+    ) {
+        return Ok((keys, Vec::new()));
+    }
+
+    let siblings = transaction
+        .prepare(
+            "SELECT uuid, order_key FROM blocks
+          WHERE page_uuid = ?1 AND parent_uuid IS ?2 AND uuid IS NOT ?3
+          ORDER BY order_key, uuid",
+        )?
+        .query_map(
+            rusqlite::params![page_uuid, parent_uuid, excluded_uuid],
+            row_to_sibling_position,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let insertion_index = match insertion {
+        SiblingInsertion::End => siblings.len(),
+        SiblingInsertion::Before(uuid) | SiblingInsertion::After(uuid) => {
+            siblings
+                .iter()
+                .position(|sibling| sibling.uuid == uuid)
+                .ok_or_else(|| crate::CoreError::conflict("placement anchor disappeared"))?
+                + usize::from(matches!(insertion, SiblingInsertion::After(_)))
+        }
+    };
+    let moves = siblings
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, sibling)| {
+            let ordinal = index + 1 + if index >= insertion_index { count } else { 0 };
+            let order_key = OrderKey::from_ordinal(ordinal);
+            (order_key != sibling.order_key).then_some(OpKind::BlockMove(BlockMove {
+                uuid: sibling.uuid,
+                page_uuid,
+                parent_uuid,
+                order_key,
+            }))
+        })
+        .collect();
+    let keys = (1..=count)
+        .map(|offset| OrderKey::from_ordinal(insertion_index + offset))
+        .collect();
+    Ok((keys, moves))
+}
+
 pub async fn create_block(
     conn: &Connection,
     page_uuid: uuid::Uuid,
@@ -285,35 +480,25 @@ fn move_block_in_transaction(
             .into());
         }
     }
-    let siblings = read_block_children(transaction, block.page_uuid, new_parent_uuid)?;
-    let mut ordered = siblings
-        .into_iter()
-        .filter(|sibling| sibling.uuid != block.uuid)
-        .map(|sibling| sibling.uuid)
-        .collect::<Vec<_>>();
-    let insertion = match after_uuid {
-        Some(after) => ordered
-            .iter()
-            .position(|candidate| *candidate == after)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                crate::CoreError::invalid("after block is not a sibling of the moved block")
-            })?,
-        None => ordered.len(),
-    };
-    ordered.insert(insertion, block.uuid);
-    let kinds = ordered
-        .into_iter()
-        .enumerate()
-        .map(|(index, block_uuid)| {
-            OpKind::BlockMove(BlockMove {
-                uuid: block_uuid,
-                page_uuid: block.page_uuid,
-                parent_uuid: new_parent_uuid,
-                order_key: OrderKey::from_ordinal(index + 1),
-            })
-        })
-        .collect();
+    let insertion = after_uuid.map_or(SiblingInsertion::End, SiblingInsertion::After);
+    let (keys, mut kinds) = sibling_placement(
+        transaction,
+        block.page_uuid,
+        new_parent_uuid,
+        insertion,
+        Some(block.uuid),
+        1,
+        crate::CoreError::invalid("after block is not a sibling of the moved block"),
+    )?;
+    kinds.insert(
+        0,
+        OpKind::BlockMove(BlockMove {
+            uuid: block.uuid,
+            page_uuid: block.page_uuid,
+            parent_uuid: new_parent_uuid,
+            order_key: keys[0].clone(),
+        }),
+    );
     write.apply_action("move block", kinds, operation::ProjectionPolicy::Immediate)?;
     Ok(require_block(write.sql(), block.uuid)?)
 }
@@ -346,46 +531,28 @@ impl crate::store::NotesStore {
                     ));
                 }
             }
-            let siblings = read_block_children(transaction, page_uuid, parent_uuid)?;
-            let insertion = match after_uuid {
-                Some(after) => siblings
-                    .iter()
-                    .position(|block| block.uuid == after)
-                    .map(|index| index + 1)
-                    .ok_or_else(|| {
-                        crate::CoreError::invalid("after block is not a sibling of the new block")
-                    })?,
-                None => siblings.len(),
-            };
+            let insertion = after_uuid.map_or(SiblingInsertion::End, SiblingInsertion::After);
+            let (keys, moves) = sibling_placement(
+                transaction,
+                page_uuid,
+                parent_uuid,
+                insertion,
+                None,
+                1,
+                crate::CoreError::invalid("after block is not a sibling of the new block"),
+            )?;
             let uuid = uuid::Uuid::now_v7();
             let now = chrono::Utc::now().timestamp();
-            let appending = insertion == siblings.len();
-            let order_key = if appending {
-                next_append_order_key(siblings.last().map(|block| &block.order_key))?
-            } else {
-                OrderKey::from_ordinal(insertion + 1)
-            };
             let mut kinds = vec![OpKind::BlockCreate(BlockCreate {
                 uuid,
                 page_uuid,
                 parent_uuid,
-                order_key,
+                order_key: keys[0].clone(),
                 style,
                 markdown,
                 created_at: now,
             })];
-            if !appending {
-                let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-                ordered.insert(insertion, uuid);
-                kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-                    OpKind::BlockMove(BlockMove {
-                        uuid: block_uuid,
-                        page_uuid,
-                        parent_uuid,
-                        order_key: OrderKey::from_ordinal(index + 1),
-                    })
-                }));
-            }
+            kinds.extend(moves);
             write.apply_action(
                 "create block",
                 kinds,
@@ -509,33 +676,45 @@ impl crate::store::NotesStore {
     ) -> Result<crate::store::Committed<Block>> {
         self.write(move |write| -> Result<Block> {
             let block = require_block(write.sql(), uuid)?;
-            let mut siblings =
-                read_block_children(write.sql(), block.page_uuid, block.parent_uuid)?;
-            let index = siblings
-                .iter()
-                .position(|sibling| sibling.uuid == uuid)
-                .context("block is absent from its parent")?;
-            let target = match direction {
-                ReorderDirection::Up if index > 0 => Some(index - 1),
-                ReorderDirection::Down if index + 1 < siblings.len() => Some(index + 1),
-                ReorderDirection::Up | ReorderDirection::Down => None,
+            let source = SiblingPosition {
+                uuid,
+                order_key: block.order_key.clone(),
             };
-            let Some(target) = target else {
+            let backwards = direction == ReorderDirection::Up;
+            let Some(neighbor) = sibling_neighbor(
+                write.sql(),
+                block.page_uuid,
+                block.parent_uuid,
+                Some(&source),
+                backwards,
+                None,
+            )?
+            else {
                 return Ok(block);
             };
-            siblings.swap(index, target);
-            let kinds = siblings
-                .into_iter()
-                .enumerate()
-                .map(|(index, sibling)| {
-                    OpKind::BlockMove(BlockMove {
-                        uuid: sibling.uuid,
-                        page_uuid: block.page_uuid,
-                        parent_uuid: block.parent_uuid,
-                        order_key: OrderKey::from_ordinal(index + 1),
-                    })
-                })
-                .collect();
+            let insertion = if backwards {
+                SiblingInsertion::Before(neighbor.uuid)
+            } else {
+                SiblingInsertion::After(neighbor.uuid)
+            };
+            let (keys, mut kinds) = sibling_placement(
+                write.sql(),
+                block.page_uuid,
+                block.parent_uuid,
+                insertion,
+                Some(uuid),
+                1,
+                crate::CoreError::conflict("block is absent from its parent"),
+            )?;
+            kinds.insert(
+                0,
+                OpKind::BlockMove(BlockMove {
+                    uuid,
+                    page_uuid: block.page_uuid,
+                    parent_uuid: block.parent_uuid,
+                    order_key: keys[0].clone(),
+                }),
+            );
             write.apply_action(
                 "reorder block",
                 kinds,
@@ -557,12 +736,19 @@ impl crate::store::NotesStore {
     pub async fn indent_block(&self, uuid: uuid::Uuid) -> Result<crate::store::Committed<Block>> {
         self.write(move |write| -> Result<Block> {
             let block = require_block(write.sql(), uuid)?;
-            let siblings = read_block_children(write.sql(), block.page_uuid, block.parent_uuid)?;
-            let index = siblings
-                .iter()
-                .position(|sibling| sibling.uuid == uuid)
-                .context("block is absent from its parent")?;
-            let Some(previous) = index.checked_sub(1).and_then(|index| siblings.get(index)) else {
+            let source = SiblingPosition {
+                uuid,
+                order_key: block.order_key.clone(),
+            };
+            let Some(previous) = sibling_neighbor(
+                write.sql(),
+                block.page_uuid,
+                block.parent_uuid,
+                Some(&source),
+                true,
+                None,
+            )?
+            else {
                 return Ok(block);
             };
             move_block_in_transaction(write, block, Some(previous.uuid), None)
@@ -628,79 +814,15 @@ fn split_placement(
     source: &Block,
     count: usize,
 ) -> crate::CoreResult<(Vec<OrderKey>, Vec<OpKind>)> {
-    if count == 0 {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    // The sibling index covers this lookup; the ordinary Enter/paste path
-    // does not need to load every sibling's Markdown or renumber the page.
-    let next = transaction
-        .query_row(
-            "SELECT order_key FROM blocks
-              WHERE page_uuid = ?1 AND parent_uuid IS ?2
-                AND (order_key, uuid) > (?3, ?4)
-              ORDER BY order_key, uuid LIMIT 1",
-            rusqlite::params![
-                source.page_uuid,
-                source.parent_uuid,
-                source.order_key,
-                source.uuid,
-            ],
-            |row| row.get::<_, OrderKey>(0),
-        )
-        .optional()?;
-    let keys = if let Some(next) = next {
-        OrderKey::between(Some(&source.order_key), Some(&next), count)
-    } else {
-        let mut previous = source.order_key.clone();
-        (0..count)
-            .map(|_| {
-                let next = previous.after();
-                if next == previous {
-                    return None;
-                }
-                previous = next.clone();
-                Some(next)
-            })
-            .collect()
-    };
-    if let Some(keys) = keys {
-        return Ok((keys, Vec::new()));
-    }
-
-    // Tied or exhausted keys can occur after concurrent edits or repeated
-    // insertions. Rebalance only this sibling group and only changed keys.
-    let siblings = transaction
-        .prepare(
-            "SELECT uuid, order_key FROM blocks
-              WHERE page_uuid = ?1 AND parent_uuid IS ?2 ORDER BY order_key, uuid",
-        )?
-        .query_map(
-            rusqlite::params![source.page_uuid, source.parent_uuid],
-            |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, OrderKey>(1)?)),
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let source_index = siblings
-        .iter()
-        .position(|(uuid, _)| *uuid == source.uuid)
-        .ok_or_else(|| crate::CoreError::conflict("split source is absent from its siblings"))?;
-    let moves = siblings
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, (uuid, current))| {
-            let ordinal = index + 1 + if index > source_index { count } else { 0 };
-            let order_key = OrderKey::from_ordinal(ordinal);
-            (order_key != current).then_some(OpKind::BlockMove(BlockMove {
-                uuid,
-                page_uuid: source.page_uuid,
-                parent_uuid: source.parent_uuid,
-                order_key,
-            }))
-        })
-        .collect();
-    let keys = (1..=count)
-        .map(|offset| OrderKey::from_ordinal(source_index + offset + 1))
-        .collect();
-    Ok((keys, moves))
+    sibling_placement(
+        transaction,
+        source.page_uuid,
+        source.parent_uuid,
+        SiblingInsertion::After(source.uuid),
+        None,
+        count,
+        crate::CoreError::conflict("split source is absent from its siblings"),
+    )
 }
 
 #[doc(hidden)]

@@ -198,6 +198,15 @@
   Полный Tauri: 46 passed / 1 ignored; core/Tauri all-target Clippy чистый. Native input,
   frame fence, eraser и display ownership не менялись; аппаратная проверка этим не заявляется.
 
+- Обычные create/move/reorder/indent/outdent используют разреженные `OrderKey` и indexed
+  seek соседних anchors, не загружая Markdown группы. Shared allocator используется также
+  Split. При исчерпании/tie промежутка перечитывается только destination sibling group;
+  операции создаются лишь для действительно изменившихся ключей. На 1k/10k соседях
+  фактические SQL rows/SELECT counts одинаковы; каждая обычная команда даёт 1 outbox op.
+  EXPLAIN настоящего SQL подтверждает covering sibling/UUID indexes без scan/temp sort.
+  6 новых placement, 21 block-command и 5 Split-тестов проходят (1 benchmark ignored),
+  включая exhausted/tied fallback, Undo/Redo, вложенные деревья и replica replay.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

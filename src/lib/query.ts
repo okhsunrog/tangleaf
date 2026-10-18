@@ -38,6 +38,7 @@ export const queryKeys = {
   einkWise: [...root, "einkwise"] as const,
   handwritingStatusRoot: [...root, "handwriting-status"] as const,
   handwritingStatus: (uuid: string) => [...root, "handwriting-status", uuid] as const,
+  handwritingVersions: (pageUuid: string) => [...root, "handwriting-version", pageUuid] as const,
   handwritingVersion: (pageUuid: string, versionUuid: string) =>
     [...root, "handwriting-version", pageUuid, versionUuid] as const,
   syncStatus: [...root, "sync-status"] as const,
@@ -302,6 +303,12 @@ async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSe
     ...changes.attachmentOwners
       .filter((uuid) => !deletedPages.has(uuid) && !deletedBlocks.has(uuid))
       .map((uuid) => invalidate(queryKeys.attachments(uuid))),
+    ...(changes.handwritingPages ?? [])
+      .filter((uuid) => !deletedPages.has(uuid))
+      .flatMap((uuid) => [
+        invalidate(queryKeys.handwritingStatus(uuid)),
+        invalidateFamily(queryKeys.handwritingVersions(uuid)),
+      ]),
   ];
   if (changes.changedPages.length || changes.deletedPages.length) {
     invalidations.push(invalidateFamily(queryKeys.pages), invalidateFamily(queryKeys.journals));
