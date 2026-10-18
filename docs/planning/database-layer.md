@@ -177,6 +177,13 @@
   identity, append и прежняя history grouping сохранены. 4 новых transaction-теста и 11
   прежних journal/identity тестов проходят; Tauri domain events 2/2, signatures не менялись.
 
+- Замена документа теперь также выполняется одной Store-командой: текущая revision,
+  валидация, план, одна ordered Apply group, история и итоговый snapshot читаются до commit.
+  Tauri использует общий publisher. Legacy outcome сохранён как адаптер; `Committed::map_value`
+  меняет только публичный результат, сохраняя committed facts. 4 новых transaction-теста,
+  11 прежних document-тестов и 2 Tauri domain events проходят; проверены no-op, competing
+  revisions и rollback как в середине Apply, так и после чтения результата.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

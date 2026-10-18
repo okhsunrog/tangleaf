@@ -136,20 +136,11 @@ pub async fn replace_page_document(
     expected_revision: DocumentRevision,
     units: Vec<db::DocumentUnitDraft>,
 ) -> CommandResult<db::PageDocumentSnapshot> {
-    let outcome =
-        db::replace_page_document_with_outcome(&state.conn, page_uuid, expected_revision, units)
-            .await
-            .map_err(err)?;
-    let graph_changed = if outcome.graph_changed {
-        outcome.block_uuids.as_slice()
-    } else {
-        &[]
-    };
-    emit_events_for_ops(&app, &state.conn, &outcome.operations, graph_changed).await;
-    if !outcome.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(outcome.snapshot)
+    let committed = observed_store(&app, &state)
+        .replace_page_document(page_uuid, expected_revision, units)
+        .await
+        .map_err(err)?;
+    Ok(committed.value)
 }
 
 #[tauri::command]

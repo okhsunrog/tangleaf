@@ -30,6 +30,20 @@ pub struct Committed<T> {
     pub(crate) projection_stats: DeferredApplyStats,
 }
 
+impl<T> Committed<T> {
+    /// Adapt a command's public result without losing its committed facts.
+    pub fn map_value<U>(self, map: impl FnOnce(T) -> U) -> Committed<U> {
+        Committed {
+            value: map(self.value),
+            changes: self.changes,
+            commit_version: self.commit_version,
+            operations: self.operations,
+            #[cfg(test)]
+            projection_stats: self.projection_stats,
+        }
+    }
+}
+
 /// Shares the existing SQLite worker; it does not open another connection.
 #[derive(Clone)]
 pub struct NotesStore {

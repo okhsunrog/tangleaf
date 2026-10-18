@@ -1,6 +1,6 @@
-use super::{BLOCK_COLUMNS, Block, apply_local_action_in_transaction, row_to_block};
+use super::{BLOCK_COLUMNS, Block, row_to_block};
 use crate::operation::{
-    BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown, BlockSetStyle, OpKind,
+    BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown, BlockSetStyle, OpKind, ProjectionPolicy,
 };
 use crate::{
     BlockStyle, CoreError, CoreResult, DocumentRevision, Hlc, OrderKey, sqlite::Connection,
@@ -40,8 +40,8 @@ pub struct DocumentUnitDraft {
     pub markdown: String,
 }
 
-/// Host-only mutation metadata used to emit precise Tauri invalidations while
-/// the public document intent returns only its fresh snapshot.
+/// Legacy host-only mutation metadata retained for existing database callers.
+/// Store commands publish their actual committed ChangeSet instead.
 #[derive(Debug)]
 pub struct PageDocumentReplaceOutcome {
     pub snapshot: PageDocumentSnapshot,
@@ -90,11 +90,10 @@ pub async fn replace_page_document(
     expected_revision: DocumentRevision,
     units: Vec<DocumentUnitDraft>,
 ) -> anyhow::Result<PageDocumentSnapshot> {
-    Ok(
-        replace_page_document_with_outcome(conn, page_uuid, expected_revision, units)
-            .await?
-            .snapshot,
-    )
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .replace_page_document(page_uuid, expected_revision, units)
+        .await?
+        .value)
 }
 
 #[doc(hidden)]
@@ -104,48 +103,75 @@ pub async fn replace_page_document_with_outcome(
     expected_revision: DocumentRevision,
     units: Vec<DocumentUnitDraft>,
 ) -> anyhow::Result<PageDocumentReplaceOutcome> {
-    conn.call_domain(move |database| -> CoreResult<PageDocumentReplaceOutcome> {
-        let transaction = database.transaction()?;
-        let current = read_page_document(&transaction, page_uuid)?
-            .ok_or_else(|| CoreError::not_found("page was not found"))?;
-        if current.revision != expected_revision {
-            return Err(CoreError::conflict(
-                "page document changed since editing began",
-            ));
-        }
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .replace_page_document_with_outcome(page_uuid, expected_revision, units)
+        .await?
+        .value)
+}
 
-        validate_document_units(&transaction, page_uuid, &current, &units)?;
-        let plan = plan_document_replace(page_uuid, &current, units);
-        if plan.kinds.is_empty() {
-            transaction.commit()?;
-            return Ok(PageDocumentReplaceOutcome {
-                snapshot: current,
-                changed: false,
-                block_uuids: Vec::new(),
-                deleted_block_uuids: Vec::new(),
-                container_uuids: Vec::new(),
-                structure_changed: false,
-                graph_changed: false,
-                operations: Vec::new(),
-            });
-        }
+impl crate::store::NotesStore {
+    pub async fn replace_page_document(
+        &self,
+        page_uuid: uuid::Uuid,
+        expected_revision: DocumentRevision,
+        units: Vec<DocumentUnitDraft>,
+    ) -> anyhow::Result<crate::store::Committed<PageDocumentSnapshot>> {
+        Ok(self
+            .replace_page_document_with_outcome(page_uuid, expected_revision, units)
+            .await?
+            .map_value(|outcome| outcome.snapshot))
+    }
 
-        apply_local_action_in_transaction(&transaction, "edit document", plan.kinds.clone())?;
-        let snapshot = read_page_document(&transaction, page_uuid)?
-            .ok_or_else(|| CoreError::not_found("edited page disappeared"))?;
-        transaction.commit()?;
-        Ok(PageDocumentReplaceOutcome {
-            snapshot,
-            changed: true,
-            block_uuids: plan.block_uuids.into_iter().collect(),
-            deleted_block_uuids: plan.deleted_block_uuids.into_iter().collect(),
-            container_uuids: plan.container_uuids.into_iter().collect(),
-            structure_changed: plan.structure_changed,
-            graph_changed: plan.graph_changed,
-            operations: plan.kinds,
+    async fn replace_page_document_with_outcome(
+        &self,
+        page_uuid: uuid::Uuid,
+        expected_revision: DocumentRevision,
+        units: Vec<DocumentUnitDraft>,
+    ) -> anyhow::Result<crate::store::Committed<PageDocumentReplaceOutcome>> {
+        self.write(move |write| -> CoreResult<PageDocumentReplaceOutcome> {
+            let current = read_page_document(write.sql(), page_uuid)?
+                .ok_or_else(|| CoreError::not_found("page was not found"))?;
+            if current.revision != expected_revision {
+                return Err(CoreError::conflict(
+                    "page document changed since editing began",
+                ));
+            }
+
+            validate_document_units(write.sql(), page_uuid, &current, &units)?;
+            let plan = plan_document_replace(page_uuid, &current, units);
+            if plan.kinds.is_empty() {
+                return Ok(PageDocumentReplaceOutcome {
+                    snapshot: current,
+                    changed: false,
+                    block_uuids: Vec::new(),
+                    deleted_block_uuids: Vec::new(),
+                    container_uuids: Vec::new(),
+                    structure_changed: false,
+                    graph_changed: false,
+                    operations: Vec::new(),
+                });
+            }
+
+            write.apply_action(
+                "edit document",
+                plan.kinds.clone(),
+                ProjectionPolicy::Immediate,
+            )?;
+            let snapshot = read_page_document(write.sql(), page_uuid)?
+                .ok_or_else(|| CoreError::not_found("edited page disappeared"))?;
+            Ok(PageDocumentReplaceOutcome {
+                snapshot,
+                changed: true,
+                block_uuids: plan.block_uuids.into_iter().collect(),
+                deleted_block_uuids: plan.deleted_block_uuids.into_iter().collect(),
+                container_uuids: plan.container_uuids.into_iter().collect(),
+                structure_changed: plan.structure_changed,
+                graph_changed: plan.graph_changed,
+                operations: plan.kinds,
+            })
         })
-    })
-    .await
+        .await
+    }
 }
 
 struct DocumentReplacePlan {
