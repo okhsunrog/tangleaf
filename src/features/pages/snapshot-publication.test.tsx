@@ -129,7 +129,7 @@ async function editor(mode: Mode) {
         ? client.getQueryData<PageRenderSnapshot>(key)?.document
         : client.getQueryData<PageDocumentSnapshot>(key),
     async save() {
-      let saving!: Promise<void>;
+      let saving!: Promise<boolean>;
       await act(async () => {
         if (mode === "block") {
           registry.editBlock("page", "block", "Saved draft", { text: "Base", revision: "b1" });

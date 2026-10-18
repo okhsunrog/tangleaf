@@ -133,7 +133,7 @@ it("drains typing that arrives while journal creation is pending", async () => {
   );
   try {
     act(() => app.view().dispatch({ changes: { from: 0, insert: "First" } }));
-    let flushing!: Promise<void>;
+    let flushing!: Promise<boolean>;
     act(() => {
       flushing = app.sessions.flushAll();
     });

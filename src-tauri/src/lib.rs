@@ -187,15 +187,24 @@ pub fn run() {
         }
     });
 
-    // Development-only bridge for MCP-powered UI inspection and automation.
-    // Restrict it to localhost; release builds do not register the plugin. Reachable on Android
-    // over `adb forward tcp:9223 tcp:9223`, same as desktop; not yet enabled on iOS (untested).
-    #[cfg(all(debug_assertions, not(target_os = "ios")))]
-    let builder = builder.plugin(
-        tauri_plugin_mcp_bridge::Builder::new()
-            .bind_address("127.0.0.1")
-            .build(),
-    );
+    // Debug builds and explicitly opted-in optimized diagnostic builds only.
+    // Keep inspection on localhost; Android can use `adb forward tcp:9223 tcp:9223`.
+    // The inspection config also enables the global Tauri API and its script CSP.
+    #[cfg(all(
+        any(debug_assertions, feature = "runtime-inspection"),
+        not(target_os = "ios")
+    ))]
+    let builder = {
+        tracing::info!(
+            debug_assertions = cfg!(debug_assertions),
+            "localhost runtime inspection enabled"
+        );
+        builder.plugin(
+            tauri_plugin_mcp_bridge::Builder::new()
+                .bind_address("127.0.0.1")
+                .build(),
+        )
+    };
 
     let builder = builder
         .setup(move |app| {

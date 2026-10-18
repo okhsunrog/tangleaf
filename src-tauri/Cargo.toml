@@ -17,6 +17,10 @@ homepage.workspace = true
 name = "tangleaf_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Explicitly opt an optimized build into localhost runtime inspection.
+runtime-inspection = []
+
 [build-dependencies]
 tauri-build = { version = "2.7.3", features = [] }
 
