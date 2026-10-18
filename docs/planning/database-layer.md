@@ -142,6 +142,12 @@
   Tauri получает результат/notice через общий observer без дополнительного чтения.
   5 новых page-store тестов и 44 прежних core-теста проходят, Tauri domain events 2/2;
   общий core/Tauri Clippy с текущими local-command срезами проходит.
+- Сохранение Markdown (revision-safe и legacy), style и task тоже проходят `NotesStore`:
+  проверки, запись и итоговый Block внутри одной транзакции. Обычный ввод не добавляет
+  structural history; style/task сохраняют прежнюю историю. 8 новых тестов проверяют
+  FIFO competing saves, один revision winner, no-op, task guard, поздний SQL rollback,
+  post-commit observer и совместимость adapters; ещё 25 revision/history тестов проходят.
+  Tauri handler использует точный notice; structural create/move/delete ещё переносятся.
 
 ## Решение и масштаб
 

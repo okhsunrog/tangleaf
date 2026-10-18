@@ -56,18 +56,11 @@ pub async fn set_block_content(
     content: db::BlockContent,
     expected_revision: ContentRevision,
 ) -> CommandResult<db::Block> {
-    let applied =
-        db::set_block_content_if_revision_with_ops(&state.conn, uuid, content, expected_revision)
-            .await
-            .map_err(err)?;
-    let graph_changed = applied
-        .value
-        .1
-        .then_some(uuid)
-        .into_iter()
-        .collect::<Vec<_>>();
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &graph_changed).await;
-    Ok(applied.value.0)
+    let committed = observed_store(&app, &state)
+        .set_block_content_if_revision(uuid, content, expected_revision)
+        .await
+        .map_err(err)?;
+    Ok(committed.value.0)
 }
 
 #[tauri::command]
@@ -78,14 +71,11 @@ pub async fn set_block_style(
     uuid: uuid::Uuid,
     style: BlockStyle,
 ) -> CommandResult<db::Block> {
-    let applied = db::set_block_style_with_ops(&state.conn, uuid, style)
+    let committed = observed_store(&app, &state)
+        .set_block_style(uuid, style)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -96,14 +86,11 @@ pub async fn set_task_state(
     uuid: uuid::Uuid,
     task_state: TaskState,
 ) -> CommandResult<db::Block> {
-    let applied = db::set_task_state_with_ops(&state.conn, uuid, task_state)
+    let committed = observed_store(&app, &state)
+        .set_task_state(uuid, task_state)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]

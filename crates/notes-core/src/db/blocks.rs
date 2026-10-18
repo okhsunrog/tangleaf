@@ -177,26 +177,10 @@ pub async fn set_block_content(
     uuid: uuid::Uuid,
     content: BlockContent,
 ) -> Result<(Block, bool)> {
-    let block = get_block(conn, uuid)
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .set_block_content(uuid, content)
         .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let graph_changed = operation::content_references_changed(&block.markdown, &content.markdown);
-    if block.markdown != content.markdown {
-        apply_local(
-            conn,
-            vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
-                uuid,
-                markdown: content.markdown,
-            })],
-        )
-        .await?;
-    }
-    Ok((
-        get_block(conn, uuid)
-            .await?
-            .context("updated block disappeared")?,
-        graph_changed,
-    ))
+        .value)
 }
 
 /// Update block Markdown only when the caller still represents its current
@@ -221,69 +205,13 @@ pub async fn set_block_content_if_revision_with_ops(
     content: BlockContent,
     expected_revision: ContentRevision,
 ) -> Result<AppliedMutation<(Block, bool)>> {
-    conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<(Block, bool)>> {
-            let started = std::time::Instant::now();
-            let transaction = database.transaction()?;
-            let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
-            let block = transaction
-                .query_row(&sql, [uuid], row_to_block)
-                .optional()?
-                .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-            if block.markdown == content.markdown {
-                let planning_ms = started.elapsed().as_secs_f64() * 1_000.0;
-                let commit_started = std::time::Instant::now();
-                transaction.commit()?;
-                tracing::debug!(
-                    changed = false,
-                    planning_ms,
-                    apply_ms = 0.0,
-                    result_ms = 0.0,
-                    commit_ms = commit_started.elapsed().as_secs_f64() * 1_000.0,
-                    transaction_ms = started.elapsed().as_secs_f64() * 1_000.0,
-                    "content transaction completed"
-                );
-                return Ok(AppliedMutation {
-                    value: (block, false),
-                    operations: Vec::new(),
-                });
-            }
-            if block.markdown_revision != expected_revision {
-                return Err(crate::CoreError::conflict(
-                    "block content changed since editing began",
-                ));
-            }
-            let graph_changed =
-                operation::content_references_changed(&block.markdown, &content.markdown);
-            let operations = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
-                uuid,
-                markdown: content.markdown,
-            })];
-            let planning_ms = started.elapsed().as_secs_f64() * 1_000.0;
-            let apply_started = std::time::Instant::now();
-            operation::apply_local_kinds_in_transaction(&transaction, operations.clone())?;
-            let apply_ms = apply_started.elapsed().as_secs_f64() * 1_000.0;
-            let result_started = std::time::Instant::now();
-            let block = transaction.query_row(&sql, [uuid], row_to_block)?;
-            let result_ms = result_started.elapsed().as_secs_f64() * 1_000.0;
-            let commit_started = std::time::Instant::now();
-            transaction.commit()?;
-            tracing::debug!(
-                changed = true,
-                planning_ms,
-                apply_ms,
-                result_ms,
-                commit_ms = commit_started.elapsed().as_secs_f64() * 1_000.0,
-                transaction_ms = started.elapsed().as_secs_f64() * 1_000.0,
-                "content transaction completed"
-            );
-            Ok(AppliedMutation {
-                value: (block, graph_changed),
-                operations,
-            })
-        },
-    )
-    .await
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .set_block_content_if_revision(uuid, content, expected_revision)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn set_block_style(
@@ -300,23 +228,13 @@ pub async fn set_block_style_with_ops(
     uuid: uuid::Uuid,
     style: BlockStyle,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let operations = if block.style != style {
-        apply_local_action(
-            conn,
-            "set block style",
-            vec![OpKind::BlockSetStyle(BlockSetStyle { uuid, style })],
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-    let value = get_block(conn, uuid)
-        .await?
-        .context("updated block disappeared")?;
-    Ok(AppliedMutation { value, operations })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .set_block_style(uuid, style)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn set_task_state(
@@ -333,13 +251,138 @@ pub async fn set_task_state_with_ops(
     uuid: uuid::Uuid,
     state: TaskState,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    if block.style.task_state().is_none() {
-        return Err(crate::CoreError::invalid("task state requires a task block").into());
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .set_task_state(uuid, state)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
+}
+
+fn require_block(
+    transaction: &rusqlite::Transaction<'_>,
+    uuid: uuid::Uuid,
+) -> crate::CoreResult<Block> {
+    let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
+    transaction
+        .query_row(&sql, [uuid], row_to_block)
+        .optional()?
+        .ok_or_else(|| crate::CoreError::not_found("block was not found"))
+}
+
+fn apply_block_style(
+    write: &mut crate::store::NotesTransaction<'_, '_>,
+    block: Block,
+    style: BlockStyle,
+) -> crate::CoreResult<Block> {
+    if block.style == style {
+        return Ok(block);
     }
-    set_block_style_with_ops(conn, uuid, BlockStyle::task(state)).await
+    write.apply_action(
+        "set block style",
+        vec![OpKind::BlockSetStyle(BlockSetStyle {
+            uuid: block.uuid,
+            style,
+        })],
+        operation::ProjectionPolicy::Immediate,
+    )?;
+    require_block(write.sql(), block.uuid)
+}
+
+impl crate::store::NotesStore {
+    /// Legacy unchecked save, serialized with all other store commands.
+    pub async fn set_block_content(
+        &self,
+        uuid: uuid::Uuid,
+        content: BlockContent,
+    ) -> Result<crate::store::Committed<(Block, bool)>> {
+        self.save_block_content(uuid, content, None).await
+    }
+
+    /// Equal stale writes remain idempotent; different stale text conflicts.
+    pub async fn set_block_content_if_revision(
+        &self,
+        uuid: uuid::Uuid,
+        content: BlockContent,
+        expected_revision: ContentRevision,
+    ) -> Result<crate::store::Committed<(Block, bool)>> {
+        self.save_block_content(uuid, content, Some(expected_revision))
+            .await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(markdown_bytes = content.markdown.len()))]
+    async fn save_block_content(
+        &self,
+        uuid: uuid::Uuid,
+        content: BlockContent,
+        expected_revision: Option<ContentRevision>,
+    ) -> Result<crate::store::Committed<(Block, bool)>> {
+        self.write(move |write| -> crate::CoreResult<(Block, bool)> {
+            let started = std::time::Instant::now();
+            let block = require_block(write.sql(), uuid)?;
+            if block.markdown == content.markdown {
+                return Ok((block, false));
+            }
+            if expected_revision.is_some_and(|expected| block.markdown_revision != expected) {
+                return Err(crate::CoreError::conflict(
+                    "block content changed since editing began",
+                ));
+            }
+            let graph_changed =
+                operation::content_references_changed(&block.markdown, &content.markdown);
+            let planning = started.elapsed();
+            let applying = std::time::Instant::now();
+            // Ordinary Markdown edits do not add structural undo entries.
+            write.apply_local(
+                vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                    uuid,
+                    markdown: content.markdown,
+                })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            let apply = applying.elapsed();
+            let reading = std::time::Instant::now();
+            let block = require_block(write.sql(), uuid)?;
+            tracing::debug!(
+                planning_ms = planning.as_secs_f64() * 1000.0,
+                apply_ms = apply.as_secs_f64() * 1000.0,
+                result_ms = reading.elapsed().as_secs_f64() * 1000.0,
+                "content command prepared"
+            );
+            Ok((block, graph_changed))
+        })
+        .await
+    }
+
+    pub async fn set_block_style(
+        &self,
+        uuid: uuid::Uuid,
+        style: BlockStyle,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> crate::CoreResult<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            apply_block_style(write, block, style)
+        })
+        .await
+    }
+
+    pub async fn set_task_state(
+        &self,
+        uuid: uuid::Uuid,
+        state: TaskState,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> crate::CoreResult<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            if block.style.task_state().is_none() {
+                return Err(crate::CoreError::invalid(
+                    "task state requires a task block",
+                ));
+            }
+            apply_block_style(write, block, BlockStyle::task(state))
+        })
+        .await
+    }
 }
 
 pub async fn split_block(
