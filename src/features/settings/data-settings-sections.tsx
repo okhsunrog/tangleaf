@@ -23,7 +23,7 @@ export function DataSettingsSections({
   return (
     <SettingsSection
       title="Data"
-      description="Portable JSON archives include every note, graph edge, and attachment. Destructive operations automatically create a timestamped recovery backup in app data."
+      description="Portable archives include your notes and attachments. Recovery backups also preserve local history and unsynced changes. Destructive operations create a recovery backup in app data."
     >
       <div className="flex flex-wrap gap-2">
         <Button

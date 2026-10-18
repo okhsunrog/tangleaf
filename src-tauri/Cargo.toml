@@ -77,5 +77,11 @@ tracing-logcat = "0.1.0"
 raw-window-handle = "0.6.2"
 webkit2gtk = "2.0.2"
 
+[target."cfg(unix)".dependencies]
+rustix.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

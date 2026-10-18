@@ -668,7 +668,7 @@ pub async fn commit_logseq_import(
         if first_import {
             super::data::write_backup(
                 &app,
-                state.store.write_connection(),
+                &state.store,
                 &state.blob_store,
                 "before-logseq-import",
             )

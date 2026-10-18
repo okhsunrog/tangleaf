@@ -6642,6 +6642,7 @@ dependencies = [
  "notes-sync",
  "raw-window-handle",
  "rusqlite",
+ "rustix 1.1.5",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
@@ -6667,6 +6668,7 @@ dependencies = [
  "url",
  "uuid",
  "webkit2gtk",
+ "windows-sys 0.61.2",
  "zenwebp",
 ]
 

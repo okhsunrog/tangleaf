@@ -1,6 +1,7 @@
 #[cfg(target_os = "android")]
 mod android_tls;
 mod attachment_protocol;
+pub mod backup;
 mod commands;
 mod settings;
 mod startup;

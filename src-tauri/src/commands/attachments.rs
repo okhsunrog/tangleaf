@@ -152,7 +152,7 @@ pub async fn delete_attachment(
 ) -> CommandResult<bool> {
     super::data::write_backup(
         &app,
-        state.store.write_connection(),
+        &state.store,
         &state.blob_store,
         "before-attachment-delete",
     )

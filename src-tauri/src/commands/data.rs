@@ -178,14 +178,9 @@ pub async fn import_data(
             .await
             .map_err(err)?
             .map_err(err)?;
-    write_backup(
-        &app,
-        state.store.write_connection(),
-        &state.blob_store,
-        "before-import",
-    )
-    .await
-    .map_err(err)?;
+    write_backup(&app, &state.store, &state.blob_store, "before-import")
+        .await
+        .map_err(err)?;
     let StagedPortableArchive {
         archive,
         blob_store: staged_blob_store,
@@ -241,37 +236,30 @@ pub async fn create_backup(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<std::path::PathBuf> {
-    write_backup(
-        &app,
-        state.store.write_connection(),
-        &state.blob_store,
-        "manual",
-    )
-    .await
-    .map_err(err)
+    write_backup(&app, &state.store, &state.blob_store, "manual")
+        .await
+        .map_err(err)
 }
 
 pub(super) async fn write_backup(
     app: &AppHandle,
-    connection: &Connection,
+    store: &notes_core::store::NotesStore,
     blob_store: &BlobStore,
     reason: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     let directory = app.path().app_data_dir()?.join("backups");
     std::fs::create_dir_all(&directory)?;
+    notes_blob::sync_directory(
+        directory
+            .parent()
+            .context("backup directory has no parent")?,
+    )?;
     let path = directory.join(format!(
-        "tangleaf-{reason}-{}-{}.notes",
+        "tangleaf-{reason}-{}-{}.recovery",
         chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f"),
         uuid::Uuid::now_v7()
     ));
-    let archive = db::export_archive(connection).await?;
-    let blob_store = blob_store.clone();
-    let published_path = path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        write_archive_atomically(&published_path, archive, &blob_store, false)
-    })
-    .await??;
-    Ok(path)
+    crate::backup::create_recovery_backup(store, blob_store, &path).await
 }
 
 fn write_archive_atomically(

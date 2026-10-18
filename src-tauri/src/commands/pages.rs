@@ -190,14 +190,9 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    super::data::write_backup(
-        &app,
-        state.store.write_connection(),
-        &state.blob_store,
-        "before-delete",
-    )
-    .await
-    .map_err(err)?;
+    super::data::write_backup(&app, &state.store, &state.blob_store, "before-delete")
+        .await
+        .map_err(err)?;
     let committed = observed_store(&app, &state)
         .delete_page(uuid)
         .await

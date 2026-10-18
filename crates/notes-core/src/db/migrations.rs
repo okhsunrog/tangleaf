@@ -2,8 +2,8 @@ use crate::sqlite::Connection;
 use anyhow::{Context, Result};
 use rusqlite_migration::{M, Migrations};
 
-fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
+fn migration_steps() -> Vec<M<'static>> {
+    vec![
         M::up(include_str!("migrations/V001__initial.sql")),
         M::up(include_str!("migrations/V002__stem_page_titles.sql")),
         M::up(include_str!("migrations/V003__attachment_image_cache.sql")),
@@ -21,7 +21,15 @@ fn migrations() -> Migrations<'static> {
                     .map_err(|error| rusqlite_migration::HookError::Hook(error.to_string()))
             },
         ),
-    ])
+    ]
+}
+
+fn migrations() -> Migrations<'static> {
+    Migrations::new(migration_steps())
+}
+
+pub(super) fn supported_schema_version() -> i64 {
+    migration_steps().len() as i64
 }
 
 pub(super) async fn migrate(connection: &Connection) -> Result<()> {

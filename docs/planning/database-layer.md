@@ -413,6 +413,20 @@
   а не только его Drop. Прошли 6 startup и 2 initializer tests, full Tauri lib и Clippy;
   отмена waiter не отменяет cleanup, production abort API не добавлен.
 
+- Manual и before-destructive backup теперь создают полный `.recovery` directory: SQLite file,
+  строгий versioned manifest и проверенные content-addressed blobs. Deletion lease берётся до
+  SQL snapshot; полный blob set копируется после него под тем же lease. Дополнительные orphan
+  blobs допустимы. Обязательные bodies собираются из live attachments, present LWW intents,
+  pending/quarantined outbox и обоих направлений history через существующий decoder.
+  Отсутствующие/несогласованные bytes не позволяют опубликовать якобы полный backup.
+  Publication атомарна и не перезаписывает существующий destination; файлы/каталоги fsync.
+  Validator копирует untrusted source в private staging, проверяет manifest limits/paths,
+  hashes/sizes, SQLite quick/FK/schema/metadata и все retained references. Blobs устанавливаются
+  аддитивно; существующие повреждённые bytes не перезаписываются. Portable `.notes` остаётся
+  отдельным content export. Физической замены активной БД этот шаг ещё не делает.
+  Прошли 10 recovery, 8 core snapshot и 6 portable tests, scoped/core и host all-target Clippy.
+  Проверки публикации выполнены на Linux; POSIX/Windows paths реализованы, другие ОС не проверены.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

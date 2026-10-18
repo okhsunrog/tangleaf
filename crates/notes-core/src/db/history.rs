@@ -157,6 +157,12 @@ fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPaylo
     }
 }
 
+/// Decode retained operations through the same version/guard checks used by
+/// Undo/Redo. Backup reference collection must not invent another JSON format.
+pub(crate) fn retained_operations(value: &str) -> serde_json::Result<Vec<OpKind>> {
+    decode_history_payload(value).map(|payload| payload.operations)
+}
+
 pub(crate) struct PreparedAction {
     action_uuid: uuid::Uuid,
     inverse: Vec<OpKind>,

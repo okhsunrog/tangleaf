@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use notes_blob::BlobHash;
 use rusqlite::backup::{Backup, StepResult};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -11,6 +12,121 @@ use std::time::{Duration, Instant};
 
 const BACKUP_RETRY_LIMIT: Duration = Duration::from_secs(30);
 const BACKUP_RETRY_PAUSE: Duration = Duration::from_millis(10);
+
+/// Collect every external attachment body needed by the captured database,
+/// including unmaterialized present intents, pending/quarantined publications,
+/// and both retained history stacks.
+pub async fn required_attachment_blobs(
+    connection: &crate::Connection,
+) -> Result<BTreeMap<BlobHash, u64>> {
+    connection.call_domain(|database| -> Result<_> {
+        let transaction = database.transaction()?;
+        let mut required = BTreeMap::new();
+        let mut add = |hash, size| -> Result<()> {
+            ensure!(required.insert(hash, size).is_none_or(|old| old == size),
+                "conflicting sizes for retained attachment blob {hash}");
+            Ok(())
+        };
+        for row in transaction.prepare(
+            "SELECT blob_hash,size FROM attachments
+             UNION ALL SELECT blob_hash,size FROM attachment_lww WHERE present=1"
+        )?
+            .query_map([], |row| Ok((crate::db::row_blob_hash(row, 0)?, row.get::<_, i64>(1)?)))? {
+            let (hash, size) = row?;
+            add(hash, u64::try_from(size)?)?;
+        }
+        for envelope in transaction.prepare("SELECT envelope FROM sync_outbox ORDER BY rowid")?
+            .query_map([], |row| row.get::<_, String>(0))? {
+            let operation: crate::Op = crate::operation::decode_persisted_envelope(&envelope?)?;
+            if let crate::OpKind::AttachmentAdd(body) = operation.kind { add(body.blob_hash, body.size)?; }
+        }
+        for payload in transaction.prepare(
+            "SELECT forward_json FROM history_undo UNION ALL SELECT inverse_json FROM history_undo
+             UNION ALL SELECT forward_json FROM history_redo UNION ALL SELECT inverse_json FROM history_redo"
+        )?.query_map([], |row| row.get::<_, String>(0))? {
+            for operation in crate::db::history::retained_operations(&payload?)? {
+                if let crate::OpKind::AttachmentAdd(body) = operation { add(body.blob_hash, body.size)?; }
+            }
+        }
+        transaction.commit()?;
+        Ok(required)
+    }).await
+}
+
+/// Inspect a standalone recovery file without migrating it or changing its
+/// journal mode. Hosts validate file hashes before accepting its manifest.
+pub async fn inspect_database_backup(path: impl AsRef<Path>) -> Result<DatabaseBackup> {
+    let path = path.as_ref().to_owned();
+    let connection = crate::Connection::open_read_only(&path).await?;
+    let inspection = connection
+        .call_domain(|database| -> Result<_> {
+            let transaction = database.transaction()?;
+            let metadata = read_metadata(&transaction)?;
+            ensure!(
+                metadata.schema_version > 0
+                    && metadata.schema_version <= crate::db::supported_schema_version(),
+                "unsupported recovery database schema version {}",
+                metadata.schema_version
+            );
+            ensure!(
+                !metadata.workspace_uuid.is_nil()
+                    && metadata.commit_version >= 0
+                    && metadata.workspace_epoch >= 0,
+                "invalid recovery database metadata"
+            );
+            ensure!(
+                transaction
+                    .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?
+                    == "delete",
+                "recovery database must be standalone DELETE mode"
+            );
+            let checks = transaction
+                .prepare("PRAGMA quick_check")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(checks == ["ok"], "recovery database quick_check failed");
+            ensure!(
+                !transaction
+                    .prepare("PRAGMA foreign_key_check")?
+                    .exists([])?,
+                "recovery database foreign_key_check failed"
+            );
+            transaction.commit()?;
+            Ok(metadata)
+        })
+        .await;
+    let close = connection.close().await;
+    let metadata = inspection?;
+    close?;
+    tokio::task::spawn_blocking(move || {
+        let file = File::open(&path)?;
+        let size = file.metadata()?.len();
+        let hash = hash_reader(file)?;
+        Ok(DatabaseBackup {
+            path,
+            size,
+            hash,
+            workspace_uuid: metadata.workspace_uuid,
+            commit_version: metadata.commit_version,
+            workspace_epoch: metadata.workspace_epoch,
+            schema_version: metadata.schema_version,
+        })
+    })
+    .await?
+}
+
+fn hash_reader(mut reader: impl Read) -> Result<BlobHash> {
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(BlobHash::from_bytes(hash.finalize().into()))
+}
 
 /// A complete, verified SQLite file. External attachment files must still be
 /// captured under a BlobStore deletion lease before calling it a full backup.

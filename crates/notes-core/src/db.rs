@@ -18,9 +18,9 @@ mod graph;
 pub(crate) mod history;
 mod journals;
 mod migrations;
-mod pages;
 #[cfg(test)]
 mod open_tests;
+mod pages;
 #[cfg(test)]
 mod read_tests;
 mod search;
@@ -68,6 +68,11 @@ pub use pages::{
 pub use search::{search_blocks_fts, search_fts, search_pages_by_title};
 pub(crate) use workspace::transaction_workspace_uuid;
 pub use workspace::workspace_uuid;
+
+/// Latest application migration version understood by this build.
+pub fn supported_schema_version() -> i64 {
+    migrations::supported_schema_version()
+}
 
 pub async fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path.as_ref())
