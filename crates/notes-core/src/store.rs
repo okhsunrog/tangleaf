@@ -322,6 +322,7 @@ mod tests {
     #[tokio::test]
     async fn commits_publish_final_facts_in_durable_order_and_empty_undo_does_not_publish() {
         let (directory, connection, block) = fixture().await;
+        let baseline = clock(&connection).await;
         let path = directory.path().join("notes.db");
         let observed = Arc::new(Mutex::new(Vec::new()));
         let notices = observed.clone();
@@ -354,7 +355,7 @@ mod tests {
             .split_block(block.uuid, parts(), block.markdown_revision.clone())
             .await
             .unwrap();
-        assert_eq!(split.commit_version, Some(1));
+        assert_eq!(split.commit_version, Some(baseline + 1));
         assert_eq!(split.projection_stats.structure_reconciliations, 1);
         assert_eq!(split.changes.affected_pages, vec![block.page_uuid]);
         assert!(split.changes.changed_pages.is_empty());
@@ -370,7 +371,7 @@ mod tests {
         assert!(source.before.is_some());
         let undo = store.undo().await.unwrap();
         assert_eq!(undo.value, HistoryMoveResult::Applied);
-        assert_eq!(undo.commit_version, Some(2));
+        assert_eq!(undo.commit_version, Some(baseline + 2));
         assert_eq!(undo.projection_stats.structure_reconciliations, 1);
         assert_eq!(
             undo.changes
@@ -382,7 +383,7 @@ mod tests {
         );
         let redo = store.redo().await.unwrap();
         assert_eq!(redo.value, HistoryMoveResult::Applied);
-        assert_eq!(redo.commit_version, Some(3));
+        assert_eq!(redo.commit_version, Some(baseline + 3));
         assert_eq!(redo.projection_stats.structure_reconciliations, 1);
         assert_eq!(
             observed
@@ -391,7 +392,7 @@ mod tests {
                 .iter()
                 .map(|n| n.commit_version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![baseline + 1, baseline + 2, baseline + 3]
         );
         assert_eq!(
             db::get_block(&connection, block.uuid)
@@ -404,14 +405,14 @@ mod tests {
         drop(store);
         drop(connection);
         let reopened = db::open(directory.path().join("notes.db")).await.unwrap();
-        assert_eq!(clock(&reopened).await, 3);
+        assert_eq!(clock(&reopened).await, baseline + 3);
         assert_eq!(
             NotesStore::new(reopened)
                 .undo()
                 .await
                 .unwrap()
                 .commit_version,
-            Some(4)
+            Some(baseline + 4)
         );
     }
 
@@ -597,6 +598,7 @@ mod tests {
     #[tokio::test]
     async fn clock_write_failure_rolls_back_the_entire_split() {
         let (_directory, connection, block) = fixture().await;
+        let baseline = clock(&connection).await;
         let store = NotesStore::new(connection.clone());
         let before = state(&connection).await;
         connection
@@ -625,13 +627,14 @@ mod tests {
                 .await
                 .unwrap()
                 .commit_version,
-            Some(1)
+            Some(baseline + 1)
         );
     }
 
     #[tokio::test]
     async fn stale_split_and_conflicting_history_publish_no_false_content_changes() {
         let (_directory, connection, block) = fixture().await;
+        let baseline = clock(&connection).await;
         let observed = Arc::new(Mutex::new(Vec::new()));
         let notices = observed.clone();
         let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
@@ -665,7 +668,7 @@ mod tests {
         .unwrap();
         let skipped = store.undo().await.unwrap();
         assert_eq!(skipped.value, HistoryMoveResult::Skipped);
-        assert_eq!(skipped.commit_version, Some(2));
+        assert_eq!(skipped.commit_version, Some(baseline + 2));
         assert_eq!(
             skipped.changes,
             ChangeSet {
@@ -686,6 +689,7 @@ mod tests {
     #[tokio::test]
     async fn aborting_the_awaiter_does_not_cancel_an_accepted_commit_or_its_notice() {
         let (_directory, connection, block) = fixture().await;
+        let baseline = clock(&connection).await;
         let observed = Arc::new(Mutex::new(Vec::new()));
         let notices = observed.clone();
         let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
@@ -715,7 +719,7 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         release_tx.send(()).unwrap();
         // Queued behind the accepted job, this read also waits for publication.
-        assert_eq!(clock(&connection).await, 1);
+        assert_eq!(clock(&connection).await, baseline + 1);
         assert_eq!(observed.lock().unwrap().len(), 1);
         assert_eq!(
             db::get_block(&connection, block.uuid)
@@ -851,14 +855,15 @@ mod tests {
     #[tokio::test]
     async fn observer_failure_cannot_turn_a_successful_commit_into_a_write_error() {
         let (_directory, connection, block) = fixture().await;
+        let baseline = clock(&connection).await;
         let store = NotesStore::new(connection.clone())
             .with_commit_observer(|_| panic!("observer failure"));
         let split = store
             .split_block(block.uuid, parts(), block.markdown_revision)
             .await
             .unwrap();
-        assert_eq!(split.commit_version, Some(1));
-        assert_eq!(clock(&connection).await, 1);
+        assert_eq!(split.commit_version, Some(baseline + 1));
+        assert_eq!(clock(&connection).await, baseline + 1);
         assert_eq!(db::history_status(&connection).await.unwrap().undo_count, 1);
     }
 }
