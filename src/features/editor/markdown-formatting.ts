@@ -1,4 +1,4 @@
-import { EditorSelection, StateField, type Extension } from "@codemirror/state";
+import { EditorSelection, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { EditorView, keymap, showTooltip, type Tooltip } from "@codemirror/view";
 
 export type MarkdownFormat = "bold" | "italic" | "code" | "link";
@@ -62,11 +62,21 @@ const actions = [
   },
 ] as const;
 
+const formattingFocusChanged = StateEffect.define<boolean>();
+const formattingFocus = StateField.define<boolean>({
+  create: () => false,
+  update(value, transaction) {
+    for (const effect of transaction.effects)
+      if (effect.is(formattingFocusChanged)) value = effect.value;
+    return value;
+  },
+});
 const formattingTooltip = StateField.define<readonly Tooltip[]>({
   create: () => [],
   update(_previous, transaction) {
     const { main } = transaction.state.selection;
-    if (main.empty || transaction.state.readOnly) return [];
+    if (main.empty || transaction.state.readOnly || !transaction.state.field(formattingFocus))
+      return [];
     return [
       {
         pos: main.from,
@@ -97,6 +107,8 @@ const formattingTooltip = StateField.define<readonly Tooltip[]>({
 
 export function markdownFormatting(): Extension {
   return [
+    formattingFocus,
+    EditorView.focusChangeEffect.of((_state, focused) => formattingFocusChanged.of(focused)),
     keymap.of(
       actions.map((action) => ({
         key: action.key,

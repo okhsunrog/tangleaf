@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, GitFork, Redo2, Search, Settings, Undo2 } from "lucide-react";
 import { AppLayout } from "@/app/layout";
+import { CompactAppMenu } from "@/app/compact-app-menu";
 import { isAndroid, sheetModeActive, useSheetMode, useSheetSystemBars } from "@/app/sheet-mode";
 import { useCompactLayout } from "@/app/use-compact-layout";
 import { WindowControls } from "@/app/window-controls";
@@ -194,6 +195,7 @@ function App() {
           <>
             {syncQuery.data && syncQuery.data.state !== "disabled" && (
               <SyncStatusIndicator
+                compact={compact}
                 status={syncQuery.data}
                 onOpenSettings={() => setSettingsOpen(true)}
               />
@@ -201,49 +203,44 @@ function App() {
             {compact ? (
               <>
                 <Button
-                  variant={graphOpen ? "secondary" : "ghost"}
-                  size="icon-sm"
-                  aria-label={graphOpen ? "Close knowledge graph" : "Open knowledge graph"}
-                  aria-pressed={graphOpen}
-                  onClick={() => {
-                    if (graphOpen) {
-                      dispatchWorkspace({ type: "go_back", paneId: activePane.id });
-                    } else {
+                  variant="ghost"
+                  size="icon"
+                  className="size-11 rounded-xl"
+                  aria-label="Search notes"
+                  onClick={() => setSearchOpen(true)}
+                >
+                  <Search className="size-5" />
+                </Button>
+                <CompactAppMenu
+                  graphOpen={graphOpen}
+                  onGraph={() => {
+                    if (graphOpen) dispatchWorkspace({ type: "go_back", paneId: activePane.id });
+                    else
                       dispatchWorkspace({
                         type: "open_target",
                         target: graphTarget(workspace.activePageUuid),
                         disposition: currentDisposition,
                       });
-                    }
                   }}
-                  className="h-8 gap-1.5 rounded-xl px-2.5"
-                >
-                  <GitFork className="size-3.5" />
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Search notes"
-                  onClick={() => setSearchOpen(true)}
-                >
-                  <Search className="size-4" />
-                </Button>
-                <Button
-                  data-assistant-toggle
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Open Assistant"
-                  onClick={() => {
+                  onAssistant={() => {
                     dispatchWorkspace({
                       type: "set_dock_visibility",
                       visibility: DockVisibility.Open,
                     });
                     setAssistantRequest((request) => request + 1);
                   }}
-                >
-                  <Bot className="size-4" />
-                </Button>
+                  onSettings={() => setSettingsOpen(true)}
+                  onUndo={
+                    !handwritingActive && workspace.history.undoCount > 0
+                      ? () => void workspace.moveHistory("undo")
+                      : undefined
+                  }
+                  onRedo={
+                    !handwritingActive && workspace.history.redoCount > 0
+                      ? () => void workspace.moveHistory("redo")
+                      : undefined
+                  }
+                />
               </>
             ) : (
               <>
@@ -305,7 +302,7 @@ function App() {
             )}
             {/* Structural history is text-note editing; a handwritten note has its own
                 undo in the sheet toolbar, and this one would navigate away from it. */}
-            {!handwritingActive && (
+            {!handwritingActive && !compact && (
               <>
                 <Button
                   variant="ghost"
@@ -327,14 +324,16 @@ function App() {
                 </Button>
               </>
             )}
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Open settings"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <Settings className="size-4" />
-            </Button>
+            {!compact && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label="Open settings"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <Settings className="size-4" />
+              </Button>
+            )}
             {windowDecorationMode === "borderless" && <WindowControls side="right" />}
           </>
         }

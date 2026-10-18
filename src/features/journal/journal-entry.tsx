@@ -97,7 +97,9 @@ function ExistingJournal({
   const active = useWorkspaceStore((state) => state.activePaneId === paneId);
   const controller = useWorkspaceController();
   const root = useRef<HTMLDivElement>(null);
-  const find = usePageFind({ ...page, layout: "document" }, paneId, root, 0);
+  const find = usePageFind({ ...page, layout: "document" }, paneId, root, 0, {
+    label: "Find in journal entry",
+  });
   return (
     <div ref={root}>
       {find.bar}
@@ -155,6 +157,11 @@ function FirstEntry({
   const flight = useRef<Promise<boolean> | null>(null);
   const composing = useRef(false);
   const lastValue = useRef(overlay?.draft ?? "");
+  const root = useRef<HTMLDivElement>(null);
+  const find = usePageFind({ uuid: draftKey, layout: "document" }, paneId, root, 0, {
+    draft: overlay?.draft ?? lastValue.current,
+    label: "Find in journal entry",
+  });
   const durable = useRef<{ page: Page; snapshot: PageDocumentSnapshot; prefix: string } | null>(
     null,
   );
@@ -266,7 +273,8 @@ function FirstEntry({
     else autosave.schedule(() => void flush(), 400);
   };
   return (
-    <div className="relative">
+    <div ref={root} className="relative">
+      {find.bar}
       <div role="status" className="absolute -top-6 right-0 text-xs text-muted-foreground">
         {status}
         {status.startsWith("Could") && (
@@ -280,15 +288,20 @@ function FirstEntry({
           Write a thought…
         </p>
       )}
-      <ContinuousDocumentEditor
-        value={overlay?.draft ?? lastValue.current}
-        readOnly={!canEdit}
-        focusRequest={autoFocus && active ? 1 : 0}
-        editorSession={editorSession}
-        onChange={update}
-        onCompositionEnd={(value) => update(value, false)}
-        onBlur={() => void flush()}
-      />
+      <div className="editor-body">
+        <ContinuousDocumentEditor
+          findRange={
+            find.navigation ? { ...find.navigation.match, request: find.navigation.request } : null
+          }
+          value={overlay?.draft ?? lastValue.current}
+          readOnly={!canEdit}
+          focusRequest={autoFocus && active ? 1 : 0}
+          editorSession={editorSession}
+          onChange={update}
+          onCompositionEnd={(value) => update(value, false)}
+          onBlur={() => void flush()}
+        />
+      </div>
     </div>
   );
 }

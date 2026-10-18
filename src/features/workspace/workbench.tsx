@@ -1,4 +1,5 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { PaneFindChromeContext } from "@/features/pages/page-find-chrome";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Columns2, X } from "lucide-react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
@@ -213,6 +214,9 @@ function PaneFrame({
   compact,
   ...props
 }: WorkbenchProps & { paneId: PaneId; compact: boolean }) {
+  const [searchSlot, setSearchSlot] = useState<HTMLDivElement | null>(null);
+  const [menuSlot, setMenuSlot] = useState<HTMLDivElement | null>(null);
+  const findSlots = useMemo(() => ({ search: searchSlot, menu: menuSlot }), [searchSlot, menuSlot]);
   const pane = useWorkspaceStore((state) => state.panes[paneId]);
   const active = useWorkspaceStore((state) => state.activePaneId === paneId);
   const primary = useWorkspaceStore((state) => state.primaryPaneId === paneId);
@@ -226,84 +230,88 @@ function PaneFrame({
   const sheet = compact && props.sheetPaneId === paneId;
 
   return (
-    <section
-      aria-label={primary ? "Primary workspace pane" : "Adjacent workspace pane"}
-      aria-hidden={compact && !compactVisible ? true : undefined}
-      inert={compact && !compactVisible ? true : undefined}
-      data-pane-id={paneId}
-      data-active={active || undefined}
-      className={cn(
-        "flex h-full min-h-0 flex-col bg-transparent transition-shadow",
-        active && !sheet && !primary && "ring-1 ring-inset ring-primary/15",
-        compact && !compactVisible && "pointer-events-none invisible",
-      )}
-      onPointerDown={() => {
-        if (!active) dispatch({ type: "focus_pane", paneId });
-      }}
-    >
-      {!sheet && (!compact || pane.content.kind !== PaneContentKind.Home) && (
-        <div className="flex h-10 shrink-0 items-center gap-1 px-4">
-          {compact && backToHome ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              aria-label="Go back"
-              onClick={goBack}
-              className="gap-1 rounded-lg px-1.5"
-            >
-              <ArrowLeft className="size-3.5" />
-              Back
-            </Button>
-          ) : (
-            <>
+    <PaneFindChromeContext.Provider value={findSlots}>
+      <section
+        aria-label={primary ? "Primary workspace pane" : "Adjacent workspace pane"}
+        aria-hidden={compact && !compactVisible ? true : undefined}
+        inert={compact && !compactVisible ? true : undefined}
+        data-pane-id={paneId}
+        data-active={active || undefined}
+        className={cn(
+          "workspace-pane relative flex h-full min-h-0 min-w-0 flex-col bg-transparent transition-shadow",
+          active && !sheet && !primary && "ring-1 ring-inset ring-primary/15",
+          compact && !compactVisible && "pointer-events-none invisible",
+        )}
+        onPointerDown={() => {
+          if (!active) dispatch({ type: "focus_pane", paneId });
+        }}
+      >
+        {!sheet && (!compact || pane.content.kind !== PaneContentKind.Home) && (
+          <div className="pane-navigation flex h-10 shrink-0 items-center gap-1 px-4">
+            {compact && backToHome ? (
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
-                disabled={pane.back.length === 0}
-                aria-label="Go back in pane"
-                onClick={() => {
-                  void mayLeavePane(paneId).then((allowed) => {
-                    if (allowed) dispatch({ type: "go_back", paneId });
-                  });
-                }}
+                size="xs"
+                aria-label="Go back"
+                onClick={goBack}
+                className="gap-1 rounded-lg px-1.5"
               >
                 <ArrowLeft className="size-3.5" />
+                Back
               </Button>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  disabled={pane.back.length === 0}
+                  aria-label="Go back in pane"
+                  onClick={() => {
+                    void mayLeavePane(paneId).then((allowed) => {
+                      if (allowed) dispatch({ type: "go_back", paneId });
+                    });
+                  }}
+                >
+                  <ArrowLeft className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  disabled={pane.forward.length === 0}
+                  aria-label="Go forward in pane"
+                  onClick={() => dispatch({ type: "go_forward", paneId })}
+                >
+                  <ArrowRight className="size-3.5" />
+                </Button>
+              </>
+            )}
+            <span className="ml-1 truncate text-xs font-medium text-muted-foreground">
+              {paneLabel(pane.content, primary)}
+            </span>
+            {!compact && <div ref={setMenuSlot} className="ml-auto" />}
+            {!primary && (
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                disabled={pane.forward.length === 0}
-                aria-label="Go forward in pane"
-                onClick={() => dispatch({ type: "go_forward", paneId })}
+                className={compact ? "ml-auto" : undefined}
+                aria-label="Close adjacent pane"
+                onClick={() => dispatch({ type: "close_pane", paneId })}
               >
-                <ArrowRight className="size-3.5" />
+                <X className="size-3.5" />
               </Button>
-            </>
-          )}
-          <span className="ml-1 truncate text-xs font-medium text-muted-foreground">
-            {paneLabel(pane.content, primary)}
-          </span>
-          {!primary && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              className="ml-auto"
-              aria-label="Close adjacent pane"
-              onClick={() => dispatch({ type: "close_pane", paneId })}
-            >
-              <X className="size-3.5" />
-            </Button>
-          )}
+            )}
+          </div>
+        )}
+        <div ref={setSearchSlot} className="pane-find-slot" />
+        <div ref={scrollRef} data-workspace-scroll className="min-h-0 flex-1 overflow-y-auto">
+          <PaneSurface paneId={paneId} content={pane.content} {...props} />
         </div>
-      )}
-      <div ref={scrollRef} data-workspace-scroll className="min-h-0 flex-1 overflow-y-auto">
-        <PaneSurface paneId={paneId} content={pane.content} {...props} />
-      </div>
-    </section>
+      </section>
+    </PaneFindChromeContext.Provider>
   );
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Check, Clock3, FileText, ListTree, Search, Star, Trash2 } from "lucide-react";
+import { Check, Clock3, FileText, ListTree, Star, Trash2 } from "lucide-react";
 import { PageBacklinks } from "./page-backlinks";
 import { usePageFind } from "./page-find";
 import { Button } from "@/components/ui/button";
@@ -408,7 +408,7 @@ export function PageView({
         </div>
       )}
 
-      <div className="mt-3 mb-5 flex items-center gap-2">
+      <div className="mt-3 mb-5 flex flex-wrap items-center gap-2">
         {journalDate && (
           <div className="flex items-center rounded-lg border border-border/60 surface-card p-0.5">
             <Button
@@ -471,14 +471,6 @@ export function PageView({
           availability={authoringAvailability}
           onAction={selectDocumentAction}
         />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Find in note (Ctrl+F)"
-          onClick={find.show}
-        >
-          <Search className="size-4" />
-        </Button>
         <Button
           variant="ghost"
           size="xs"

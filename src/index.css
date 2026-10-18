@@ -1315,9 +1315,140 @@ html::before {
 }
 
 [data-find-current] {
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
-  border-radius: 4px;
+  scroll-margin-block: 7rem 2rem;
+}
+
+/* Find belongs to the pane chrome, never to the document's text column. */
+.pane-find-slot {
+  position: absolute;
+  z-index: 30;
+  top: 44px;
+  right: 12px;
+  width: min(520px, calc(100% - 24px));
+  container-type: inline-size;
+  pointer-events: none;
+}
+.app-find-slot {
+  container-type: inline-size;
+}
+.app-find-slot:empty,
+.pane-find-slot:empty {
+  display: none;
+}
+.app-titlebar:has(.note-find) .app-titlebar-content {
+  display: none;
+}
+.workspace-compact [data-note-find-open] .pane-navigation {
+  display: none;
+}
+.note-find {
+  display: grid;
+  grid-template: "field count actions close" auto / minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--popover-shadow);
+  pointer-events: auto;
+}
+.note-find-field {
+  grid-area: field;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding-inline: 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--muted);
+}
+.note-find-field:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 16%, transparent);
+}
+.note-find-count {
+  grid-area: count;
+  padding-inline: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.note-find-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 2px;
+}
+.note-find .note-find-button {
+  width: 34px;
+  height: 38px;
+  border-radius: 10px;
+}
+.note-find-close {
+  grid-area: close;
+}
+.app-find-slot .note-find {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 8px 12px;
+}
+.app-find-slot .note-find-button {
+  width: 44px;
+  height: 44px;
+}
+.app-find-slot .note-find-field {
+  min-height: 44px;
+}
+.app-find-slot .note-find-field input {
+  font-size: 16px;
+}
+@container (max-width: 479px) {
+  .note-find {
+    grid-template: "field field close" 44px "count actions actions" 44px / minmax(0, 1fr) auto 44px;
+    gap: 4px;
+  }
+  .note-find-field {
+    min-height: 44px;
+  }
+  .note-find-field input {
+    font-size: 16px;
+  }
+  .note-find-actions {
+    justify-self: end;
+    gap: 4px;
+  }
+  .note-find .note-find-button {
+    width: 44px;
+    height: 44px;
+  }
+}
+.app-titlebar .note-menu-trigger {
+  width: 44px;
+  height: 44px;
+}
+@media (max-width: 479px) {
+  .app-titlebar-content {
+    padding-inline: 8px;
+  }
+  .app-header-actions {
+    gap: 0;
+  }
+  .app-titlebar .window-controls {
+    gap: 4px;
+  }
+  .app-titlebar [data-window-controls="windows"] button {
+    width: 28px;
+  }
+  .app-titlebar .tangleaf-wordmark {
+    display: none;
+  }
 }
 
 [data-workspace-scroll] {

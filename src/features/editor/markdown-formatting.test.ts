@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, showTooltip } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
 import { afterEach, expect, it } from "vite-plus/test";
 import { formatMarkdown, markdownFormatting } from "./markdown-formatting";
@@ -41,4 +41,24 @@ it("does not change read-only content", () => {
   const view = editor("hello", true);
   expect(formatMarkdown(view, "italic")).toBe(false);
   expect(view.state.doc.toString()).toBe("hello");
+});
+
+it("hides formatting when focus moves to find, while preserving the selected text", async () => {
+  const view = editor();
+  const input = document.createElement("input");
+  document.body.append(view.dom, input);
+  try {
+    view.focus();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(view.state.facet(showTooltip).filter(Boolean)).toHaveLength(1);
+    input.focus();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(view.state.facet(showTooltip).filter(Boolean)).toHaveLength(0);
+    expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(
+      "hello",
+    );
+  } finally {
+    view.dom.remove();
+    input.remove();
+  }
 });

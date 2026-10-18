@@ -12,6 +12,7 @@ import {
 } from "./sync-status-presentation";
 
 type Props = {
+  compact?: boolean;
   status: SyncStatus;
   onOpenSettings: () => void;
 };
@@ -24,7 +25,7 @@ const toneClasses: Record<SyncStatusTone, string> = {
   muted: "border-border/60 surface-card text-muted-foreground",
 };
 
-export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
+export function SyncStatusIndicator({ status, onOpenSettings, compact = false }: Props) {
   const [retrying, setRetrying] = useState(false);
   const [releasing, setReleasing] = useState(false);
   const presentation = presentSyncStatus(status);
@@ -57,6 +58,7 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
       <PopoverTrigger
         aria-label={`Sync status: ${presentation.label}`}
         className={cn(
+          compact && "w-7 justify-center px-0",
           "mr-1 flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50",
           presentation.tone === "success"
             ? "text-muted-foreground"
