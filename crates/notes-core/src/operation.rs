@@ -1,5 +1,6 @@
 //! Versioned, UUID-addressed page/block operations and the single apply boundary.
 
+use crate::changes::ChangeTracker;
 use crate::db::{blob_hash_bytes, row_blob_hash};
 use crate::model::{
     AttachmentOwner, BlockStyle, ObjectKind, OrderKey, PageAlias, PageKind, PageLayout,
@@ -297,6 +298,12 @@ pub(crate) struct LocalBatchApply {
     pub stats: DeferredApplyStats,
 }
 
+pub(crate) struct TrackedLocalBatchApply {
+    pub operations: Vec<Op>,
+    pub stats: DeferredApplyStats,
+    pub changes: crate::ChangeSet,
+}
+
 /// Projection scheduling is an execution policy, independent of a history label.
 /// Both policies finish all projections before returning to the transaction owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +325,28 @@ pub(crate) fn apply_local_kinds_with_policy(
     kinds: Vec<OpKind>,
     policy: ProjectionPolicy,
 ) -> CoreResult<LocalBatchApply> {
+    Ok(apply_local_kinds_internal(transaction, kinds, policy, false)?.0)
+}
+
+pub(crate) fn apply_local_kinds_tracked(
+    transaction: &rusqlite::Transaction<'_>,
+    kinds: Vec<OpKind>,
+    policy: ProjectionPolicy,
+) -> CoreResult<TrackedLocalBatchApply> {
+    let (applied, changes) = apply_local_kinds_internal(transaction, kinds, policy, true)?;
+    Ok(TrackedLocalBatchApply {
+        operations: applied.operations,
+        stats: applied.stats,
+        changes: changes.expect("tracked apply produces a change set"),
+    })
+}
+
+fn apply_local_kinds_internal(
+    transaction: &rusqlite::Transaction<'_>,
+    kinds: Vec<OpKind>,
+    policy: ProjectionPolicy,
+    tracked: bool,
+) -> CoreResult<(LocalBatchApply, Option<crate::ChangeSet>)> {
     // Validate the complete input before even creating the local device row.
     // This keeps the external-import boundary observably mutation-free when
     // any late element in a large batch is malformed.
@@ -356,6 +385,7 @@ pub(crate) fn apply_local_kinds_with_policy(
         ProjectionPolicy::Deferred => ApplyEffects::deferred(),
         ProjectionPolicy::Immediate => ApplyEffects::immediate(),
     };
+    effects.changes = tracked.then(ChangeTracker::default);
     for operation in &operations {
         apply_one_with_effects(transaction, operation, &mut effects)?;
         transaction.execute(
@@ -375,7 +405,12 @@ pub(crate) fn apply_local_kinds_with_policy(
             )?;
         }
     }
-    let stats = effects.finish(transaction)?;
+    let stats = effects.finish_projections(transaction)?;
+    let changes = effects
+        .changes
+        .take()
+        .map(|tracker| tracker.finish(transaction))
+        .transpose()?;
     if let Some(last) = operations.last() {
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('last_hlc', ?1)
@@ -383,7 +418,7 @@ pub(crate) fn apply_local_kinds_with_policy(
             [last.hlc.to_string()],
         )?;
     }
-    Ok(LocalBatchApply { operations, stats })
+    Ok((LocalBatchApply { operations, stats }, changes))
 }
 
 pub async fn apply(conn: &Connection, op: &Op, origin: Origin) -> Result<ApplyOutcome> {
@@ -1568,9 +1603,46 @@ struct ApplyEffects {
     pending_block_refs: BTreeMap<uuid::Uuid, (String, i64)>,
     pending_page_links: BTreeSet<String>,
     stats: DeferredApplyStats,
+    changes: Option<ChangeTracker>,
 }
 
 impl ApplyEffects {
+    fn capture_kind(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        kind: &OpKind,
+    ) -> rusqlite::Result<()> {
+        let Some(changes) = self.changes.as_mut() else {
+            return Ok(());
+        };
+        match kind {
+            OpKind::PageCreate(payload) => {
+                changes.page(transaction, payload.uuid)?;
+                changes.attachment(transaction, AttachmentOwner::Page(payload.uuid))?;
+            }
+            OpKind::PageSetTitle(payload) => changes.page(transaction, payload.uuid)?,
+            OpKind::PageSetLayout(payload) => changes.page(transaction, payload.uuid)?,
+            OpKind::PageDelete(payload) => changes.deleting_page(transaction, payload.uuid)?,
+            OpKind::BlockCreate(payload) => {
+                changes.block(transaction, payload.uuid)?;
+                // INSERT already contains Markdown, so apply_block_markdown cannot
+                // recover the initial empty graph for newly created content.
+                changes.graph(transaction, payload.uuid)?;
+                changes.attachment(transaction, AttachmentOwner::Block(payload.uuid))?;
+            }
+            OpKind::BlockSetMarkdown(payload) => changes.block(transaction, payload.uuid)?,
+            OpKind::BlockSetStyle(payload) => changes.block(transaction, payload.uuid)?,
+            OpKind::BlockMove(payload) => changes.block(transaction, payload.uuid)?,
+            OpKind::BlockDelete(payload) => changes.deleting_block(transaction, payload.uuid)?,
+            OpKind::AttachmentAdd(payload) => changes.attachment(transaction, payload.owner)?,
+            OpKind::AttachmentRemove(payload) => changes.attachment(transaction, payload.owner)?,
+            // Ink versioning remains a separate scope until it joins the store
+            // command contract; aliases are tracked at link materialization.
+            OpKind::InkPublish(_) | OpKind::PageAliasSet(_) => {}
+        }
+        Ok(())
+    }
+
     fn immediate() -> Self {
         Self {
             deferred: false,
@@ -1579,6 +1651,7 @@ impl ApplyEffects {
             pending_block_refs: BTreeMap::new(),
             pending_page_links: BTreeSet::new(),
             stats: DeferredApplyStats::default(),
+            changes: None,
         }
     }
 
@@ -1596,7 +1669,7 @@ impl ApplyEffects {
         if self.deferred {
             self.structure_dirty = true;
         } else {
-            reconcile_structure(transaction)?;
+            reconcile_structure_tracked(transaction, self.changes.as_mut())?;
             self.stats.structure_reconciliations += 1;
         }
         Ok(())
@@ -1609,7 +1682,7 @@ impl ApplyEffects {
         transaction: &rusqlite::Transaction<'_>,
     ) -> rusqlite::Result<()> {
         if self.structure_dirty {
-            reconcile_structure(transaction)?;
+            reconcile_structure_tracked(transaction, self.changes.as_mut())?;
             self.structure_dirty = false;
             self.stats.structure_reconciliations += 1;
         }
@@ -1627,6 +1700,9 @@ impl ApplyEffects {
             self.pending_block_refs
                 .insert(block_uuid, (markdown.to_owned(), timestamp));
         } else {
+            if let Some(changes) = self.changes.as_mut() {
+                changes.graph(transaction, block_uuid)?;
+            }
             replace_block_refs(transaction, block_uuid, markdown, timestamp)?;
             self.stats.reference_projections += 1;
         }
@@ -1642,6 +1718,9 @@ impl ApplyEffects {
         if self.deferred {
             self.pending_page_links.insert(alias);
         } else {
+            if let Some(changes) = self.changes.as_mut() {
+                changes.graph_alias(transaction, &alias)?;
+            }
             reconcile_page_links_for_alias(transaction, &alias)?;
             self.stats.reference_projections += 1;
         }
@@ -1656,6 +1735,13 @@ impl ApplyEffects {
         mut self,
         transaction: &rusqlite::Transaction<'_>,
     ) -> rusqlite::Result<DeferredApplyStats> {
+        self.finish_projections(transaction)
+    }
+
+    fn finish_projections(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> rusqlite::Result<DeferredApplyStats> {
         self.ensure_structure_current(transaction)?;
         let references_started = std::time::Instant::now();
         let pending_aliases = self.pending_page_links.len();
@@ -1663,11 +1749,17 @@ impl ApplyEffects {
         // First update already-materialized references for changed aliases.
         // Pending Markdown is projected afterwards against the final alias
         // state, avoiding an alias-by-reference second pass during imports.
-        for alias in self.pending_page_links {
+        for alias in std::mem::take(&mut self.pending_page_links) {
+            if let Some(changes) = self.changes.as_mut() {
+                changes.graph_alias(transaction, &alias)?;
+            }
             reconcile_page_links_for_alias(transaction, &alias)?;
             self.stats.reference_projections += 1;
         }
-        for (block_uuid, (markdown, timestamp)) in self.pending_block_refs {
+        for (block_uuid, (markdown, timestamp)) in std::mem::take(&mut self.pending_block_refs) {
+            if let Some(changes) = self.changes.as_mut() {
+                changes.graph(transaction, block_uuid)?;
+            }
             replace_block_refs(transaction, block_uuid, &markdown, timestamp)?;
             self.stats.reference_projections += 1;
         }
@@ -1695,6 +1787,7 @@ fn apply_one_with_effects(
         )));
     }
     let timestamp = operation_timestamp(operation);
+    effects.capture_kind(transaction, &operation.kind)?;
     match &operation.kind {
         OpKind::InkPublish(payload) => {
             ensure_object_kind(transaction, payload.page_uuid, ObjectKind::Page)?;
@@ -1770,6 +1863,9 @@ fn apply_one_with_effects(
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 for block_uuid in &stale_blocks {
+                    if let Some(changes) = effects.changes.as_mut() {
+                        changes.deleting_block(transaction, *block_uuid)?;
+                    }
                     effects.discard_block_refs(*block_uuid);
                     write_tombstone(
                         transaction,
@@ -1946,6 +2042,9 @@ fn apply_one_with_effects(
             }
             if tombstone_equals(transaction, payload.uuid, &operation.hlc)? {
                 for block_uuid in &blocks {
+                    if let Some(changes) = effects.changes.as_mut() {
+                        changes.deleting_block(transaction, *block_uuid)?;
+                    }
                     effects.discard_block_refs(*block_uuid);
                 }
                 transaction.execute("DELETE FROM pages WHERE uuid = ?1", [payload.uuid])?;
@@ -2262,6 +2361,9 @@ fn apply_page_title(
                     }
                     return Ok(());
                 }
+                if let Some(changes) = effects.changes.as_mut() {
+                    changes.page(transaction, conflict_uuid)?;
+                }
                 transaction.execute(
                     "UPDATE pages SET title = NULL, normalized_title = NULL, title_stemmed = '',
                                       updated_at = MAX(updated_at, ?2)
@@ -2429,6 +2531,13 @@ struct StructureRow {
 }
 
 fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    reconcile_structure_tracked(transaction, None)
+}
+
+fn reconcile_structure_tracked(
+    transaction: &rusqlite::Transaction<'_>,
+    mut changes: Option<&mut ChangeTracker>,
+) -> rusqlite::Result<()> {
     let started = std::time::Instant::now();
     let existing = {
         let mut statement = transaction.prepare(
@@ -2523,6 +2632,9 @@ fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
                 && row.updated_at >= updated_at
         }) {
             continue;
+        }
+        if let Some(changes) = changes.as_deref_mut() {
+            changes.block(transaction, uuid)?;
         }
         transaction.execute(
             "UPDATE blocks

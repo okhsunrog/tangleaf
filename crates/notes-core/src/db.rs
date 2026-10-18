@@ -14,7 +14,7 @@ mod attachments;
 mod blocks;
 mod document;
 mod graph;
-mod history;
+pub(crate) mod history;
 mod journals;
 mod migrations;
 mod pages;
@@ -273,7 +273,13 @@ pub(crate) fn apply_local_action_in_transaction(
 ) -> crate::CoreResult<()> {
     let inverse = history::capture_inverse_kinds(transaction, &kinds)?;
     operation::apply_local_kinds_in_transaction(transaction, kinds.clone())?;
-    history::record_action(transaction, action, kinds, inverse)?;
+    history::record_action(
+        transaction,
+        action,
+        kinds,
+        inverse,
+        operation::ProjectionPolicy::Immediate,
+    )?;
     Ok(())
 }
 

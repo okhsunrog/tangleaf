@@ -420,20 +420,36 @@ fn split_placement(
 }
 
 #[doc(hidden)]
-#[tracing::instrument(level = "debug", skip_all, fields(parts = parts.len()))]
 pub async fn split_block_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
     parts: Vec<BlockContent>,
     expected_revision: ContentRevision,
 ) -> Result<AppliedMutation<(Vec<Block>, bool)>> {
-    if parts.is_empty() {
-        return Err(crate::CoreError::invalid("split requires at least one part").into());
-    }
-    conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<(Vec<Block>, bool)>> {
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .split_block(uuid, parts, expected_revision)
+        .await?;
+    let graph_changed = committed.changes.graph_changed_content.contains(&uuid);
+    Ok(AppliedMutation {
+        value: (committed.value, graph_changed),
+        operations: committed.operations,
+    })
+}
+
+impl crate::store::NotesStore {
+    #[tracing::instrument(level = "debug", skip_all, fields(parts = parts.len()))]
+    pub async fn split_block(
+        &self,
+        uuid: uuid::Uuid,
+        parts: Vec<BlockContent>,
+        expected_revision: ContentRevision,
+    ) -> Result<crate::store::Committed<Vec<Block>>> {
+        if parts.is_empty() {
+            return Err(crate::CoreError::invalid("split requires at least one part").into());
+        }
+        self.write(move |write| -> crate::CoreResult<Vec<Block>> {
             let started = std::time::Instant::now();
-            let transaction = database.transaction()?;
+            let transaction = write.sql();
             let block_sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
             let source = transaction
                 .query_row(&block_sql, [uuid], row_to_block)
@@ -448,10 +464,7 @@ pub async fn split_block_with_ops(
                     "block content changed since split began",
                 ));
             }
-            let graph_changed =
-                crate::operation::content_references_changed(&source.markdown, &parts[0].markdown);
-
-            let (keys, moves) = split_placement(&transaction, &source, parts.len() - 1)?;
+            let (keys, moves) = split_placement(transaction, &source, parts.len() - 1)?;
             let now = chrono::Utc::now().timestamp();
             let mut result_uuids = vec![uuid];
             let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
@@ -472,42 +485,32 @@ pub async fn split_block_with_ops(
                 }));
             }
             kinds.extend(moves);
-            // Every inserted block already has its final parent and key. Apply
-            // the batch atomically, then reconcile once before capturing undo
-            // guards; no operation here depends on an intermediate tree.
-            let inverse = history::capture_inverse_kinds(&transaction, &kinds)?;
             let planning = started.elapsed();
             let applying = std::time::Instant::now();
-            operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds.clone())?;
-            let apply = applying.elapsed();
-            let recording = std::time::Instant::now();
-            history::record_action(&transaction, "split block", kinds.clone(), inverse)?;
-            let history = recording.elapsed();
+            // Every inserted block has its final parent/key. The shared apply
+            // finishes projections before the history layer captures guards.
+            write.apply_action(
+                "split block",
+                kinds.clone(),
+                operation::ProjectionPolicy::Deferred,
+            )?;
+            let apply_and_history = applying.elapsed();
             let reading = std::time::Instant::now();
             let blocks = result_uuids
                 .into_iter()
-                .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
+                .map(|uuid| write.sql().query_row(&block_sql, [uuid], row_to_block))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let result = reading.elapsed();
-            let committing = std::time::Instant::now();
-            transaction.commit()?;
             tracing::debug!(
                 operations = kinds.len(),
                 planning_ms = planning.as_secs_f64() * 1000.0,
-                apply_ms = apply.as_secs_f64() * 1000.0,
-                history_ms = history.as_secs_f64() * 1000.0,
-                result_ms = result.as_secs_f64() * 1000.0,
-                commit_ms = committing.elapsed().as_secs_f64() * 1000.0,
-                transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
-                "split transaction completed"
+                apply_and_history_ms = apply_and_history.as_secs_f64() * 1000.0,
+                result_ms = reading.elapsed().as_secs_f64() * 1000.0,
+                "split command prepared"
             );
-            Ok(AppliedMutation {
-                value: (blocks, graph_changed),
-                operations: kinds,
-            })
-        },
-    )
-    .await
+            Ok(blocks)
+        })
+        .await
+    }
 }
 
 pub async fn move_block(

@@ -1,5 +1,8 @@
 //! Host-independent tangleaf domain model and SQLite storage engine.
 
+pub mod changes;
+#[cfg(test)]
+mod changes_tests;
 pub mod db;
 mod error;
 pub mod external_import;
@@ -9,7 +12,9 @@ pub mod model;
 pub mod operation;
 pub mod sqlite;
 pub mod stem;
+pub mod store;
 
+pub use changes::{BlockChange, BlockPlacement, ChangeSet};
 pub use error::{CoreError, CoreResult};
 pub use external_import::{
     ExternalBlockId, ExternalImportAttachment, ExternalImportAttachmentOwner, ExternalImportBatch,

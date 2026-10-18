@@ -2,6 +2,7 @@ use super::*;
 use crate::operation::{
     AttachmentAdd, AttachmentRemove, BlockCreate, BlockDelete, BlockMove, BlockSetMarkdown,
     BlockSetStyle, PageAliasSet, PageCreate, PageDelete, PageSetLayout, PageSetTitle,
+    ProjectionPolicy,
 };
 use crate::{Hlc, PageAlias};
 use rusqlite::OptionalExtension;
@@ -82,9 +83,25 @@ enum HistoryScopeGuard {
 struct GuardedHistoryPayload {
     history_format_version: u32,
     operations: Vec<OpKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    apply_policy: Option<ProjectionPolicy>,
     guards: Vec<HistoryGuard>,
     #[serde(default)]
     scope_guards: Vec<HistoryScopeGuard>,
+}
+
+impl GuardedHistoryPayload {
+    fn resolve_projection_policy(&mut self, action: &str) -> ProjectionPolicy {
+        // Old split entries predate the stored policy. Preserve their projection
+        // scheduling once, then persist the explicit policy on the opposite stack.
+        *self.apply_policy.get_or_insert_with(|| {
+            if action == "split block" {
+                ProjectionPolicy::Deferred
+            } else {
+                ProjectionPolicy::Immediate
+            }
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -114,6 +131,7 @@ fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPaylo
         StoredHistoryPayload::Legacy(operations) => Ok(GuardedHistoryPayload {
             history_format_version: HISTORY_PAYLOAD_VERSION,
             operations,
+            apply_policy: None,
             // Pre-guard history cannot be checked retroactively. Preserve its existing
             // behavior once; the entry becomes guarded when moved to the opposite stack.
             guards: Vec::new(),
@@ -727,6 +745,7 @@ pub(crate) fn record_action(
     action: &str,
     forward: Vec<OpKind>,
     inverse: Vec<OpKind>,
+    apply_policy: ProjectionPolicy,
 ) -> rusqlite::Result<()> {
     if inverse.is_empty() {
         return Ok(());
@@ -738,6 +757,7 @@ pub(crate) fn record_action(
     let forward_json = encode_history_payload(&GuardedHistoryPayload {
         history_format_version: HISTORY_PAYLOAD_VERSION,
         operations: forward,
+        apply_policy: Some(apply_policy),
         guards: Vec::new(),
         scope_guards: Vec::new(),
     })
@@ -745,6 +765,7 @@ pub(crate) fn record_action(
     let inverse_json = encode_history_payload(&GuardedHistoryPayload {
         history_format_version: HISTORY_PAYLOAD_VERSION,
         operations: inverse,
+        apply_policy: Some(apply_policy),
         guards: inverse_guards,
         scope_guards: inverse_scope_guards,
     })
@@ -783,103 +804,377 @@ pub async fn history_status(conn: &Connection) -> Result<HistoryStatus> {
 }
 
 pub async fn undo_history(conn: &Connection) -> Result<HistoryMoveResult> {
-    move_history(conn, true).await
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .undo()
+        .await?
+        .value)
 }
 
 pub async fn redo_history(conn: &Connection) -> Result<HistoryMoveResult> {
-    move_history(conn, false).await
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .redo()
+        .await?
+        .value)
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(undo = undo))]
-async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult> {
-    conn.call_domain(move |database| -> anyhow::Result<HistoryMoveResult> {
-        let started = std::time::Instant::now();
-        let source = if undo { "history_undo" } else { "history_redo" };
-        let target = if undo { "history_redo" } else { "history_undo" };
-        let transaction = database.transaction()?;
-        let entry: Option<HistoryRow> = transaction
-            .query_row(
-                &format!(
-                    "SELECT id, action_uuid, action, forward_json, inverse_json
-                       FROM {source} ORDER BY id DESC LIMIT 1"
-                ),
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((entry_id, action_uuid, action, forward_json, inverse_json)) = entry else {
-            return Ok(HistoryMoveResult::Empty);
-        };
-        let mut forward = decode_history_payload(&forward_json)?;
-        let mut inverse = decode_history_payload(&inverse_json)?;
-        let selected = if undo { &inverse } else { &forward };
-        if !guards_match(&transaction, &selected.guards)?
-            || !scope_guards_match(&transaction, &selected.scope_guards)?
-        {
-            transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
-            transaction.commit()?;
-            return Ok(HistoryMoveResult::Skipped);
-        }
-        let kinds = selected.operations.clone();
-        let validation = started.elapsed();
-        let applying = std::time::Instant::now();
-        if action == "split block" {
-            // Split only inserts/removes siblings and changes their order keys.
-            // Neither direction needs intermediate structure projections, just
-            // like the original split. Reconcile before refreshing the guards.
-            operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds.clone())?;
-        } else {
-            operation::apply_local_kinds_in_transaction(&transaction, kinds.clone())?;
-        }
-        let apply = applying.elapsed();
-        let recording = std::time::Instant::now();
-        let next_guards = capture_history_guards(&transaction, &kinds)?;
-        if undo {
-            forward.guards = next_guards;
-            forward.scope_guards = capture_history_scope_guards(&transaction, &forward.operations)?;
-        } else {
-            inverse.guards = next_guards;
-            inverse.scope_guards = capture_history_scope_guards(&transaction, &inverse.operations)?;
-        }
-        let forward_json = encode_history_payload(&forward)?;
-        let inverse_json = encode_history_payload(&inverse)?;
-        transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
-        refresh_sibling_guards(
-            &transaction,
-            if undo {
-                &forward.guards
-            } else {
-                &inverse.guards
-            },
-        )?;
-        transaction.execute(
+pub(crate) fn move_history_in_transaction(
+    write: &mut crate::store::NotesTransaction<'_, '_>,
+    undo: bool,
+) -> Result<HistoryMoveResult> {
+    let started = std::time::Instant::now();
+    let source = if undo { "history_undo" } else { "history_redo" };
+    let target = if undo { "history_redo" } else { "history_undo" };
+    let transaction = write.sql();
+    let entry: Option<HistoryRow> = transaction
+        .query_row(
             &format!(
-                "INSERT INTO {target}(action_uuid, action, forward_json, inverse_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, unixepoch())"
+                "SELECT id, action_uuid, action, forward_json, inverse_json
+                       FROM {source} ORDER BY id DESC LIMIT 1"
             ),
-            rusqlite::params![action_uuid, action, forward_json, inverse_json],
-        )?;
-        let history = recording.elapsed();
-        let committing = std::time::Instant::now();
-        transaction.commit()?;
-        tracing::debug!(
-            operations = kinds.len(),
-            validation_ms = validation.as_secs_f64() * 1000.0,
-            apply_ms = apply.as_secs_f64() * 1000.0,
-            history_ms = history.as_secs_f64() * 1000.0,
-            commit_ms = committing.elapsed().as_secs_f64() * 1000.0,
-            transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "history transaction completed"
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((entry_id, action_uuid, action, forward_json, inverse_json)) = entry else {
+        return Ok(HistoryMoveResult::Empty);
+    };
+    let mut forward = decode_history_payload(&forward_json)?;
+    let mut inverse = decode_history_payload(&inverse_json)?;
+    let forward_policy = forward.resolve_projection_policy(&action);
+    let inverse_policy = inverse.resolve_projection_policy(&action);
+    let (selected, apply_policy) = if undo {
+        (&inverse, inverse_policy)
+    } else {
+        (&forward, forward_policy)
+    };
+    if !guards_match(transaction, &selected.guards)?
+        || !scope_guards_match(transaction, &selected.scope_guards)?
+    {
+        transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+        write.mark_history_changed();
+        return Ok(HistoryMoveResult::Skipped);
+    }
+    let kinds = selected.operations.clone();
+    let validation = started.elapsed();
+    let applying = std::time::Instant::now();
+    write.apply_local(kinds.clone(), apply_policy)?;
+    let apply = applying.elapsed();
+    let recording = std::time::Instant::now();
+    let transaction = write.sql();
+    let next_guards = capture_history_guards(transaction, &kinds)?;
+    if undo {
+        forward.guards = next_guards;
+        forward.scope_guards = capture_history_scope_guards(transaction, &forward.operations)?;
+    } else {
+        inverse.guards = next_guards;
+        inverse.scope_guards = capture_history_scope_guards(transaction, &inverse.operations)?;
+    }
+    let forward_json = encode_history_payload(&forward)?;
+    let inverse_json = encode_history_payload(&inverse)?;
+    transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+    refresh_sibling_guards(
+        transaction,
+        if undo {
+            &forward.guards
+        } else {
+            &inverse.guards
+        },
+    )?;
+    transaction.execute(
+        &format!(
+            "INSERT INTO {target}(action_uuid, action, forward_json, inverse_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, unixepoch())"
+        ),
+        rusqlite::params![action_uuid, action, forward_json, inverse_json],
+    )?;
+    let history = recording.elapsed();
+    write.mark_history_changed();
+    tracing::debug!(
+        operations = kinds.len(),
+        validation_ms = validation.as_secs_f64() * 1000.0,
+        apply_ms = apply.as_secs_f64() * 1000.0,
+        history_ms = history.as_secs_f64() * 1000.0,
+        "history action prepared"
+    );
+    Ok(HistoryMoveResult::Applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        static TREE_SCANS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Clone, Copy)]
+    enum StoredPolicy {
+        BareOperations,
+        Missing,
+        Explicit(&'static str),
+    }
+
+    async fn split_fixture() -> (Connection, uuid::Uuid) {
+        let connection = super::super::open_in_memory().await.unwrap();
+        let page = create_page(&connection, "History policies".into())
+            .await
+            .unwrap();
+        let source = create_block(
+            &connection,
+            page.uuid,
+            None,
+            None,
+            BlockStyle::Paragraph,
+            "one\n\ntwo\n\nthree\n\nfour".into(),
+        )
+        .await
+        .unwrap();
+        split_block(
+            &connection,
+            source.uuid,
+            ["one", "two", "three", "four"]
+                .into_iter()
+                .map(|markdown| BlockContent {
+                    markdown: markdown.into(),
+                })
+                .collect(),
+            source.markdown_revision,
+        )
+        .await
+        .unwrap();
+        (connection, page.uuid)
+    }
+
+    async fn rewrite_split_entry(connection: &Connection, action: &str, policy: StoredPolicy) {
+        let action = action.to_owned();
+        connection
+            .call(move |database| {
+                let (forward, inverse): (String, String) = database.query_row(
+                    "SELECT forward_json, inverse_json FROM history_undo ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let rewrite = |encoded: String| {
+                    let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+                    let payload = value["payload"].as_object_mut().unwrap();
+                    match policy {
+                        StoredPolicy::BareOperations => {
+                            serde_json::to_string(&payload["operations"]).unwrap()
+                        }
+                        StoredPolicy::Missing => {
+                            payload.remove("apply_policy");
+                            serde_json::to_string(&value).unwrap()
+                        }
+                        StoredPolicy::Explicit(policy) => {
+                            payload.insert("apply_policy".into(), policy.into());
+                            serde_json::to_string(&value).unwrap()
+                        }
+                    }
+                };
+                database.execute(
+                    "UPDATE history_undo SET action = ?1, forward_json = ?2, inverse_json = ?3
+                       WHERE id = (SELECT id FROM history_undo ORDER BY id DESC LIMIT 1)",
+                    rusqlite::params![action, rewrite(forward), rewrite(inverse)],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn tree_scan_count(connection: &Connection, start: bool) -> usize {
+        connection
+            .call(move |database| {
+                if start {
+                    TREE_SCANS.set(0);
+                    database.trace_v2(
+                        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                        Some(|event| {
+                            if let rusqlite::trace::TraceEvent::Stmt(statement, _) = event
+                                && statement
+                                    .sql()
+                                    .starts_with("SELECT uuid, existence_hlc, page_uuid")
+                            {
+                                TREE_SCANS.set(TREE_SCANS.get() + 1);
+                            }
+                        }),
+                    );
+                } else {
+                    database.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+                }
+                Ok(TREE_SCANS.get())
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn assert_stored_policy(
+        connection: &Connection,
+        table: &'static str,
+        policy: ProjectionPolicy,
+    ) {
+        let (forward, inverse) = connection
+            .call(move |database| {
+                database.query_row(
+                    &format!(
+                        "SELECT forward_json, inverse_json FROM {table} ORDER BY id DESC LIMIT 1"
+                    ),
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .await
+            .unwrap();
+        for encoded in [forward, inverse] {
+            let payload = decode_history_payload(&encoded).unwrap();
+            assert_eq!(payload.history_format_version, HISTORY_PAYLOAD_VERSION);
+            assert_eq!(payload.apply_policy, Some(policy));
+        }
+    }
+
+    async fn assert_split_history_policy(
+        policy: StoredPolicy,
+        action: &str,
+        expected_scans: usize,
+    ) {
+        let (connection, page_uuid) = split_fixture().await;
+        rewrite_split_entry(&connection, action, policy).await;
+
+        tree_scan_count(&connection, true).await;
+        assert_eq!(
+            undo_history(&connection).await.unwrap(),
+            HistoryMoveResult::Applied
         );
-        Ok(HistoryMoveResult::Applied)
-    })
-    .await
+        assert_eq!(tree_scan_count(&connection, false).await, expected_scans);
+        assert_eq!(
+            list_block_children(&connection, page_uuid, None)
+                .await
+                .unwrap()[0]
+                .markdown,
+            "one\n\ntwo\n\nthree\n\nfour"
+        );
+        let expected_policy = if expected_scans == 1 {
+            ProjectionPolicy::Deferred
+        } else {
+            ProjectionPolicy::Immediate
+        };
+        assert_stored_policy(&connection, "history_redo", expected_policy).await;
+
+        tree_scan_count(&connection, true).await;
+        assert_eq!(
+            redo_history(&connection).await.unwrap(),
+            HistoryMoveResult::Applied
+        );
+        assert_eq!(tree_scan_count(&connection, false).await, expected_scans);
+        assert_eq!(
+            list_block_children(&connection, page_uuid, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|block| block.markdown)
+                .collect::<Vec<_>>(),
+            ["one", "two", "three", "four"]
+        );
+        assert_stored_policy(&connection, "history_undo", expected_policy).await;
+    }
+
+    #[tokio::test]
+    async fn history_policy_legacy_bare_split_preserves_deferred_scheduling() {
+        assert_split_history_policy(StoredPolicy::BareOperations, "split block", 1).await;
+    }
+
+    #[tokio::test]
+    async fn history_policy_legacy_guarded_split_preserves_deferred_scheduling() {
+        assert_split_history_policy(StoredPolicy::Missing, "split block", 1).await;
+    }
+
+    #[tokio::test]
+    async fn history_policy_explicit_deferred_survives_action_label_change() {
+        assert_split_history_policy(StoredPolicy::Explicit("deferred"), "Separate paragraphs", 1)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn history_policy_explicit_immediate_overrides_legacy_split_label() {
+        assert_split_history_policy(StoredPolicy::Explicit("immediate"), "split block", 3).await;
+    }
+
+    #[tokio::test]
+    async fn history_policy_new_records_store_the_actual_application_policy() {
+        let (connection, _) = split_fixture().await;
+        assert_stored_policy(&connection, "history_undo", ProjectionPolicy::Deferred).await;
+        create_page(&connection, "Immediate action".into())
+            .await
+            .unwrap();
+        assert_stored_policy(&connection, "history_undo", ProjectionPolicy::Immediate).await;
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct DatabaseFacts {
+        document: serde_json::Value,
+        mutation_counts: (i64, i64),
+        undo: Vec<(String, String, String)>,
+        meta: Vec<(String, String)>,
+    }
+
+    async fn database_facts(connection: &Connection, page_uuid: uuid::Uuid) -> DatabaseFacts {
+        let document =
+            serde_json::to_value(get_page_document(connection, page_uuid).await.unwrap()).unwrap();
+        let (mutation_counts, undo, meta) = connection
+            .call(|database| {
+                let mutation_counts = database.query_row(
+                    "SELECT (SELECT COUNT(*) FROM applied_ops), (SELECT COUNT(*) FROM sync_outbox)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let undo = database
+                    .prepare(
+                        "SELECT action, forward_json, inverse_json FROM history_undo ORDER BY id",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let meta = database
+                    .prepare("SELECT key, value FROM sync_meta ORDER BY key")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((mutation_counts, undo, meta))
+            })
+            .await
+            .unwrap();
+        DatabaseFacts {
+            document,
+            mutation_counts,
+            undo,
+            meta,
+        }
+    }
+
+    #[tokio::test]
+    async fn history_policy_unknown_value_fails_before_any_history_or_content_write() {
+        let (connection, page_uuid) = split_fixture().await;
+        rewrite_split_entry(
+            &connection,
+            "split block",
+            StoredPolicy::Explicit("future_policy"),
+        )
+        .await;
+        let before = database_facts(&connection, page_uuid).await;
+
+        undo_history(&connection)
+            .await
+            .expect_err("unknown policy must fail closed");
+
+        assert_eq!(database_facts(&connection, page_uuid).await, before);
+        assert_eq!(history_status(&connection).await.unwrap().redo_count, 0);
+    }
 }
