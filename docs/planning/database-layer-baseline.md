@@ -384,6 +384,55 @@ snapshot без скачка: scroll 10654→10654, тот же editor, 12 ст�
 Виртуальная и driver-сессии закрыты. Пользовательская база не изменялась. Release GUI
 p95, полный IPC/refetch/render trace и смешанный workload нового пути ещё требуют проверки.
 
+## Этап 5: отдельный reader и конкурирующие writers
+
+После `BEGIN IMMEDIATE` перед планированием и разделения reader/writer повторён release
+workload на том же snapshot: 1074 страницы, 16 944 блока, 62 вложения, 53 ink versions.
+По три независимые копии и десять сохранений на копию для каждой политики/сценария;
+порядок NORMAL/FULL чередуется, пауза между завершёнными bursts — 400 мс.
+Всего 180 сохранений. Таймер включает backend-команду и ожидание writer, UI не входит.
+
+| Autosave, мс | NORMAL p50 | NORMAL p95 | FULL p50 | FULL p95 |
+| ------------ | ---------- | ---------- | -------- | -------- |
+| Без фоновой нагрузки | 1,178 | 2,314 | 2,939 | 8,551 |
+| Документ, поиск и sync | 1,300 | 9,467 | 3,185 | 14,110 |
+| То же, ink и вложения | 1,779 | 9,858 | 3,784 | 15,502 |
+
+Sync burst меняет и перемещает 32 блока (64 операции), каждый третий save начиная с первого.
+CONTENT добавляет по одному штриху из 256 точек, завершает native publication каждый третий
+и последний save; каждый третий save устанавливает уникальный blob 256 КиБ с fsync и его
+метаданные. Ink использует FULL в обеих сериях; меняется только main writer. Очерёдность
+save-first/background-first чередуется. В CONTENT полное конкурентное действие имеет
+NORMAL/FULL p50 23,127/27,969 мс и p95 35,644/44,918 мс. Медианы document/search read —
+0,798/2,199 мс и 0,708/2,160 мс соответственно. Конкуренция native writer отражается в его
+длительности; разницу нельзя приписать смене политики ink, которой не было.
+
+FULL добавил 1,76–2,01 мс к медиане autosave. Все три p95 ниже desktop-цели 50 мс.
+Это поддерживает FULL для main writer на этом хосте. Измерения не изолируют вклад каждой
+оптимизации; 30 samples не дают точной p99. Они не доказывают скорость BOOX, расход энергии,
+готовность UI или устойчивость накопителя при потере питания.
+
+Каждая копия прошла точные проверки текста/revisions, applied IDs, outbox, cursor, истории
+и close/reopen. CONTENT на копию добавил 273 applied operations, 17 outbox rows, 10 штрихов,
+4 доступных ink versions и 3 hash-проверенных вложения. Каждый pending InkPublish graph
+экспортируется до/после reopen. Все 18 финальных passive checkpoints завершились с busy=0
+и checkpointed_frames=frames. CONTENT достигает automatic threshold 1000; его последний
+passive checkpoint не представляет совокупную стоимость всех предшествующих flush.
+
+Хост: Framework Laptop 13 Intel Core Ultra Series 1, kernel 7.2.8-5-okhsunrog, powersave /
+balance_performance; ZFS `novafs/tmp_zfs_home`, sync=standard, recordsize=128 КиБ,
+compression=on, logbias=latency, dedup=off. Во время измерений builds/tests не запускались.
+Бинарник собран из `3f333df2ba7504017a9903ca96d65cd5cfbed699` и зафиксированного patch
+backup collector; все 184 хэша core/dependency исходников сохранились.
+SHA-256 бинарника: `f2ec3b9a033aba72945878e3547442c4b353614f151e255bf4ed77b963b279dc`.
+Исходный snapshot оставался read-only; его SHA-256 до/после —
+`dd2e95211285f46510398725cd50d993a6432bd1c90568370f029b2ba487be4b`.
+Production policy этим benchmark не менялась.
+
+Артефакты: `stage5/measurements/current-content/` под диагностическим корнем:
+`report.md`, `analysis.json`, `quiet-mixed-release.log`, `content-release.log`,
+`execution.json`, `provenance.json`, source manifests/patches и reproduction scripts.
+
 ## Воспроизведение
 
 Использовать стабильный snapshot и JSON-массив частей без публикации содержимого заметок:

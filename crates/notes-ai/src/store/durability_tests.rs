@@ -146,7 +146,7 @@ fn control(index: usize) -> AiControl {
     let enabled = index.is_multiple_of(2);
     AiControl {
         automatic_embeddings: enabled,
-        entity_extraction: enabled,
+        entity_extraction: true,
         query_rewriting: !enabled,
     }
 }
