@@ -1,6 +1,6 @@
 use super::*;
-use rusqlite::params;
-#[derive(Debug, Serialize, specta::Type)]
+use rusqlite::{OptionalExtension, params};
+#[derive(Debug, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InkVersionInfo {
     pub version_uuid: uuid::Uuid,
@@ -12,7 +12,7 @@ pub struct InkVersionInfo {
     pub modified_at_ms: f64,
     pub available: bool,
 }
-#[derive(Debug, Serialize, specta::Type)]
+#[derive(Debug, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InkNoteStatus {
     pub page_uuid: uuid::Uuid,
@@ -53,37 +53,9 @@ impl Store {
     pub fn status(&self) -> CommandResult<InkNoteStatus> {
         let mut conn = storage::open(self)?;
         let tx = conn.transaction()?;
-        let (revision,unpublished_changes,publication_requested,base_version)=tx.query_row("SELECT revision,dirty,publication_requested,base_version FROM ink_documents WHERE page_uuid=?1",[self.document],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-        let heads = versions::head_ids(&tx, self.document)?
-            .into_iter()
-            .map(|id| {
-                let v = versions::get(&tx, id)?
-                    .ok_or_else(|| CommandError::not_found("Missing ink version"))?;
-                let available = tx.query_row(
-                    "SELECT root_id IS NOT NULL FROM ink_versions WHERE version_uuid=?1",
-                    [id],
-                    |r| r.get(0),
-                )?;
-                Ok(InkVersionInfo {
-                    version_uuid: id,
-                    parents: v.publication.parents,
-                    root_hash: v.publication.root_hash.to_string(),
-                    device_name: v.publication.device_name,
-                    device_id: v.device_id,
-                    modified_at_ms: v.modified_hlc.wall_ms() as f64,
-                    available,
-                })
-            })
-            .collect::<CommandResult<_>>()?;
+        let result = read_status(&tx, self.document)?;
         tx.commit()?;
-        Ok(InkNoteStatus {
-            page_uuid: self.document,
-            revision,
-            unpublished_changes,
-            publication_requested,
-            base_version,
-            heads,
-        })
+        Ok(result)
     }
     pub fn preview(&self, version: uuid::Uuid) -> CommandResult<InkDraft> {
         let mut conn = storage::open(self)?;
@@ -127,6 +99,44 @@ impl Store {
     pub fn page_uuid(&self) -> uuid::Uuid {
         self.document
     }
+}
+
+/// The public metadata projection without opening a native writer or creating
+/// ink_documents. Callers keep all of its reads inside their own transaction.
+pub(crate) fn read_status(
+    conn: &rusqlite::Connection,
+    page: uuid::Uuid,
+) -> CommandResult<InkNoteStatus> {
+    let (revision,unpublished_changes,publication_requested,base_version)=conn.query_row("SELECT revision,dirty,publication_requested,base_version FROM ink_documents WHERE page_uuid=?1",[page],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.unwrap_or((None, false, false, None));
+    let heads = versions::head_ids(conn, page)?
+        .into_iter()
+        .map(|id| {
+            let v = versions::get(conn, id)?
+                .ok_or_else(|| CommandError::not_found("Missing ink version"))?;
+            let available = conn.query_row(
+                "SELECT root_id IS NOT NULL FROM ink_versions WHERE version_uuid=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            Ok(InkVersionInfo {
+                version_uuid: id,
+                parents: v.publication.parents,
+                root_hash: v.publication.root_hash.to_string(),
+                device_name: v.publication.device_name,
+                device_id: v.device_id,
+                modified_at_ms: v.modified_hlc.wall_ms() as f64,
+                available,
+            })
+        })
+        .collect::<CommandResult<_>>()?;
+    Ok(InkNoteStatus {
+        page_uuid: page,
+        revision,
+        unpublished_changes,
+        publication_requested,
+        base_version,
+        heads,
+    })
 }
 /// On process startup, interrupted sessions become candidates for completion.
 /// No geometry is imported from the former prototype database.

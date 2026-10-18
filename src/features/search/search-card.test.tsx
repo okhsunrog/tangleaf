@@ -205,6 +205,7 @@ describe("SearchCard page-list refreshes", () => {
               ],
               graphChangedContent: [],
               attachmentOwners: [],
+              handwritingPages: [],
               historyChanged: true,
             },
           },

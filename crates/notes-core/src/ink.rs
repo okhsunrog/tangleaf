@@ -6,6 +6,7 @@ pub mod archive;
 pub(crate) mod history_retention;
 mod input;
 mod status;
+pub(crate) use status::read_status;
 pub use status::{InkNoteStatus, InkVersionInfo, recoverable_notes};
 pub mod runtime;
 mod storage;

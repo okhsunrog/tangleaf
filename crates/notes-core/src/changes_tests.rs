@@ -59,6 +59,97 @@ fn sorted(values: impl IntoIterator<Item = Uuid>) -> Vec<Uuid> {
 }
 
 #[tokio::test]
+async fn handwriting_publications_track_metadata_even_when_page_projection_is_unchanged() {
+    let conn = db::open_in_memory().await.unwrap();
+    let page_id = Uuid::now_v7();
+    let changes = apply(
+        &conn,
+        vec![OpKind::PageCreate(PageCreate {
+            uuid: page_id,
+            title: Some("Drawing".into()),
+            layout: PageLayout::Outline,
+            kind: PageKind::Handwriting,
+            created_at: 10,
+        })],
+        ProjectionPolicy::Immediate,
+    )
+    .await;
+    assert_eq!(changes.handwriting_pages, [page_id]);
+    // A coarse/future page timestamp must never be the only change detector
+    // for causal publications or downloaded availability.
+    conn.call(move |database| {
+        database.execute(
+            "UPDATE pages SET updated_at=?2 WHERE uuid=?1",
+            (page_id, i64::MAX),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let before = db::get_page(&conn, page_id).await.unwrap();
+    let mut parents = Vec::new();
+    for name in ["One", "Two"] {
+        let version = Uuid::now_v7();
+        let changes = apply(
+            &conn,
+            vec![OpKind::InkPublish(crate::ink::Publish {
+                version_uuid: version,
+                page_uuid: page_id,
+                parents,
+                root_hash: crate::BlobHash::digest(name.as_bytes()),
+                device_name: name.into(),
+            })],
+            ProjectionPolicy::Immediate,
+        )
+        .await;
+        assert_eq!(db::get_page(&conn, page_id).await.unwrap(), before);
+        assert!(changes.changed_pages.is_empty());
+        assert_eq!(changes.handwriting_pages, [page_id]);
+        assert_eq!(changes.affected_pages, [page_id]);
+        assert!(changes.blocks.is_empty());
+        assert!(changes.graph_changed_content.is_empty());
+        parents = vec![version];
+    }
+    let changes = apply(
+        &conn,
+        vec![OpKind::PageDelete(PageDelete { uuid: page_id })],
+        ProjectionPolicy::Immediate,
+    )
+    .await;
+    assert_eq!(changes.handwriting_pages, [page_id]);
+    assert_eq!(changes.deleted_pages, [page_id]);
+}
+
+#[tokio::test]
+async fn handwriting_status_projection_does_not_initialize_a_native_document() {
+    let conn = db::open_in_memory().await.unwrap();
+    let page = db::create_handwritten_note_with_ops(&conn, None)
+        .await
+        .unwrap()
+        .value;
+    conn.call_domain(move |database| -> crate::CoreResult<()> {
+        let tx = database.transaction()?;
+        assert_eq!(
+            tx.query_row("SELECT count(*) FROM ink_documents", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        let status = crate::ink::read_status(&tx, page.uuid)?;
+        assert_eq!(status.page_uuid, page.uuid);
+        assert!(status.revision.is_none() && status.heads.is_empty());
+        assert!(!status.unpublished_changes);
+        assert_eq!(
+            tx.query_row("SELECT count(*) FROM ink_documents", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn content_and_revision_changes_retain_placement_without_page_row_invalidation() {
     let conn = db::open_in_memory().await.unwrap();
     let page_id = Uuid::now_v7();
@@ -684,6 +775,13 @@ fn change_set_serialization_and_empty_contract_include_all_categories() {
     assert!(wire["blocks"][0]["before"].get("pageUuid").is_some());
     assert_eq!(serde_json::from_value::<ChangeSet>(wire).unwrap(), changes);
     assert!(ChangeSet::default().is_empty());
+    assert!(
+        !ChangeSet {
+            handwriting_pages: vec![uuid],
+            ..ChangeSet::default()
+        }
+        .is_empty()
+    );
     assert!(
         !ChangeSet {
             history_changed: true,

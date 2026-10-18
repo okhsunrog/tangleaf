@@ -9,6 +9,32 @@ import {
 import type { ChangeSet, DomainEvent } from "./bindings";
 
 describe("domain event query invalidation", () => {
+  it("refreshes changed drawing metadata and previews when the page projection stays equal", async () => {
+    const client = new QueryClient();
+    const affected = [
+      queryKeys.handwritingStatus("ink-a"),
+      queryKeys.handwritingVersion("ink-a", "version-one"),
+      queryKeys.handwritingVersion("ink-a", "version-two"),
+      queryKeys.pageRender("ink-a"),
+      queryKeys.pageDocument("ink-a"),
+    ];
+    const unrelated = [
+      queryKeys.handwritingStatus("ink-b"),
+      queryKeys.handwritingVersion("ink-b", "version-one"),
+      queryKeys.page("ink-a"),
+      queryKeys.pageList("notes", 100),
+      queryKeys.graph(null),
+    ];
+    for (const key of [...affected, ...unrelated]) client.setQueryData(key, {});
+    await applyDomainEvent(
+      client,
+      committed({ handwritingPages: ["ink-a"], affectedPages: ["ink-a"] }),
+    );
+    for (const key of affected) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    for (const key of unrelated) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    expect(client.getQueryData(queryKeys.searchRevision)).toBeUndefined();
+  });
+
   it("refreshes a committed Split and its backlinks while preserving a stable graph and unrelated pages", async () => {
     const client = new QueryClient();
     const target = [
@@ -705,6 +731,7 @@ function committed(changes: Partial<ChangeSet>): DomainEvent {
         blocks: [],
         graphChangedContent: [],
         attachmentOwners: [],
+        handwritingPages: [],
         historyChanged: false,
         ...changes,
       },

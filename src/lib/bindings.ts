@@ -354,6 +354,7 @@ export type ChangeSet = {
 	blocks: BlockChange[],
 	graphChangedContent: string[],
 	attachmentOwners: string[],
+	handwritingPages?: string[],
 	historyChanged: boolean,
 };
 

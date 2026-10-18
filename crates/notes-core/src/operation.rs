@@ -1710,6 +1710,9 @@ impl ApplyEffects {
         match kind {
             OpKind::PageCreate(payload) => {
                 changes.page(transaction, payload.uuid)?;
+                if payload.kind == PageKind::Handwriting {
+                    changes.handwriting(transaction, payload.uuid)?;
+                }
                 changes.attachment(transaction, AttachmentOwner::Page(payload.uuid))?;
             }
             OpKind::PageSetTitle(payload) => changes.page(transaction, payload.uuid)?,
@@ -1728,9 +1731,12 @@ impl ApplyEffects {
             OpKind::BlockDelete(payload) => changes.deleting_block(transaction, payload.uuid)?,
             OpKind::AttachmentAdd(payload) => changes.attachment(transaction, payload.owner)?,
             OpKind::AttachmentRemove(payload) => changes.attachment(transaction, payload.owner)?,
-            // Ink versioning remains a separate scope until it joins the store
-            // command contract; aliases are tracked at link materialization.
-            OpKind::InkPublish(_) | OpKind::PageAliasSet(_) => {}
+            OpKind::InkPublish(payload) => {
+                changes.page(transaction, payload.page_uuid)?;
+                changes.handwriting(transaction, payload.page_uuid)?;
+            }
+            // Aliases are tracked at link materialization.
+            OpKind::PageAliasSet(_) => {}
         }
         Ok(())
     }

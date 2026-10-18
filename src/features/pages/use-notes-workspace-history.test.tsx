@@ -146,6 +146,7 @@ function committed({ deleted }: { deleted: boolean }) {
         blocks: [],
         graphChangedContent: [page.uuid],
         attachmentOwners: [],
+        handwritingPages: [],
         historyChanged: true,
       },
     },

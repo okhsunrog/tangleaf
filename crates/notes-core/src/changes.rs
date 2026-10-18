@@ -34,6 +34,8 @@ pub struct ChangeSet {
     pub blocks: Vec<BlockChange>,
     pub graph_changed_content: Vec<Uuid>,
     pub attachment_owners: Vec<Uuid>,
+    #[serde(default)]
+    pub handwriting_pages: Vec<Uuid>,
     pub history_changed: bool,
 }
 
@@ -45,6 +47,7 @@ impl ChangeSet {
             && self.blocks.is_empty()
             && self.graph_changed_content.is_empty()
             && self.attachment_owners.is_empty()
+            && self.handwriting_pages.is_empty()
             && !self.history_changed
     }
 }
@@ -78,9 +81,17 @@ pub(crate) struct ChangeTracker {
     blocks: BTreeMap<Uuid, Option<BlockState>>,
     graph: BTreeMap<Uuid, GraphState>,
     attachments: BTreeMap<Uuid, (AttachmentOwner, Vec<AttachmentState>, Option<Uuid>)>,
+    handwriting: BTreeMap<Uuid, Option<crate::ink::InkNoteStatus>>,
 }
 
 impl ChangeTracker {
+    pub(crate) fn handwriting(&mut self, db: &Connection, uuid: Uuid) -> rusqlite::Result<()> {
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.handwriting.entry(uuid) {
+            entry.insert(read_handwriting(db, uuid)?);
+        }
+        Ok(())
+    }
+
     pub(crate) fn page(&mut self, db: &Connection, uuid: Uuid) -> rusqlite::Result<()> {
         if let std::collections::btree_map::Entry::Vacant(entry) = self.pages.entry(uuid) {
             entry.insert(read_page(db, uuid)?);
@@ -137,6 +148,7 @@ impl ChangeTracker {
 
     pub(crate) fn deleting_page(&mut self, db: &Connection, uuid: Uuid) -> rusqlite::Result<()> {
         self.page(db, uuid)?;
+        self.handwriting(db, uuid)?;
         self.attachment(db, AttachmentOwner::Page(uuid))?;
         // ON DELETE SET NULL changes incoming edges before alias reconciliation.
         let mut statement = db.prepare(
@@ -213,10 +225,34 @@ impl ChangeTracker {
                 affected_pages.extend(owner_page(db, owner)?);
             }
         }
+        for (uuid, before) in self.handwriting {
+            if before != read_handwriting(db, uuid)? {
+                changes.handwriting_pages.push(uuid);
+                affected_pages.insert(uuid);
+            }
+        }
         changes.affected_pages = affected_pages.into_iter().collect();
         changes.graph_changed_content = graph_changed.into_iter().collect();
         Ok(changes)
     }
+}
+
+fn read_handwriting(
+    db: &Connection,
+    uuid: Uuid,
+) -> rusqlite::Result<Option<crate::ink::InkNoteStatus>> {
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pages p JOIN page_identities i ON i.page_uuid=p.uuid
+         WHERE p.uuid=?1 AND i.content_type='ink')",
+        [uuid],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    crate::ink::read_status(db, uuid)
+        .map(Some)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 fn read_page(db: &Connection, uuid: Uuid) -> rusqlite::Result<Option<PageState>> {

@@ -215,6 +215,15 @@
   5 новых delete-store, 22 history/archive, 15 ink recovery и 9 handwriting storage.
   Проверены quiet absent, оба порядка queued create/delete, точные facts и полный rollback.
 
+- Перед переносом remote Apply добавлена отдельная категория `handwritingPages` в ChangeSet.
+  Она сравнивает public ink status (revision, публикации, доступность и состояние черновика),
+  поэтому новый causal head инвалидирует UI даже при неизменной строке/timestamp страницы.
+  Общая read-only status projection переиспользуется native adapter и tracker без открытия
+  дополнительного writer или создания ink_documents. UI обновляет только status/previews
+  затронутых рисунков; старый payload без новой категории совместим. Bindings сгенерированы.
+  16 ChangeSet-тестов и 56 query/search/workspace-тестов проходят; `vp check` и общий
+  core/AI/server/Tauri all-target Clippy чистые. Raw/native ink writers ещё вне Store counter.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
