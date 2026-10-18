@@ -910,7 +910,7 @@ fn sampled_partitions(length: usize, seed: u64) -> Vec<Vec<usize>> {
     let mut random = seed;
     for _ in 0..3 {
         let mut ends = (1..length)
-            .filter(|_| next_random(&mut random) % 4 == 0)
+            .filter(|_| next_random(&mut random).is_multiple_of(4))
             .collect::<Vec<_>>();
         ends.push(length);
         partitions.push(ends);
