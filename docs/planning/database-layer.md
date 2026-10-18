@@ -323,6 +323,15 @@
   integration и 1 cleanup unit, targeted Clippy и 44 Tauri lib tests (1 ignored).
   Этот close пока не является общим shutdown: raw ink jobs и sync должны завершаться раньше.
 
+- Background sync теперь имеет явный stop/drain: единый admission gate регистрирует worker
+  до shutdown, cancellation прерывает сетевые ожидания и retry/backoff, TaskTracker дожидается
+  удаления future. Регистрация после stop отклоняется; отмена shutdown waiter не открывает
+  gate снова. Exit upload запускается после остановки фонового worker, поэтому два sync loop
+  больше не отправляют одну очередь одновременно при выходе. Уже принятые SQLite jobs
+  сохраняются и завершаются при последующем Store close. Это проверено отдельной регрессией
+  с блокированным SQL job и reopen, вместе с двумя cancellation/admission тестами (3/3).
+  Финальное закрытие Store подключится после координации raw ink, а не раньше неё.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

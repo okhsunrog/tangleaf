@@ -19,6 +19,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const HEARTBEAT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ATTACHMENT_SIZE: u64 = 100 * 1024 * 1024;
 
+mod lifecycle;
+use lifecycle::SyncWorker;
+
 #[derive(Default)]
 struct Heartbeat {
     sent_at: Option<tokio::time::Instant>,
@@ -164,6 +167,7 @@ pub struct SyncStatus {
 pub struct SyncRuntime {
     pub status: Arc<RwLock<SyncStatus>>,
     retry: watch::Sender<u64>,
+    worker: SyncWorker,
 }
 
 impl SyncRuntime {
@@ -181,6 +185,7 @@ impl SyncRuntime {
                 quarantine_reason: None,
             })),
             retry,
+            worker: SyncWorker::default(),
         }
     }
 
@@ -208,7 +213,8 @@ pub fn spawn_worker(
     status: Arc<RwLock<SyncStatus>>,
     mut retries: watch::Receiver<u64>,
 ) {
-    tauri::async_runtime::spawn(async move {
+    let worker = app.state::<SyncRuntime>().worker.clone();
+    worker.spawn(async move {
         let mut credentials = Some((server_url, token));
         'configuration: loop {
             let Some((server_url, token)) = credentials.take() else {
@@ -941,6 +947,9 @@ fn replace_status(app: &AppHandle, status: &Arc<RwLock<SyncStatus>>, next: SyncS
 /// Best-effort upload on orderly exit. The outbox remains authoritative on
 /// timeout/offline failure; shutting down never waits indefinitely for a server.
 pub(crate) async fn finish_before_exit(app: &AppHandle) {
+    if let Some(sync) = app.try_state::<SyncRuntime>() {
+        sync.worker.shutdown().await;
+    }
     let Some(state) = app.try_state::<crate::commands::AppState>() else {
         return;
     };
