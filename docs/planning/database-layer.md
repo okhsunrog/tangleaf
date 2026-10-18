@@ -166,6 +166,12 @@
   Семантика initial block, отдельных untitled notes, истории и handwritten creation сохранена.
   7 новых creation-тестов, 9 прежних page/note, 152 core unit и 2 Tauri-теста прошли.
   Fixture commit assertions привязаны к начальному counter, поскольку создание тоже учитывается.
+- Move/reorder/indent/outdent теперь используют один синхронный planner внутри Store;
+  guard, sparse/ordinal выбор текущего алгоритма, история и result не разделены commit.
+  Outliner целиком использует общий publisher, не публикует вручную HistoryChanged.
+  21 block-command, 22 history/archive, 11 document и 2 Tauri-теста проходят, Clippy чистый.
+  Удалён оставшийся async action-wrapper без production callers; in-transaction адаптер
+  пока обслуживает ещё не перенесённые операции. Sparse placement по-прежнему отдельный шаг.
 
 ## Решение и масштаб
 

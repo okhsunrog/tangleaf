@@ -249,6 +249,75 @@ fn apply_block_style(
     require_block(write.sql(), block.uuid)
 }
 
+fn move_block_in_transaction(
+    write: &mut crate::store::NotesTransaction<'_, '_>,
+    block: Block,
+    new_parent_uuid: Option<uuid::Uuid>,
+    after_uuid: Option<uuid::Uuid>,
+) -> Result<Block> {
+    let transaction = write.sql();
+    if new_parent_uuid == Some(block.uuid) {
+        return Err(crate::CoreError::conflict("a block cannot be its own parent").into());
+    }
+    if let Some(parent) = new_parent_uuid {
+        let parent_block = read_block(transaction, parent)?
+            .ok_or_else(|| crate::CoreError::not_found("parent block was not found"))?;
+        if parent_block.page_uuid != block.page_uuid {
+            return Err(
+                crate::CoreError::conflict("parent block belongs to a different page").into(),
+            );
+        }
+        let creates_cycle = transaction.query_row(
+            "WITH RECURSIVE descendants(uuid) AS (
+               SELECT uuid FROM blocks WHERE parent_uuid = ?1
+               UNION ALL
+               SELECT block.uuid FROM blocks block
+                 JOIN descendants child ON block.parent_uuid = child.uuid
+             )
+             SELECT EXISTS(SELECT 1 FROM descendants WHERE uuid = ?2)",
+            rusqlite::params![block.uuid, parent],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if creates_cycle {
+            return Err(crate::CoreError::conflict(
+                "a block cannot be moved under one of its descendants",
+            )
+            .into());
+        }
+    }
+    let siblings = read_block_children(transaction, block.page_uuid, new_parent_uuid)?;
+    let mut ordered = siblings
+        .into_iter()
+        .filter(|sibling| sibling.uuid != block.uuid)
+        .map(|sibling| sibling.uuid)
+        .collect::<Vec<_>>();
+    let insertion = match after_uuid {
+        Some(after) => ordered
+            .iter()
+            .position(|candidate| *candidate == after)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                crate::CoreError::invalid("after block is not a sibling of the moved block")
+            })?,
+        None => ordered.len(),
+    };
+    ordered.insert(insertion, block.uuid);
+    let kinds = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, block_uuid)| {
+            OpKind::BlockMove(BlockMove {
+                uuid: block_uuid,
+                page_uuid: block.page_uuid,
+                parent_uuid: new_parent_uuid,
+                order_key: OrderKey::from_ordinal(index + 1),
+            })
+        })
+        .collect();
+    write.apply_action("move block", kinds, operation::ProjectionPolicy::Immediate)?;
+    Ok(require_block(write.sql(), block.uuid)?)
+}
+
 impl crate::store::NotesStore {
     pub async fn create_block(
         &self,
@@ -416,6 +485,100 @@ impl crate::store::NotesStore {
                 ));
             }
             apply_block_style(write, block, BlockStyle::task(state))
+        })
+        .await
+    }
+
+    pub async fn move_block(
+        &self,
+        uuid: uuid::Uuid,
+        new_parent_uuid: Option<uuid::Uuid>,
+        after_uuid: Option<uuid::Uuid>,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> Result<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            move_block_in_transaction(write, block, new_parent_uuid, after_uuid)
+        })
+        .await
+    }
+
+    pub async fn reorder_block(
+        &self,
+        uuid: uuid::Uuid,
+        direction: ReorderDirection,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> Result<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            let mut siblings =
+                read_block_children(write.sql(), block.page_uuid, block.parent_uuid)?;
+            let index = siblings
+                .iter()
+                .position(|sibling| sibling.uuid == uuid)
+                .context("block is absent from its parent")?;
+            let target = match direction {
+                ReorderDirection::Up if index > 0 => Some(index - 1),
+                ReorderDirection::Down if index + 1 < siblings.len() => Some(index + 1),
+                ReorderDirection::Up | ReorderDirection::Down => None,
+            };
+            let Some(target) = target else {
+                return Ok(block);
+            };
+            siblings.swap(index, target);
+            let kinds = siblings
+                .into_iter()
+                .enumerate()
+                .map(|(index, sibling)| {
+                    OpKind::BlockMove(BlockMove {
+                        uuid: sibling.uuid,
+                        page_uuid: block.page_uuid,
+                        parent_uuid: block.parent_uuid,
+                        order_key: OrderKey::from_ordinal(index + 1),
+                    })
+                })
+                .collect();
+            write.apply_action(
+                "reorder block",
+                kinds,
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(require_block(write.sql(), uuid)?)
+        })
+        .await
+    }
+
+    pub async fn move_block_in_direction(
+        &self,
+        uuid: uuid::Uuid,
+        direction: ReorderDirection,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.reorder_block(uuid, direction).await
+    }
+
+    pub async fn indent_block(&self, uuid: uuid::Uuid) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> Result<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            let siblings = read_block_children(write.sql(), block.page_uuid, block.parent_uuid)?;
+            let index = siblings
+                .iter()
+                .position(|sibling| sibling.uuid == uuid)
+                .context("block is absent from its parent")?;
+            let Some(previous) = index.checked_sub(1).and_then(|index| siblings.get(index)) else {
+                return Ok(block);
+            };
+            move_block_in_transaction(write, block, Some(previous.uuid), None)
+        })
+        .await
+    }
+
+    pub async fn outdent_block(&self, uuid: uuid::Uuid) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> Result<Block> {
+            let block = require_block(write.sql(), uuid)?;
+            let parent_uuid = block.parent_uuid.ok_or_else(|| {
+                crate::CoreError::conflict("top-level blocks cannot be outdented")
+            })?;
+            let parent =
+                read_block(write.sql(), parent_uuid)?.context("parent block disappeared")?;
+            move_block_in_transaction(write, block, parent.parent_uuid, Some(parent.uuid))
         })
         .await
     }
@@ -652,77 +815,13 @@ pub async fn move_block_with_ops(
     new_parent_uuid: Option<uuid::Uuid>,
     after_uuid: Option<uuid::Uuid>,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    if new_parent_uuid == Some(uuid) {
-        return Err(crate::CoreError::conflict("a block cannot be its own parent").into());
-    }
-    if let Some(parent) = new_parent_uuid {
-        let parent_block = get_block(conn, parent)
-            .await?
-            .ok_or_else(|| crate::CoreError::not_found("parent block was not found"))?;
-        if parent_block.page_uuid != block.page_uuid {
-            return Err(
-                crate::CoreError::conflict("parent block belongs to a different page").into(),
-            );
-        }
-        let creates_cycle = conn
-            .call(move |database| {
-                database.query_row(
-                    "WITH RECURSIVE descendants(uuid) AS (
-                       SELECT uuid FROM blocks WHERE parent_uuid = ?1
-                       UNION ALL
-                       SELECT block.uuid FROM blocks block
-                         JOIN descendants child ON block.parent_uuid = child.uuid
-                     )
-                     SELECT EXISTS(SELECT 1 FROM descendants WHERE uuid = ?2)",
-                    rusqlite::params![uuid, parent],
-                    |row| row.get::<_, bool>(0),
-                )
-            })
-            .await?;
-        if creates_cycle {
-            return Err(crate::CoreError::conflict(
-                "a block cannot be moved under one of its descendants",
-            )
-            .into());
-        }
-    }
-    let siblings = list_block_children(conn, block.page_uuid, new_parent_uuid).await?;
-    let mut ordered = siblings
-        .into_iter()
-        .filter(|sibling| sibling.uuid != uuid)
-        .map(|sibling| sibling.uuid)
-        .collect::<Vec<_>>();
-    let insertion = match after_uuid {
-        Some(after) => ordered
-            .iter()
-            .position(|candidate| *candidate == after)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                crate::CoreError::invalid("after block is not a sibling of the moved block")
-            })?,
-        None => ordered.len(),
-    };
-    ordered.insert(insertion, uuid);
-    let kinds = ordered
-        .into_iter()
-        .enumerate()
-        .map(|(index, block_uuid)| {
-            OpKind::BlockMove(BlockMove {
-                uuid: block_uuid,
-                page_uuid: block.page_uuid,
-                parent_uuid: new_parent_uuid,
-                order_key: OrderKey::from_ordinal(index + 1),
-            })
-        })
-        .collect();
-    let operations = apply_local_action(conn, "move block", kinds).await?;
-    let value = get_block(conn, uuid)
-        .await?
-        .context("moved block disappeared")?;
-    Ok(AppliedMutation { value, operations })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .move_block(uuid, new_parent_uuid, after_uuid)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn reorder_block(
@@ -739,43 +838,13 @@ pub async fn reorder_block_with_ops(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let mut siblings = list_block_children(conn, block.page_uuid, block.parent_uuid).await?;
-    let index = siblings
-        .iter()
-        .position(|sibling| sibling.uuid == uuid)
-        .context("block is absent from its parent")?;
-    let target = match direction {
-        ReorderDirection::Up if index > 0 => Some(index - 1),
-        ReorderDirection::Down if index + 1 < siblings.len() => Some(index + 1),
-        ReorderDirection::Up | ReorderDirection::Down => None,
-    };
-    let Some(target) = target else {
-        return Ok(AppliedMutation {
-            value: block,
-            operations: Vec::new(),
-        });
-    };
-    siblings.swap(index, target);
-    let kinds = siblings
-        .into_iter()
-        .enumerate()
-        .map(|(index, sibling)| {
-            OpKind::BlockMove(BlockMove {
-                uuid: sibling.uuid,
-                page_uuid: block.page_uuid,
-                parent_uuid: block.parent_uuid,
-                order_key: OrderKey::from_ordinal(index + 1),
-            })
-        })
-        .collect();
-    let operations = apply_local_action(conn, "reorder block", kinds).await?;
-    let value = get_block(conn, uuid)
-        .await?
-        .context("reordered block disappeared")?;
-    Ok(AppliedMutation { value, operations })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .reorder_block(uuid, direction)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn indent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block> {
@@ -787,21 +856,13 @@ pub async fn indent_block_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let siblings = list_block_children(conn, block.page_uuid, block.parent_uuid).await?;
-    let index = siblings
-        .iter()
-        .position(|sibling| sibling.uuid == uuid)
-        .context("block is absent from its parent")?;
-    let Some(previous) = index.checked_sub(1).and_then(|index| siblings.get(index)) else {
-        return Ok(AppliedMutation {
-            value: block,
-            operations: Vec::new(),
-        });
-    };
-    move_block_with_ops(conn, uuid, Some(previous.uuid), None).await
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .indent_block(uuid)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn outdent_block(conn: &Connection, uuid: uuid::Uuid) -> Result<Block> {
@@ -813,16 +874,13 @@ pub async fn outdent_block_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
 ) -> Result<AppliedMutation<Block>> {
-    let block = get_block(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))?;
-    let parent_uuid = block
-        .parent_uuid
-        .ok_or_else(|| crate::CoreError::conflict("top-level blocks cannot be outdented"))?;
-    let parent = get_block(conn, parent_uuid)
-        .await?
-        .context("parent block disappeared")?;
-    move_block_with_ops(conn, uuid, parent.parent_uuid, Some(parent.uuid)).await
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .outdent_block(uuid)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn move_block_in_direction(

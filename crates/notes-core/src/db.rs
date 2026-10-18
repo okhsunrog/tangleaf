@@ -282,24 +282,6 @@ pub struct AppliedMutation<T> {
     pub operations: Vec<OpKind>,
 }
 
-async fn apply_local_action(
-    conn: &Connection,
-    action: &str,
-    kinds: Vec<OpKind>,
-) -> Result<Vec<OpKind>> {
-    if kinds.is_empty() {
-        return Ok(kinds);
-    }
-    let action = action.to_owned();
-    conn.call_domain(move |database| -> crate::CoreResult<Vec<OpKind>> {
-        let transaction = database.transaction()?;
-        apply_local_action_in_transaction(&transaction, &action, kinds.clone())?;
-        transaction.commit()?;
-        Ok(kinds)
-    })
-    .await
-}
-
 pub(crate) fn apply_local_action_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     action: &str,

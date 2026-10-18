@@ -1,6 +1,6 @@
 use notes_core::db::{self, Block, BlockContent};
 use notes_core::store::{CommitNotice, NotesStore};
-use notes_core::{BlockStyle, Connection, CoreError, TaskState};
+use notes_core::{BlockStyle, Connection, CoreError, ReorderDirection, TaskState};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, mpsc};
@@ -820,4 +820,375 @@ async fn legacy_middle_insertion_keeps_full_ordinal_batch_and_immediate_history_
             .unwrap()
             .value
     );
+}
+
+async fn child(f: &Fixture, parent: Option<uuid::Uuid>, markdown: &str) -> Block {
+    db::create_block(
+        &f.connection,
+        f.block.page_uuid,
+        parent,
+        None,
+        BlockStyle::Bullet,
+        markdown.into(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn root_uuids(f: &Fixture) -> Vec<uuid::Uuid> {
+    db::list_block_children(&f.connection, f.block.page_uuid, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|block| block.uuid)
+        .collect()
+}
+
+#[tokio::test]
+async fn queued_reorders_use_current_sibling_order_and_return_each_intermediate_position() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = child(&f, None, "Second").await;
+    let third = child(&f, None, "Third").await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut first = std::pin::pin!(f.store.reorder_block(third.uuid, ReorderDirection::Up));
+    let mut next = std::pin::pin!(
+        f.store
+            .move_block_in_direction(third.uuid, ReorderDirection::Up)
+    );
+    enqueue(first.as_mut()).await;
+    enqueue(next.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (first, next) = tokio::join!(first, next);
+    let first = first.unwrap();
+    let next = next.unwrap();
+    assert_eq!(first.value.order_key, notes_core::OrderKey::from_ordinal(2));
+    assert_eq!(next.value.order_key, notes_core::OrderKey::from_ordinal(1));
+    assert_eq!(
+        root_uuids(&f).await,
+        [third.uuid, f.block.uuid, second.uuid]
+    );
+    for committed in [&first, &next] {
+        assert!(committed.changes.history_changed);
+        assert_eq!(committed.changes.affected_pages, [f.block.page_uuid]);
+        assert!(committed.changes.changed_pages.is_empty());
+        assert!(committed.changes.graph_changed_content.is_empty());
+        let source = committed
+            .changes
+            .blocks
+            .iter()
+            .find(|change| change.uuid == third.uuid)
+            .unwrap();
+        assert_ne!(source.before, source.after);
+        assert_eq!(
+            source.after.as_ref().unwrap().order_key,
+            committed.value.order_key
+        );
+    }
+    let after = bookkeeping(&f.connection).await;
+    // Keep the existing full ordinal sibling batches until placement migration.
+    assert_eq!(after.outbox, before.outbox + 6);
+    assert_eq!(after.undo, before.undo + 2);
+    assert_eq!(after.version, before.version + 2);
+    assert_eq!(f.notices.lock().unwrap().len(), 2);
+    assert_eq!(
+        f.store.undo().await.unwrap().value,
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(
+        root_uuids(&f).await,
+        [f.block.uuid, third.uuid, second.uuid]
+    );
+    assert_eq!(
+        f.store.undo().await.unwrap().value,
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(
+        root_uuids(&f).await,
+        [f.block.uuid, second.uuid, third.uuid]
+    );
+}
+
+#[tokio::test]
+async fn repeated_indent_rechecks_its_new_siblings_and_outdent_reports_both_placements() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = child(&f, None, "Second").await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut first = std::pin::pin!(f.store.indent_block(second.uuid));
+    let mut next = std::pin::pin!(f.store.indent_block(second.uuid));
+    enqueue(first.as_mut()).await;
+    enqueue(next.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (first, next) = tokio::join!(first, next);
+    let first = first.unwrap();
+    let next = next.unwrap();
+    assert_eq!(first.value.parent_uuid, Some(f.block.uuid));
+    assert_eq!(next.value, first.value);
+    assert_eq!(next.commit_version, None);
+    assert!(next.changes.is_empty());
+    assert_eq!(first.changes.graph_changed_content, [second.uuid]);
+    let moved = first
+        .changes
+        .blocks
+        .iter()
+        .find(|change| change.uuid == second.uuid)
+        .unwrap();
+    assert_eq!(moved.before.as_ref().unwrap().parent_uuid, None);
+    assert_eq!(
+        moved.after.as_ref().unwrap().parent_uuid,
+        Some(f.block.uuid)
+    );
+    let after = bookkeeping(&f.connection).await;
+    assert_eq!(after.outbox, before.outbox + 1);
+    assert_eq!(after.undo, before.undo + 1);
+    assert_eq!(after.version, before.version + 1);
+    assert_eq!(f.notices.lock().unwrap().len(), 1);
+
+    let outdented = f.store.outdent_block(second.uuid).await.unwrap();
+    assert_eq!(outdented.value.parent_uuid, None);
+    assert_eq!(root_uuids(&f).await, [f.block.uuid, second.uuid]);
+    let moved = outdented
+        .changes
+        .blocks
+        .iter()
+        .find(|change| change.uuid == second.uuid)
+        .unwrap();
+    assert_eq!(
+        moved.before.as_ref().unwrap().parent_uuid,
+        Some(f.block.uuid)
+    );
+    assert_eq!(moved.after.as_ref().unwrap().parent_uuid, None);
+    assert_eq!(outdented.changes.affected_pages, [f.block.page_uuid]);
+    assert!(outdented.changes.history_changed);
+}
+
+#[tokio::test]
+async fn queued_outdents_plan_from_the_latest_parent_and_undo_restores_each_level() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let parent = child(&f, Some(f.block.uuid), "Parent").await;
+    let nested = child(&f, Some(parent.uuid), "Nested").await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut first = std::pin::pin!(f.store.outdent_block(nested.uuid));
+    let mut next = std::pin::pin!(f.store.outdent_block(nested.uuid));
+    enqueue(first.as_mut()).await;
+    enqueue(next.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (first, next) = tokio::join!(first, next);
+    let first = first.unwrap();
+    let next = next.unwrap();
+    assert_eq!(first.value.parent_uuid, Some(f.block.uuid));
+    assert_eq!(next.value.parent_uuid, None);
+    assert_eq!(root_uuids(&f).await, [f.block.uuid, nested.uuid]);
+    assert_eq!(f.notices.lock().unwrap().len(), 2);
+    for expected_parent in [Some(f.block.uuid), Some(parent.uuid)] {
+        assert_eq!(
+            f.store.undo().await.unwrap().value,
+            db::HistoryMoveResult::Applied
+        );
+        assert_eq!(
+            db::get_block(&f.connection, nested.uuid)
+                .await
+                .unwrap()
+                .unwrap()
+                .parent_uuid,
+            expected_parent
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_second_competing_move_cannot_create_a_cycle_after_the_first_move_commits() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = child(&f, None, "Second").await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut first = std::pin::pin!(f.store.move_block(f.block.uuid, Some(second.uuid), None));
+    let mut next = std::pin::pin!(f.store.move_block(second.uuid, Some(f.block.uuid), None));
+    enqueue(first.as_mut()).await;
+    enqueue(next.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (first, next) = tokio::join!(first, next);
+    let first = first.unwrap();
+    assert_eq!(first.value.parent_uuid, Some(second.uuid));
+    assert!(matches!(
+        next.unwrap_err().downcast_ref::<CoreError>(),
+        Some(CoreError::Conflict(_))
+    ));
+    assert_eq!(root_uuids(&f).await, [second.uuid]);
+    assert_eq!(
+        db::get_block(&f.connection, second.uuid)
+            .await
+            .unwrap()
+            .unwrap(),
+        second
+    );
+    let after = bookkeeping(&f.connection).await;
+    assert_eq!(after.outbox, before.outbox + 1);
+    assert_eq!(after.undo, before.undo + 1);
+    assert_eq!(after.version, before.version + 1);
+    assert_eq!(f.notices.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn structural_boundary_noops_and_typed_guards_leave_all_bookkeeping_unchanged() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = child(&f, None, "Second").await;
+    let nested = child(&f, Some(second.uuid), "Nested").await;
+    let foreign_page = db::create_page(&f.connection, "Foreign".into())
+        .await
+        .unwrap();
+    let foreign = db::create_block(
+        &f.connection,
+        foreign_page.uuid,
+        None,
+        None,
+        BlockStyle::Bullet,
+        "Foreign".into(),
+    )
+    .await
+    .unwrap();
+    let before = bookkeeping(&f.connection).await;
+    for no_op in [
+        f.store
+            .reorder_block(f.block.uuid, ReorderDirection::Up)
+            .await
+            .unwrap(),
+        f.store
+            .reorder_block(second.uuid, ReorderDirection::Down)
+            .await
+            .unwrap(),
+        f.store.indent_block(f.block.uuid).await.unwrap(),
+    ] {
+        assert!(no_op.changes.is_empty());
+        assert_eq!(no_op.commit_version, None);
+    }
+    let missing = uuid::Uuid::now_v7();
+    for (uuid, parent, after, expected_kind) in [
+        (f.block.uuid, Some(f.block.uuid), None, "conflict"),
+        (second.uuid, Some(nested.uuid), None, "conflict"),
+        (f.block.uuid, Some(foreign.uuid), None, "conflict"),
+        (f.block.uuid, Some(missing), None, "not_found"),
+        (f.block.uuid, None, Some(nested.uuid), "invalid"),
+        (missing, None, None, "not_found"),
+    ] {
+        let error = f.store.move_block(uuid, parent, after).await.unwrap_err();
+        assert!(matches!(
+            (error.downcast_ref::<CoreError>(), expected_kind),
+            (Some(CoreError::NotFound(_)), "not_found")
+                | (Some(CoreError::Conflict(_)), "conflict")
+                | (Some(CoreError::InvalidInput(_)), "invalid")
+        ));
+    }
+    assert!(matches!(
+        f.store
+            .outdent_block(f.block.uuid)
+            .await
+            .unwrap_err()
+            .downcast_ref::<CoreError>(),
+        Some(CoreError::Conflict(_))
+    ));
+    for error in [
+        f.store
+            .reorder_block(missing, ReorderDirection::Up)
+            .await
+            .unwrap_err(),
+        f.store.indent_block(missing).await.unwrap_err(),
+        f.store.outdent_block(missing).await.unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.downcast_ref::<CoreError>(),
+            Some(CoreError::NotFound(_))
+        ));
+    }
+    assert_eq!(bookkeeping(&f.connection).await, before);
+    assert!(f.notices.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn every_structural_command_rolls_back_all_rows_after_a_late_history_failure() {
+    for command in ["move", "reorder", "indent", "outdent"] {
+        let f = fixture(BlockStyle::Paragraph).await;
+        let second = child(&f, None, "Second").await;
+        let nested = child(&f, Some(second.uuid), "Nested").await;
+        f.connection
+            .call(|database| {
+                database.execute_batch(
+                    "CREATE TRIGGER reject_movement_history BEFORE INSERT ON history_undo
+             BEGIN SELECT RAISE(ABORT, 'injected movement history failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let before = bookkeeping(&f.connection).await;
+        let uuids = vec![f.block.uuid, second.uuid, nested.uuid];
+        let before_blocks = db::get_blocks(&f.connection, uuids.clone()).await.unwrap();
+        let error = match command {
+            "move" => f
+                .store
+                .move_block(f.block.uuid, Some(second.uuid), None)
+                .await
+                .unwrap_err(),
+            "reorder" => f
+                .store
+                .reorder_block(second.uuid, ReorderDirection::Up)
+                .await
+                .unwrap_err(),
+            "indent" => f.store.indent_block(second.uuid).await.unwrap_err(),
+            "outdent" => f.store.outdent_block(nested.uuid).await.unwrap_err(),
+            _ => unreachable!(),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected movement history failure"),
+            "{command}: {error:#}"
+        );
+        assert_eq!(
+            db::get_blocks(&f.connection, uuids).await.unwrap(),
+            before_blocks,
+            "{command}"
+        );
+        assert_eq!(bookkeeping(&f.connection).await, before, "{command}");
+        assert!(f.notices.lock().unwrap().is_empty(), "{command}");
+    }
+}
+
+#[tokio::test]
+async fn legacy_structural_adapters_preserve_full_ordinal_batches_and_skip_boundary_operations() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = child(&f, None, "Second").await;
+    let reordered = db::reorder_block_with_ops(&f.connection, second.uuid, ReorderDirection::Up)
+        .await
+        .unwrap();
+    assert_eq!(reordered.operations.len(), 2);
+    assert_eq!(root_uuids(&f).await, [second.uuid, f.block.uuid]);
+    let moved = db::move_block_with_ops(&f.connection, f.block.uuid, Some(second.uuid), None)
+        .await
+        .unwrap();
+    assert_eq!(moved.operations.len(), 1);
+    assert_eq!(moved.value.parent_uuid, Some(second.uuid));
+    let outdented = db::outdent_block_with_ops(&f.connection, f.block.uuid)
+        .await
+        .unwrap();
+    assert_eq!(outdented.operations.len(), 2);
+    assert_eq!(root_uuids(&f).await, [second.uuid, f.block.uuid]);
+    let indented = db::indent_block_with_ops(&f.connection, f.block.uuid)
+        .await
+        .unwrap();
+    assert_eq!(indented.operations.len(), 1);
+    let no_op =
+        db::move_block_in_direction_with_ops(&f.connection, f.block.uuid, ReorderDirection::Up)
+            .await
+            .unwrap();
+    assert!(no_op.operations.is_empty());
+    let no_op = db::indent_block_with_ops(&f.connection, f.block.uuid)
+        .await
+        .unwrap();
+    assert!(no_op.operations.is_empty());
+    assert!(f.notices.lock().unwrap().is_empty());
 }

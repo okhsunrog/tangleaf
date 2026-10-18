@@ -107,17 +107,14 @@ async fn change_indent(
     uuid: uuid::Uuid,
     indent: bool,
 ) -> CommandResult<db::Block> {
-    let applied = if indent {
-        db::indent_block_with_ops(&state.conn, uuid).await
+    let store = observed_store(app, state);
+    let committed = if indent {
+        store.indent_block(uuid).await
     } else {
-        db::outdent_block_with_ops(&state.conn, uuid).await
+        store.outdent_block(uuid).await
     }
     .map_err(err)?;
-    emit_events_for_ops(app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -146,14 +143,11 @@ async fn move_direction(
     uuid: uuid::Uuid,
     direction: ReorderDirection,
 ) -> CommandResult<db::Block> {
-    let applied = db::move_block_in_direction_with_ops(&state.conn, uuid, direction)
+    let committed = observed_store(app, state)
+        .move_block_in_direction(uuid, direction)
         .await
         .map_err(err)?;
-    emit_events_for_ops(app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
