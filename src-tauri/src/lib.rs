@@ -262,6 +262,7 @@ pub fn run() {
                     Ok(conn) => {
                         handle.manage(commands::AppState {
                             conn: conn.clone(),
+                            store: notes_core::store::NotesStore::new(conn.clone()),
                             blob_store: blob_store.clone(),
                             image_cache,
                             preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),

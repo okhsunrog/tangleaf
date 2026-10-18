@@ -7,7 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { WorkspaceControllerProvider } from "@/features/workspace/workspace-controller";
 import type { WorkspaceController } from "@/features/workspace/workspace-controller";
 import type { Page, SearchHit } from "@/lib/api";
-import { queryKeys } from "@/lib/query";
+import { applyDomainEvent, queryKeys } from "@/lib/query";
 import { SearchCard } from "./search-card";
 
 const api = vi.hoisted(() => ({
@@ -152,6 +152,74 @@ describe("SearchCard page-list refreshes", () => {
     expect(api.search).toHaveBeenCalledTimes(2);
     expect(container.textContent).not.toContain("Disposable note");
   });
+
+  it.each(["edit", "creation", "deletion"])(
+    "refreshes active search after committed block %s without refreshing the page list",
+    async (change) => {
+      const original = page("page-1", "Notes");
+      const hit: SearchHit = {
+        content: {
+          kind: "block",
+          record: {
+            uuid: "changed-block",
+            pageUuid: "page-1",
+            parentUuid: null,
+            orderKey: "a0",
+            markdown: "Project Alpha",
+            style: { kind: "bullet" },
+            markdownRevision: "0000000000000000-00000000-00000000000000000000000001",
+            createdAt: 0,
+            updatedAt: 0,
+          },
+        },
+        score: 1,
+        snippet: null,
+      };
+      const { container, queryClient } = await renderSearchCard([original]);
+      api.searchResults = change === "creation" ? [] : [hit];
+      await enterQuery(container, "Project");
+      expect(container.textContent?.includes("Project Alpha")).toBe(change !== "creation");
+
+      api.searchResults = change === "creation" ? [hit] : [];
+      await act(async () => {
+        await applyDomainEvent(queryClient, {
+          kind: "mutation_committed",
+          commit: {
+            commitVersion: 1,
+            changes: {
+              changedPages: [],
+              deletedPages: [],
+              affectedPages: ["page-1"],
+              blocks: [
+                {
+                  uuid: "changed-block",
+                  before:
+                    change === "creation"
+                      ? null
+                      : { pageUuid: "page-1", parentUuid: null, orderKey: "a0" },
+                  after:
+                    change === "deletion"
+                      ? null
+                      : { pageUuid: "page-1", parentUuid: null, orderKey: "a0" },
+                },
+              ],
+              graphChangedContent: [],
+              attachmentOwners: [],
+              historyChanged: true,
+            },
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(api.search).toHaveBeenCalledTimes(2);
+      expect(container.textContent?.includes("Project Alpha")).toBe(change === "creation");
+      expect(queryClient.getQueryData(queryKeys.pageList("notes", 10_000))).toEqual([original]);
+      expect(queryClient.getQueryState(queryKeys.pageList("notes", 10_000))?.isInvalidated).toBe(
+        false,
+      );
+    },
+  );
 
   it("shows an enter-only failure and retries it on the next Enter", async () => {
     api.settings = {

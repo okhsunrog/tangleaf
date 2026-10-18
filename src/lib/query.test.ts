@@ -1,8 +1,264 @@
 import { describe, expect, it } from "vite-plus/test";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { applyDomainEvent, queryKeys } from "./query";
+import type { ChangeSet, DomainEvent } from "./bindings";
 
 describe("domain event query invalidation", () => {
+  it("refreshes a committed Split and its backlinks while preserving a stable graph and unrelated pages", async () => {
+    const client = new QueryClient();
+    const target = [
+      queryKeys.block("source"),
+      queryKeys.children("page-a"),
+      queryKeys.pageDocument("page-a"),
+      queryKeys.pageRender("page-a"),
+      queryKeys.backlinks("referenced-page"),
+      queryKeys.history,
+    ];
+    const unrelated = [
+      queryKeys.block("other"),
+      queryKeys.children("page-b"),
+      queryKeys.pageDocument("page-b"),
+      queryKeys.pageRender("page-b"),
+      queryKeys.page("page-a"),
+      queryKeys.pageList("notes", 10_000),
+      queryKeys.journals,
+      queryKeys.graph(null),
+      queryKeys.attachments("source"),
+      queryKeys.settings,
+    ];
+    for (const key of [...target, ...unrelated]) client.setQueryData(key, {});
+
+    await applyDomainEvent(
+      client,
+      committed({
+        affectedPages: ["page-a"],
+        blocks: [
+          { uuid: "source", before: placement("page-a"), after: placement("page-a") },
+          { uuid: "new", before: null, after: placement("page-a") },
+        ],
+        historyChanged: true,
+      }),
+    );
+
+    for (const key of target) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    for (const key of unrelated) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    expect(client.getQueryData(queryKeys.searchRevision)).toBe(1);
+  });
+
+  it("refreshes both containers and documents after a committed cross-page move", async () => {
+    const client = new QueryClient();
+    const affected = [
+      queryKeys.block("moved"),
+      queryKeys.children("old-parent"),
+      queryKeys.children("page-b"),
+      queryKeys.pageDocument("page-a"),
+      queryKeys.pageDocument("page-b"),
+      queryKeys.pageRender("page-a"),
+      queryKeys.pageRender("page-b"),
+    ];
+    const unrelated = [queryKeys.children("moved"), queryKeys.pageDocument("page-c")];
+    for (const key of [...affected, ...unrelated]) client.setQueryData(key, {});
+
+    await applyDomainEvent(
+      client,
+      committed({
+        blocks: [
+          {
+            uuid: "moved",
+            before: placement("page-a", "old-parent"),
+            after: placement("page-b"),
+          },
+        ],
+      }),
+    );
+
+    for (const key of affected) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    for (const key of unrelated) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+  });
+
+  it("removes deleted page and block snapshots and refreshes graph and attachments when changed", async () => {
+    const client = new QueryClient();
+    const removed = [
+      queryKeys.page("deleted-page"),
+      queryKeys.pageDocument("deleted-page"),
+      queryKeys.pageRender("deleted-page"),
+      queryKeys.children("deleted-page"),
+      queryKeys.handwritingStatus("deleted-page"),
+      queryKeys.block("deleted-block"),
+      queryKeys.children("deleted-block"),
+      queryKeys.attachments("deleted-block"),
+    ];
+    const affected = [
+      queryKeys.children("page-a"),
+      queryKeys.pageDocument("page-a"),
+      queryKeys.pageRender("page-a"),
+      queryKeys.pageList("all", 100),
+      queryKeys.graph(null),
+      queryKeys.backlinks("page-a"),
+      queryKeys.attachments("page-a"),
+      queryKeys.attachmentImages(["image-a"]),
+    ];
+    for (const key of [...removed, ...affected]) client.setQueryData(key, {});
+    client.setQueryData(queryKeys.attachments("page-b"), {});
+
+    await applyDomainEvent(
+      client,
+      committed({
+        deletedPages: ["deleted-page"],
+        affectedPages: ["page-a", "deleted-page"],
+        blocks: [{ uuid: "deleted-block", before: placement("page-a"), after: null }],
+        graphChangedContent: ["deleted-page", "deleted-block"],
+        attachmentOwners: ["page-a"],
+      }),
+    );
+
+    for (const key of removed) expect(client.getQueryData(key)).toBeUndefined();
+    for (const key of affected) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(queryKeys.attachments("page-b"))?.isInvalidated).toBe(false);
+  });
+
+  it.each([
+    ["page", queryKeys.page("deleted-page")],
+    ["document", queryKeys.pageDocument("deleted-page")],
+    ["render snapshot", queryKeys.pageRender("deleted-page")],
+    ["block", queryKeys.block("deleted-block")],
+  ])("publishes absence to a mounted %s observer on committed deletion", async (_name, key) => {
+    const client = new QueryClient();
+    client.setQueryData(key, { uuid: "old-snapshot" });
+    const observer = new QueryObserver<{ uuid: string } | null>(client, {
+      queryKey: key,
+      queryFn: async () => null,
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const observed: unknown[] = [];
+    const unsubscribe = observer.subscribe((result) => observed.push(result.data));
+    try {
+      await applyDomainEvent(
+        client,
+        committed({
+          deletedPages: ["deleted-page"],
+          blocks: [{ uuid: "deleted-block", before: placement("deleted-page"), after: null }],
+        }),
+      );
+
+      expect(observer.getCurrentResult().data).toBeNull();
+      expect(observed[observed.length - 1]).toBeNull();
+      expect(client.getQueryData(key)).toBeNull();
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
+  it("cancels an older entity read before publishing committed deletion", async () => {
+    const client = new QueryClient();
+    const key = queryKeys.block("deleted-block");
+    client.setQueryData(key, { uuid: "old-snapshot" });
+    let finishRead: (value: { uuid: string }) => void = () => {
+      throw new Error("entity read did not start");
+    };
+    const observer = new QueryObserver<{ uuid: string } | null>(client, {
+      queryKey: key,
+      queryFn: () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      const reading = observer.refetch();
+      await applyDomainEvent(
+        client,
+        committed({
+          blocks: [{ uuid: "deleted-block", before: placement("page-a"), after: null }],
+        }),
+      );
+      finishRead({ uuid: "stale-read-result" });
+      await reading;
+
+      expect(observer.getCurrentResult().data).toBeNull();
+      expect(client.getQueryData(key)).toBeNull();
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
+  it.each([
+    ["page", queryKeys.page("page-a")],
+    ["document", queryKeys.pageDocument("page-a")],
+    ["render snapshot", queryKeys.pageRender("page-a")],
+    ["block", queryKeys.block("block-a")],
+  ])(
+    "reopens a recreated %s without publishing a cached deletion after unmount",
+    async (_name, key) => {
+      const client = new QueryClient();
+      client.setQueryData(key, { uuid: "page-a" });
+      let persisted: { uuid: string } | null = null;
+      const query = {
+        queryKey: key,
+        queryFn: async () => persisted,
+        staleTime: Number.POSITIVE_INFINITY,
+      };
+      const mounted = new QueryObserver(client, query);
+      const unsubscribe = mounted.subscribe(() => undefined);
+      await applyDomainEvent(
+        client,
+        committed({
+          deletedPages: ["page-a"],
+          blocks: [{ uuid: "block-a", before: placement("page-a"), after: null }],
+        }),
+      );
+      expect(mounted.getCurrentResult().data).toBeNull();
+      unsubscribe();
+
+      persisted = { uuid: "page-a" };
+      await applyDomainEvent(
+        client,
+        committed({
+          changedPages: ["page-a"],
+          blocks: [{ uuid: "block-a", before: null, after: placement("page-a") }],
+        }),
+      );
+      const reopened = new QueryObserver(client, query);
+      const observed: unknown[] = [];
+      const unsubscribeReopened = reopened.subscribe((result) => {
+        if (result.isSuccess) observed.push(result.data);
+      });
+      try {
+        expect(reopened.getCurrentResult().isPending).toBe(true);
+        await reopened.refetch();
+        expect(reopened.getCurrentResult().data).toEqual(persisted);
+        expect(observed).not.toContain(null);
+      } finally {
+        unsubscribeReopened();
+        client.clear();
+      }
+    },
+  );
+
+  it("refreshes only history when a committed stale history entry is skipped", async () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.history, {});
+    const unchanged = [
+      queryKeys.pageList("notes", 10_000),
+      queryKeys.pageDocument("page-a"),
+      queryKeys.pageRender("page-a"),
+      queryKeys.children("page-a"),
+      queryKeys.graph(null),
+      queryKeys.settings,
+    ];
+    for (const key of unchanged) client.setQueryData(key, {});
+    client.setQueryData(queryKeys.searchRevision, 4);
+
+    await applyDomainEvent(client, committed({ historyChanged: true }));
+
+    expect(client.getQueryState(queryKeys.history)?.isInvalidated).toBe(true);
+    for (const key of unchanged) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    expect(client.getQueryData(queryKeys.searchRevision)).toBe(4);
+  });
+
   it("invalidates a changed page and title-derived views", async () => {
     const client = new QueryClient();
     client.setQueryData(queryKeys.pages, []);
@@ -132,3 +388,26 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.pageRender("page-a"))?.isInvalidated).toBe(true);
   });
 });
+
+function committed(changes: Partial<ChangeSet>): DomainEvent {
+  return {
+    kind: "mutation_committed",
+    commit: {
+      commitVersion: 1,
+      changes: {
+        changedPages: [],
+        deletedPages: [],
+        affectedPages: [],
+        blocks: [],
+        graphChangedContent: [],
+        attachmentOwners: [],
+        historyChanged: false,
+        ...changes,
+      },
+    },
+  };
+}
+
+function placement(pageUuid: string, parentUuid: string | null = null) {
+  return { pageUuid, parentUuid, orderKey: "a0" };
+}

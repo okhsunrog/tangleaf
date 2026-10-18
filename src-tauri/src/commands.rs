@@ -104,6 +104,7 @@ impl std::error::Error for CommandError {}
 
 pub struct AppState {
     pub conn: Connection,
+    pub store: notes_core::store::NotesStore,
     pub blob_store: notes_blob::BlobStore,
     pub image_cache: notes_blob::BlobStore,
     pub(crate) preview_jobs: Arc<crate::attachment_protocol::PreviewJobs>,
@@ -117,6 +118,9 @@ pub struct AppState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
+    MutationCommitted {
+        commit: notes_core::store::CommitNotice,
+    },
     PagesChanged {
         page_uuids: Vec<uuid::Uuid>,
     },

@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { events, type DomainEvent } from "@/lib/bindings";
+import { events, type ChangeSet, type DomainEvent } from "@/lib/bindings";
 
 const root = ["backend"] as const;
 
@@ -30,6 +30,9 @@ export const queryKeys = {
   attachmentImages: (attachmentUuids: readonly string[]) =>
     [...root, "attachments", "images", ...attachmentUuids] as const,
   history: [...root, "history"] as const,
+  // A local refresh signal for search results held outside the query cache.
+  // This is not a persisted store or database revision.
+  searchRevision: [...root, "search-revision"] as const,
   settings: [...root, "settings"] as const,
   inputCapabilities: [...root, "input-capabilities"] as const,
   einkWise: [...root, "einkwise"] as const,
@@ -57,6 +60,9 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
   const invalidate = (queryKey: readonly unknown[]) => queryClient.invalidateQueries({ queryKey });
 
   switch (event.kind) {
+    case "mutation_committed":
+      await applyCommittedChanges(queryClient, event.commit.changes);
+      return;
     case "pages_changed":
       await Promise.all([
         invalidate(queryKeys.pages),
@@ -143,6 +149,115 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
     case "workspace_changed":
       await invalidate(queryKeys.root);
   }
+}
+
+async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSet) {
+  const invalidate = (queryKey: readonly unknown[]) =>
+    queryClient.invalidateQueries({ queryKey, exact: true });
+  const invalidateFamily = (queryKey: readonly unknown[]) =>
+    queryClient.invalidateQueries({ queryKey });
+  const remove = (queryKey: readonly unknown[]) =>
+    queryClient.removeQueries({ queryKey, exact: true });
+  const cancellations: Promise<void>[] = [];
+  const clearSnapshot = (queryKey: readonly unknown[], empty: null | []) => {
+    const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+    if (!query) return;
+    if (query.getObserversCount() === 0) {
+      remove(queryKey);
+      return;
+    }
+    // Eviction alone does not update mounted observers. Cancel an older read
+    // before publishing absence, and retain it for mounted observers.
+    cancellations.push(queryClient.cancelQueries({ queryKey, exact: true }));
+    queryClient.setQueryData(queryKey, empty);
+  };
+  const removeInactiveNull = (queryKey: readonly unknown[]) => {
+    const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+    if (query?.getObserversCount() === 0 && query.state.data === null) remove(queryKey);
+  };
+  const deletedPages = new Set(changes.deletedPages);
+  const deletedBlocks = new Set<string>();
+  const affectedPages = new Set([...changes.affectedPages, ...changes.changedPages]);
+  const containers = new Set<string>();
+  const changedBlocks: string[] = [];
+  for (const block of changes.blocks) {
+    for (const placement of [block.before, block.after]) {
+      if (placement) {
+        affectedPages.add(placement.pageUuid);
+        containers.add(placement.parentUuid ?? placement.pageUuid);
+      }
+    }
+    if (block.after) {
+      changedBlocks.push(block.uuid);
+    } else {
+      deletedBlocks.add(block.uuid);
+    }
+  }
+  for (const uuid of deletedBlocks) {
+    containers.delete(uuid);
+    clearSnapshot(queryKeys.block(uuid), null);
+    clearSnapshot(queryKeys.children(uuid), []);
+    clearSnapshot(queryKeys.attachments(uuid), []);
+  }
+  for (const uuid of deletedPages) {
+    affectedPages.delete(uuid);
+    containers.delete(uuid);
+    clearSnapshot(queryKeys.page(uuid), null);
+    clearSnapshot(queryKeys.pageDocument(uuid), null);
+    clearSnapshot(queryKeys.pageRender(uuid), null);
+    clearSnapshot(queryKeys.children(uuid), []);
+    clearSnapshot(queryKeys.attachments(uuid), []);
+    remove(queryKeys.handwritingStatus(uuid));
+  }
+  // Undo can publish absence to an open pane before it unmounts. If Redo
+  // recreates that entity later, reopening must load it rather than expose the
+  // inactive cached null as a successful read while refetching in the background.
+  for (const uuid of changes.changedPages) {
+    if (!deletedPages.has(uuid)) removeInactiveNull(queryKeys.page(uuid));
+  }
+  for (const uuid of affectedPages) {
+    removeInactiveNull(queryKeys.pageDocument(uuid));
+    removeInactiveNull(queryKeys.pageRender(uuid));
+  }
+  for (const uuid of changedBlocks) removeInactiveNull(queryKeys.block(uuid));
+
+  const invalidations = [
+    ...cancellations,
+    ...[...affectedPages].flatMap((uuid) => [
+      invalidate(queryKeys.pageDocument(uuid)),
+      invalidate(queryKeys.pageRender(uuid)),
+    ]),
+    ...changedBlocks.map((uuid) => invalidate(queryKeys.block(uuid))),
+    ...[...containers].map((uuid) => invalidate(queryKeys.children(uuid))),
+    ...changes.changedPages
+      .filter((uuid) => !deletedPages.has(uuid))
+      .flatMap((uuid) => [
+        invalidate(queryKeys.page(uuid)),
+        invalidate(queryKeys.handwritingStatus(uuid)),
+      ]),
+    ...changes.attachmentOwners
+      .filter((uuid) => !deletedPages.has(uuid) && !deletedBlocks.has(uuid))
+      .map((uuid) => invalidate(queryKeys.attachments(uuid))),
+  ];
+  if (changes.changedPages.length || changes.deletedPages.length) {
+    invalidations.push(invalidateFamily(queryKeys.pages), invalidateFamily(queryKeys.journals));
+  }
+  if (changes.graphChangedContent.length) {
+    invalidations.push(invalidateFamily(queryKeys.graphRoot));
+  }
+  // Backlink results embed complete source blocks, including Markdown and
+  // revisions, even when the graph's labels and edge sets stay unchanged.
+  if (changes.blocks.length || changes.graphChangedContent.length) {
+    invalidations.push(invalidateFamily(queryKeys.backlinksRoot));
+  }
+  if (changes.attachmentOwners.length) {
+    invalidations.push(invalidateFamily(queryKeys.attachmentImagesRoot));
+  }
+  if (changes.historyChanged) invalidations.push(invalidate(queryKeys.history));
+  if (changes.blocks.length || changes.changedPages.length || changes.deletedPages.length) {
+    queryClient.setQueryData<number>(queryKeys.searchRevision, (revision = 0) => revision + 1);
+  }
+  await Promise.all(invalidations);
 }
 
 export function listenForDomainEvents(queryClient: QueryClient) {

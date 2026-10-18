@@ -113,6 +113,12 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
     queryKey: queryKeys.journals,
     queryFn: () => listJournals({ limit: 7 }),
   });
+  const searchRevision = useQuery({
+    queryKey: queryKeys.searchRevision,
+    queryFn: () => 0,
+    initialData: 0,
+    enabled: false,
+  }).data;
   const aiSearchEnabled = settingsQuery.data?.aiSearchEnabled ?? true;
   const aiSearchAsYouType = settingsQuery.data?.aiSearchTrigger !== "enter_only";
   const aiSearchRerank = settingsQuery.data?.aiSearchRerank ?? true;
@@ -221,11 +227,17 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
   const activeQuery = useRef(queryValue);
   activeQuery.current = queryValue;
   const observedPages = useRef(pagesQuery.data);
-  // Page list invalidation is the clean title/delete refresh signal. Block events do not yet
-  // expose a search revision query; coupling this to unrelated history state would be misleading.
+  const observedSearchRevision = useRef(searchRevision);
+  // Legacy page events refresh the page list. Migrated commands can refresh
+  // searchable block content without refetching unrelated page lists.
   useEffect(() => {
-    if (observedPages.current === pagesQuery.data) return;
+    if (
+      observedPages.current === pagesQuery.data &&
+      observedSearchRevision.current === searchRevision
+    )
+      return;
     observedPages.current = pagesQuery.data;
+    observedSearchRevision.current = searchRevision;
     const value = activeQuery.current;
     if (!value) return;
 
@@ -246,7 +258,7 @@ export function SearchCard({ variant = "card", onOpenContent, onDismiss }: Props
             },
       );
     });
-  }, [localDebounce, pagesQuery.data, runLocal, serverHits, serverState]);
+  }, [localDebounce, pagesQuery.data, runLocal, searchRevision, serverHits, serverState]);
 
   const searchSettled = !localPending && serverState !== "pending";
   const displayedSearchSettled = frozenSnapshot?.searchSettled ?? searchSettled;

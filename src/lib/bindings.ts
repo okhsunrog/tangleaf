@@ -319,8 +319,20 @@ export type Block = {
 	updatedAt: number,
 };
 
+export type BlockChange = {
+	uuid: string,
+	before: BlockPlacement | null,
+	after: BlockPlacement | null,
+};
+
 export type BlockContent = {
 	markdown: string,
+};
+
+export type BlockPlacement = {
+	pageUuid: string,
+	parentUuid: string | null,
+	orderKey: OrderKey,
 };
 
 /**
@@ -329,6 +341,21 @@ export type BlockContent = {
  *  without state or attach task state to a non-task block.
  */
 export type BlockStyle = { kind: "paragraph" } | { kind: "bullet" } | { kind: "numbered" } | { kind: "task"; state: TaskState } | { kind: "heading_1" } | { kind: "heading_2" } | { kind: "heading_3" } | { kind: "quote" } | { kind: "code" } | { kind: "divider" };
+
+/**
+ *  Sorted, unique invalidation facts from the final transaction state.
+ *  A block may occur even when its placement is unchanged: content, revision,
+ *  style or timestamps can have changed instead.
+ */
+export type ChangeSet = {
+	changedPages: string[],
+	deletedPages: string[],
+	affectedPages: string[],
+	blocks: BlockChange[],
+	graphChangedContent: string[],
+	attachmentOwners: string[],
+	historyChanged: boolean,
+};
 
 export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
 
@@ -340,6 +367,16 @@ export type CommandError = {
 };
 
 export type CommandErrorCode = "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
+
+/**  Facts captured inside a successful transaction, published after its commit. */
+export type CommitNotice = {
+	/**
+	 *  Local order among NotesStore commits only. Legacy and ink writers have
+	 *  not migrated yet, so this must not be used as a database-wide revision.
+	 */
+	commitVersion: number,
+	changes: ChangeSet,
+};
 
 export type CompletionProtocol = "openai" | "anthropic";
 
@@ -447,7 +484,7 @@ export type DocumentUnitDraft = {
  *  Payloads carry affected IDs when a command can identify them; whole-workspace
  *  replacements (import/sync) deliberately request a full cache refresh.
  */
-export type DomainEvent = { kind: "pages_changed"; page_uuids: string[] } | { kind: "blocks_changed"; block_uuids: string[]; container_uuids: string[] } | { kind: "pages_deleted"; page_uuids: string[] } | { kind: "blocks_deleted"; block_uuids: string[]; container_uuids: string[] } | { kind: "graph_changed"; content_uuids: string[] } | { kind: "structure_changed"; block_uuids: string[] } | { kind: "attachments_changed"; owner_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
+export type DomainEvent = { kind: "mutation_committed"; commit: CommitNotice } | { kind: "pages_changed"; page_uuids: string[] } | { kind: "blocks_changed"; block_uuids: string[]; container_uuids: string[] } | { kind: "pages_deleted"; page_uuids: string[] } | { kind: "blocks_deleted"; block_uuids: string[]; container_uuids: string[] } | { kind: "graph_changed"; content_uuids: string[] } | { kind: "structure_changed"; block_uuids: string[] } | { kind: "attachments_changed"; owner_uuids: string[] } | { kind: "history_changed" } | { kind: "settings_changed" } | { kind: "sync_status_changed" } | { kind: "server_ai_changed" } | { kind: "workspace_changed" };
 
 export type DomainEventMessage = DomainEvent;
 

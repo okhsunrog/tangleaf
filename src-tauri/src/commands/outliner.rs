@@ -115,18 +115,11 @@ pub async fn split_block(
     parts: Vec<db::BlockContent>,
     expected_revision: ContentRevision,
 ) -> CommandResult<Vec<db::Block>> {
-    let applied = db::split_block_with_ops(&state.conn, uuid, parts, expected_revision)
+    let committed = observed_store(&app, &state)
+        .split_block(uuid, parts, expected_revision)
         .await
         .map_err(err)?;
-    let graph_changed = applied
-        .value
-        .1
-        .then_some(uuid)
-        .into_iter()
-        .collect::<Vec<_>>();
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &graph_changed).await;
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(applied.value.0)
+    Ok(committed.value)
 }
 
 async fn change_indent(
@@ -233,16 +226,11 @@ pub async fn undo(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<db::HistoryMoveResult> {
-    let result = db::undo_history(&state.conn).await.map_err(err)?;
-    match result {
-        db::HistoryMoveResult::Applied => {
-            emit_domain(&app, DomainEvent::WorkspaceChanged);
-            emit_domain(&app, DomainEvent::HistoryChanged);
-        }
-        db::HistoryMoveResult::Skipped => emit_domain(&app, DomainEvent::HistoryChanged),
-        db::HistoryMoveResult::Empty => {}
-    }
-    Ok(result)
+    Ok(observed_store(&app, &state)
+        .undo()
+        .await
+        .map_err(err)?
+        .value)
 }
 
 #[tauri::command]
@@ -251,16 +239,11 @@ pub async fn redo(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<db::HistoryMoveResult> {
-    let result = db::redo_history(&state.conn).await.map_err(err)?;
-    match result {
-        db::HistoryMoveResult::Applied => {
-            emit_domain(&app, DomainEvent::WorkspaceChanged);
-            emit_domain(&app, DomainEvent::HistoryChanged);
-        }
-        db::HistoryMoveResult::Skipped => emit_domain(&app, DomainEvent::HistoryChanged),
-        db::HistoryMoveResult::Empty => {}
-    }
-    Ok(result)
+    Ok(observed_store(&app, &state)
+        .redo()
+        .await
+        .map_err(err)?
+        .value)
 }
 
 #[tauri::command]

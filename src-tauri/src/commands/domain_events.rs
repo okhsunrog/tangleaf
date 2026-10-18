@@ -2,6 +2,20 @@ use super::*;
 use notes_core::OpKind;
 use std::collections::BTreeSet;
 
+/// The accepted command keeps its publisher alive until commit. AppState stores
+/// an observer-free handle so it does not retain its own AppHandle in a cycle.
+pub(crate) fn observed_store(app: &AppHandle, state: &AppState) -> notes_core::store::NotesStore {
+    let app = app.clone();
+    state.store.clone().with_commit_observer(move |commit| {
+        emit_domain(
+            &app,
+            DomainEvent::MutationCommitted {
+                commit: commit.clone(),
+            },
+        );
+    })
+}
+
 pub(crate) fn events_for_ops(
     operations: &[OpKind],
     graph_changed_content: &[uuid::Uuid],
@@ -182,6 +196,7 @@ fn push_nonempty(events: &mut Vec<DomainEvent>, event: DomainEvent) {
 
 fn event_is_empty(event: &DomainEvent) -> bool {
     match event {
+        DomainEvent::MutationCommitted { commit } => commit.changes.is_empty(),
         DomainEvent::PagesChanged { page_uuids } | DomainEvent::PagesDeleted { page_uuids } => {
             page_uuids.is_empty()
         }
