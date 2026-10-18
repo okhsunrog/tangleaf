@@ -818,7 +818,8 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
                 stateCache={store.editorStates}
                 blockUuid={block.uuid}
                 initialPointer={initialPointer.current}
-                initial={pendingSplit.current?.after ?? effectiveMarkdown}
+                initial={effectiveMarkdown}
+                syncExternal={pendingSplit.current === null}
                 onChange={onDraftChange}
                 onBlur={() => {
                   initialPointer.current = null;

@@ -32,6 +32,7 @@ export type BlockEditHandle = {
 };
 
 type Props = {
+  syncExternal?: boolean;
   stateCache?: Map<string, EditorState>;
   blockUuid?: string;
   initialPointer?: { x: number; y: number } | null;
@@ -92,6 +93,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
     stateCache,
     blockUuid,
     initialPointer,
+    syncExternal = true,
   },
   ref,
 ) {
@@ -244,14 +246,14 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view || view.composing || view.state.doc.toString() === initial) return;
+    if (!view || !syncExternal || view.composing || view.state.doc.toString() === initial) return;
     const changes = minimalExternalDocumentChange(view.state.doc.toString(), initial);
     view.dispatch({
       changes,
       selection: view.state.selection.map(changes),
       annotations: [externalUpdate.of(true), Transaction.addToHistory.of(false)],
     });
-  }, [initial]);
+  }, [initial, syncExternal]);
 
   return <div ref={mountRef} className="min-h-6 w-full" />;
 });
