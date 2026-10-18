@@ -42,9 +42,13 @@ async fn baseline_preserves_sendable_order_and_excludes_quarantine_in_one_snapsh
 }
 
 #[tokio::test]
-async fn public_baseline_and_queue_status_do_not_wait_for_the_writer_worker() {
+async fn public_snapshots_and_queue_status_do_not_wait_for_the_writer_worker() {
     let (_directory, store) = fixture().await;
-    store.create_page("Already committed".into()).await.unwrap();
+    let page = store
+        .create_page("Already committed".into())
+        .await
+        .unwrap()
+        .value;
     let expected = store.capture_sync_baseline(5).await.unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -59,6 +63,7 @@ async fn public_baseline_and_queue_status_do_not_wait_for_the_writer_worker() {
     let baseline =
         tokio::time::timeout(Duration::from_secs(2), store.capture_sync_baseline(5)).await;
     let status = tokio::time::timeout(Duration::from_secs(2), store.sync_queue_status()).await;
+    let archive = tokio::time::timeout(Duration::from_secs(2), store.export_archive()).await;
     // Release even on assertion failure; do not leave a blocked SQLite worker.
     release_tx.send(()).unwrap();
     blocked.await.unwrap();
@@ -70,6 +75,11 @@ async fn public_baseline_and_queue_status_do_not_wait_for_the_writer_worker() {
             ..Default::default()
         }
     );
+    let archive = archive.unwrap().unwrap();
+    assert_eq!(archive.workspace_uuid, expected.0.workspace_uuid);
+    assert_eq!(archive.pages.len(), 1);
+    assert_eq!(archive.pages[0].uuid, page.uuid);
+    assert_eq!(archive.pages[0].title, page.title);
     store.close().await.unwrap();
 }
 

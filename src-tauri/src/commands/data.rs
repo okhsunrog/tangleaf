@@ -39,9 +39,7 @@ pub async fn export_data(
         "tangleaf-{}.notes",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
-    let archive = db::export_archive(state.store.write_connection())
-        .await
-        .map_err(err)?;
+    let archive = state.store.export_archive().await.map_err(err)?;
 
     #[cfg(not(target_os = "android"))]
     {

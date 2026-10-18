@@ -190,6 +190,11 @@ where
 }
 
 impl crate::store::NotesStore {
+    /// Captures a consistent portable archive without occupying the writer.
+    pub async fn export_archive(&self) -> Result<DataArchive> {
+        export_archive(self.read_connection()).await
+    }
+
     pub async fn import_archive(
         &self,
         archive: DataArchive,
