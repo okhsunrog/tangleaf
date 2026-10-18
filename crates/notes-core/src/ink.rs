@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 pub mod archive;
 pub(crate) mod history_retention;
 mod input;
+pub(crate) mod outbox_retention;
 mod status;
 pub(crate) use status::read_status;
 pub use status::{InkNoteStatus, InkVersionInfo, recoverable_notes};

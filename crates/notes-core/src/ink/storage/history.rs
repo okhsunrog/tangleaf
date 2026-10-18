@@ -78,6 +78,7 @@ pub(in crate::ink) fn index_root(
             .execute(params![root.as_slice(), 1, id.as_slice()])
             .map_err(err)?;
     }
+    super::super::outbox_retention::attach_root(conn, root)?;
     Ok(())
 }
 pub(in crate::ink) fn collect(conn: &Connection) -> CommandResult<()> {
@@ -88,6 +89,7 @@ pub(in crate::ink) fn collect(conn: &Connection) -> CommandResult<()> {
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_versions WHERE root_id IS NOT NULL;
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_documents WHERE root_id IS NOT NULL;
       INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM history_ink_roots;
+      INSERT OR IGNORE INTO keep_ink_roots SELECT root_id FROM ink_outbox_roots WHERE root_id IS NOT NULL;
       DELETE FROM ink_root_refs WHERE root_id NOT IN (SELECT id FROM keep_ink_roots);
       DELETE FROM ink_records WHERE id NOT IN (SELECT id FROM keep_ink_roots UNION SELECT object_id FROM ink_root_refs WHERE kind=0);
       DELETE FROM ink_chunks WHERE id NOT IN (SELECT object_id FROM ink_root_refs WHERE kind=1);").map_err(err)?;

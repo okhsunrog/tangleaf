@@ -173,14 +173,23 @@ pub(crate) fn export_root(conn: &Connection, root: Id) -> CommandResult<Blobs> {
 }
 pub async fn export_graph(conn: &crate::Connection, root_hash: BlobHash) -> anyhow::Result<Blobs> {
     conn.call_domain(move |database| -> CommandResult<_> {
-        let tx=database.transaction()?;
-        let root:Option<Vec<u8>>=tx.query_row("SELECT root_id FROM ink_versions WHERE root_hash=?1 AND root_id IS NOT NULL LIMIT 1",[root_hash.as_bytes().as_slice()],|r|r.get(0)).optional()?;
-        let root=root.ok_or_else(||CommandError::not_found("Handwriting version is not available locally"))?;
-        let blobs=export_root(&tx,root.try_into().map_err(|_|CommandError::invalid("Invalid root ID"))?)?;
-        if !blobs.contains_key(&root_hash) { return Err(CommandError::invalid("Published root hash mismatch")); }
+        let tx = database.transaction()?;
+        let root = super::outbox_retention::root_for_hash(&tx, root_hash)?;
+        let root = root.ok_or_else(|| {
+            CommandError::not_found("Handwriting version is not available locally")
+        })?;
+        let blobs = export_root(
+            &tx,
+            root.try_into()
+                .map_err(|_| CommandError::invalid("Invalid root ID"))?,
+        )?;
+        if !blobs.contains_key(&root_hash) {
+            return Err(CommandError::invalid("Published root hash mismatch"));
+        }
         tx.commit()?;
         Ok(blobs)
-    }).await
+    })
+    .await
 }
 
 /// Reuse blocks already present in any local note or retained history.
@@ -207,5 +216,5 @@ pub async fn cached_blobs(
 
 /// A root is marked available only after full validation and atomic installation.
 pub async fn has_graph(conn: &crate::Connection, root_hash: BlobHash) -> anyhow::Result<bool> {
-    conn.call(move |database| database.query_row("SELECT EXISTS(SELECT 1 FROM ink_versions WHERE root_hash=?1 AND root_id IS NOT NULL UNION ALL SELECT 1 FROM ink_staged_roots WHERE root_hash=?1)",[root_hash.as_bytes().as_slice()],|r|r.get(0))).await
+    conn.call(move |database| database.query_row("SELECT EXISTS(SELECT 1 FROM ink_versions WHERE root_hash=?1 AND root_id IS NOT NULL UNION ALL SELECT 1 FROM ink_staged_roots WHERE root_hash=?1 UNION ALL SELECT 1 FROM ink_outbox_roots WHERE root_hash=?1 AND root_id IS NOT NULL)",[root_hash.as_bytes().as_slice()],|r|r.get(0))).await
 }

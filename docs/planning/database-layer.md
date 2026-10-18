@@ -347,6 +347,19 @@
   guards. Прошли 61 frontend test, 47 Tauri lib tests (1 ignored), Clippy с `-D warnings`,
   scoped format/lint/type check.
 
+- Исправлена подтверждённая потеря отправляемых ink bodies: регрессия воспроизвела pending
+  InkPublish, который после archive restore и reopen уже нельзя было экспортировать.
+  V011 закрепляет immutable roots за outbox независимо от страницы, version heads и истории.
+  Pins создаются в той же транзакции, переживают quarantine/delete/restore, входят в GC keep-set
+  и доступны transfer export. ACK/sequenced ACK освобождают owner и собирают только больше никому
+  не нужные тела; скачанный staging сохраняет собственное независимое владение.
+  Migration hook потоково обрабатывает legacy/current envelopes атомарно с DDL; повреждённый
+  envelope откатывает весь переход. Уже потерянные bytes остаются явно unavailable, без
+  выдуманного восстановления; поздняя проверенная установка graph заполняет NULL pin.
+  Прошли 8 новых тестов, 7 migration и 68 archive/ink/history/remote/snapshot/metadata/sync
+  регрессий (83 всего), включая reopen, quarantine, ACK, ошибку GC и откат migration.
+  Native acquisition/runtime/BOOX paths этим изменением не менялись.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

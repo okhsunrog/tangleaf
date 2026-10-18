@@ -14,6 +14,13 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/V008__store_projection_state.sql")),
         M::up(include_str!("migrations/V009__history_ink_retention.sql")),
         M::up(include_str!("migrations/V010__workspace_epoch.sql")),
+        M::up_with_hook(
+            include_str!("migrations/V011__ink_outbox_roots.sql"),
+            |transaction| {
+                crate::ink::outbox_retention::backfill(transaction)
+                    .map_err(|error| rusqlite_migration::HookError::Hook(error.to_string()))
+            },
+        ),
     ])
 }
 

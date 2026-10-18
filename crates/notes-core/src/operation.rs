@@ -458,6 +458,7 @@ fn apply_local_kinds_internal(
                     operation_timestamp(operation),
                 ],
             )?;
+            crate::ink::outbox_retention::enqueue(transaction, operation)?;
         }
     }
     let stats = effects.finish_projections(transaction)?;
@@ -851,6 +852,7 @@ pub(crate) fn apply_sequenced_batch_in_transaction(
     let mut outcomes = Vec::with_capacity(operations.len());
     let mut applied_operations = Vec::new();
     let mut durable_changed = false;
+    let mut released_ink = false;
     let mut effects = ApplyEffects::deferred();
     effects.structure_mode = structure_mode;
     effects.changes = tracked.then(ChangeTracker::default);
@@ -910,15 +912,17 @@ pub(crate) fn apply_sequenced_batch_in_transaction(
                  ON CONFLICT(op_id) DO UPDATE SET seq = excluded.seq",
             rusqlite::params![operation.op_id, seq as i64],
         )?;
-        transaction.execute(
-            "DELETE FROM sync_outbox WHERE op_id = ?1",
-            [&operation.op_id],
-        )?;
+        let (_, released) =
+            crate::ink::outbox_retention::remove_operation(transaction, operation.op_id)?;
+        released_ink |= released;
         cursor = cursor.max(seq);
         durable_changed = true;
         outcomes.push(outcome);
     }
     let stats = effects.finish_projections(transaction)?;
+    if released_ink {
+        crate::ink::outbox_retention::collect(transaction)?;
+    }
     let changes = effects
         .changes
         .take()
@@ -965,6 +969,7 @@ pub(crate) fn acknowledge_server_ops_in_transaction(
         validate_server_sequence(*seq)?;
     }
     let mut durable_changed = false;
+    let mut released_ink = false;
     for (op_id, seq) in acknowledgements {
         let seq = *seq as i64;
         let previous = transaction
@@ -979,8 +984,13 @@ pub(crate) fn acknowledge_server_ops_in_transaction(
             "UPDATE applied_ops SET seq = ?2 WHERE op_id = ?1",
             rusqlite::params![op_id, seq],
         )?;
-        durable_changed |=
-            transaction.execute("DELETE FROM sync_outbox WHERE op_id = ?1", [op_id])? != 0;
+        let (removed, released) =
+            crate::ink::outbox_retention::remove_operation(transaction, *op_id)?;
+        durable_changed |= removed;
+        released_ink |= released;
+    }
+    if released_ink {
+        crate::ink::outbox_retention::collect(transaction)?;
     }
     Ok(durable_changed)
 }
@@ -1482,6 +1492,7 @@ pub(crate) fn apply_batch_in_transaction(
                     chrono::Utc::now().timestamp(),
                 ],
             )?;
+            crate::ink::outbox_retention::enqueue(transaction, operation)?;
         }
         if origin == Origin::Remote {
             observe_hlc(transaction, &operation.hlc)?;
@@ -3450,7 +3461,9 @@ fn sync_is_configured(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Resu
 /// proxy for the question there. The server has no upstream — it owns the log
 /// its own writes must reach — so the URL is absent and the proxy answers the
 /// wrong way. Asking for the role keeps the two apart.
-pub(crate) fn publishes_authored_ops(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
+pub(crate) fn publishes_authored_ops(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<bool> {
     if replica_role_in_transaction(transaction)? == ReplicaRole::Server {
         return Ok(true);
     }

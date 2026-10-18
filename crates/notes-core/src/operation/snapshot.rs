@@ -289,6 +289,7 @@ impl PreparedSyncSnapshot {
             [snapshot.seq.to_string()],
         )?;
         crate::ink::history_retention::cleanup(transaction)?;
+        crate::ink::outbox_retention::collect(transaction)?;
         Ok(BulkMutation {
             value: (),
             wrote: true,
