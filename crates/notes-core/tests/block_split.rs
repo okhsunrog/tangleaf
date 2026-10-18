@@ -199,10 +199,12 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
         1
     );
     replay_and_compare(&connection, &replica, page.uuid).await;
+    count_tree_scans(&connection, true).await;
     assert_eq!(
         db::undo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
+    assert_eq!(count_tree_scans(&connection, false).await, 1);
     assert_eq!(
         db::get_block(&connection, source.uuid)
             .await
@@ -228,10 +230,12 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
             .is_empty()
     );
     replay_and_compare(&connection, &replica, page.uuid).await;
+    count_tree_scans(&connection, true).await;
     assert_eq!(
         db::redo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
+    assert_eq!(count_tree_scans(&connection, false).await, 1);
     replay_and_compare(&connection, &replica, page.uuid).await;
 }
 
@@ -310,10 +314,12 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
                 .windows(2)
                 .all(|pair| pair[0].order_key < pair[1].order_key)
         );
+        count_tree_scans(&connection, true).await;
         assert_eq!(
             db::undo_history(&connection).await.unwrap(),
             db::HistoryMoveResult::Applied
         );
+        assert_eq!(count_tree_scans(&connection, false).await, 1);
         let restored = db::list_block_children(&connection, page.uuid, None)
             .await
             .unwrap();
@@ -327,10 +333,12 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
                 .map(|block| (&block.uuid, &block.order_key))
                 .collect::<Vec<_>>()
         );
+        count_tree_scans(&connection, true).await;
         assert_eq!(
             db::redo_history(&connection).await.unwrap(),
             db::HistoryMoveResult::Applied
         );
+        assert_eq!(count_tree_scans(&connection, false).await, 1);
         assert_eq!(
             db::list_block_children(&connection, page.uuid, None)
                 .await
@@ -412,8 +420,104 @@ async fn split_at_end_allocates_new_keys_without_moving_existing_blocks() {
     );
 }
 
+#[tokio::test]
+async fn large_paragraph_split_and_history_each_reconcile_once() {
+    let (_directory, connection) = database().await;
+    let page = db::create_page(&connection, "Large split".into())
+        .await
+        .unwrap();
+    let paragraphs = (0..243)
+        .map(|index| format!("Paragraph {index}: a longer passage with **Markdown**, Unicode текст, and a link to [[Large split]]."))
+        .collect::<Vec<_>>();
+    let original = paragraphs.join("\n\n");
+    let source = db::create_block(
+        &connection,
+        page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        original.clone(),
+    )
+    .await
+    .unwrap();
+    count_tree_scans(&connection, true).await;
+    let blocks = db::split_block(
+        &connection,
+        source.uuid,
+        paragraphs
+            .iter()
+            .cloned()
+            .map(|markdown| BlockContent { markdown })
+            .collect(),
+        source.markdown_revision,
+    )
+    .await
+    .unwrap();
+    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| &block.markdown)
+            .collect::<Vec<_>>(),
+        paragraphs.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        db::find_backlinks(&connection, page.uuid)
+            .await
+            .unwrap()
+            .len(),
+        paragraphs.len()
+    );
+    count_tree_scans(&connection, true).await;
+    assert_eq!(
+        db::undo_history(&connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    let restored = db::list_block_children(&connection, page.uuid, None)
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].markdown, original);
+    assert_eq!(
+        db::find_backlinks(&connection, page.uuid)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    count_tree_scans(&connection, true).await;
+    assert_eq!(
+        db::redo_history(&connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    let restored = db::list_block_children(&connection, page.uuid, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|block| (&block.uuid, &block.markdown, &block.order_key))
+            .collect::<Vec<_>>(),
+        blocks
+            .iter()
+            .map(|block| (&block.uuid, &block.markdown, &block.order_key))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        db::find_backlinks(&connection, page.uuid)
+            .await
+            .unwrap()
+            .len(),
+        paragraphs.len()
+    );
+}
+
 /// Manual timing on a real-sized workspace, without ever writing to the input.
 /// Set TANGLEAF_BENCH_DATABASE and TANGLEAF_BENCH_BLOCK, then run this ignored test.
+/// TANGLEAF_BENCH_PARTS may point to a JSON string array produced by the UI's
+/// paragraph splitter to exercise the long-block Split action instead of Enter.
 #[tokio::test]
 #[ignore = "requires a database and source block; edits disposable copies only"]
 async fn benchmark_split_on_database_copy() {
@@ -422,6 +526,9 @@ async fn benchmark_split_on_database_copy() {
         .expect("block UUID")
         .parse()
         .unwrap();
+    let paragraphs: Option<Vec<String>> = std::env::var("TANGLEAF_BENCH_PARTS")
+        .ok()
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
     let source = rusqlite::Connection::open_with_flags(
         source_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -435,22 +542,21 @@ async fn benchmark_split_on_database_copy() {
             .unwrap();
         let connection = db::open(path).await.unwrap();
         let block = db::get_block(&connection, uuid).await.unwrap().unwrap();
+        let original = block.markdown.clone();
+        let parts = paragraphs
+            .clone()
+            .unwrap_or_else(|| vec![original.clone(), String::new(), String::new()]);
+        let part_count = parts.len();
         count_tree_scans(&connection, true).await;
         let start = std::time::Instant::now();
         let split = db::split_block_with_ops(
             &connection,
             uuid,
-            vec![
-                BlockContent {
-                    markdown: block.markdown,
-                },
-                BlockContent {
-                    markdown: String::new(),
-                },
-                BlockContent {
-                    markdown: String::new(),
-                },
-            ],
+            parts
+                .iter()
+                .cloned()
+                .map(|markdown| BlockContent { markdown })
+                .collect(),
             block.markdown_revision,
         )
         .await
@@ -458,9 +564,65 @@ async fn benchmark_split_on_database_copy() {
         let elapsed = start.elapsed();
         let scans = count_tree_scans(&connection, false).await;
         println!(
-            "round={round} split_ms={:.2} operations={} tree_scans={scans}",
+            "round={round} parts={part_count} source_bytes={} split_ms={:.2} operations={} tree_scans={scans}",
+            original.len(),
             elapsed.as_secs_f64() * 1_000.0,
             split.operations.len()
         );
+        assert_eq!(
+            split
+                .value
+                .0
+                .iter()
+                .map(|block| &block.markdown)
+                .collect::<Vec<_>>(),
+            parts.iter().collect::<Vec<_>>()
+        );
+        assert!(
+            split
+                .value
+                .0
+                .windows(2)
+                .all(|pair| pair[0].order_key < pair[1].order_key)
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(
+            db::undo_history(&connection).await.unwrap(),
+            db::HistoryMoveResult::Applied
+        );
+        let undo_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        assert_eq!(
+            db::get_block(&connection, uuid)
+                .await
+                .unwrap()
+                .unwrap()
+                .markdown,
+            original
+        );
+        for added in split.value.0.iter().skip(1) {
+            assert!(
+                db::get_block(&connection, added.uuid)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(
+            db::redo_history(&connection).await.unwrap(),
+            db::HistoryMoveResult::Applied
+        );
+        let redo_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        for restored in &split.value.0 {
+            assert_eq!(
+                db::get_block(&connection, restored.uuid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .markdown,
+                restored.markdown
+            );
+        }
+        println!("round={round} undo_ms={undo_ms:.2} redo_ms={redo_ms:.2}");
     }
 }

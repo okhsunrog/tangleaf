@@ -827,7 +827,14 @@ async fn move_history(conn: &Connection, undo: bool) -> Result<HistoryMoveResult
             return Ok(HistoryMoveResult::Skipped);
         }
         let kinds = selected.operations.clone();
-        operation::apply_local_kinds_in_transaction(&transaction, kinds.clone())?;
+        if action == "split block" {
+            // Split only inserts/removes siblings and changes their order keys.
+            // Neither direction needs intermediate structure projections, just
+            // like the original split. Reconcile before refreshing the guards.
+            operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds.clone())?;
+        } else {
+            operation::apply_local_kinds_in_transaction(&transaction, kinds.clone())?;
+        }
         let next_guards = capture_history_guards(&transaction, &kinds)?;
         if undo {
             forward.guards = next_guards;
