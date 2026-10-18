@@ -1335,6 +1335,7 @@ html::before {
 }
 
 /* CodeMirror injects unlayered themes; keep the journal sizing at the same cascade level. */
+.journal-stream .continuous-document-editor,
 .journal-stream .cm-editor.cm-editor,
 .journal-stream .cm-editor .cm-content {
   min-height: 12rem;

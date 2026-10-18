@@ -10,7 +10,21 @@ import { queryKeys } from "@/lib/query";
 import { DocumentPage } from "./document-page";
 vi.mock("@/lib/api", async (original) => ({
   ...(await original<typeof import("@/lib/api")>()),
-  replacePageDocument: vi.fn().mockResolvedValue({ pageUuid: "page", revision: "r2", blocks: [] }),
+  replacePageDocument: vi.fn().mockImplementation(async (_page, _revision, units) => ({
+    pageUuid: "page",
+    revision: "r2",
+    blocks: units.map((unit: { markdown: string; style: unknown }, index: number) => ({
+      uuid: `block-${index}`,
+      pageUuid: "page",
+      parentUuid: null,
+      orderKey: "a",
+      style: unit.style,
+      markdown: unit.markdown,
+      markdownRevision: "b2",
+      createdAt: 0,
+      updatedAt: 0,
+    })),
+  })),
 }));
 
 it("retains the editor and selection when switching through Read", async () => {

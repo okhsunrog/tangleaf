@@ -5,6 +5,7 @@ import {
   ContinuousDocumentEditor,
   type DocumentEditorSession,
 } from "@/features/document/continuous-document-editor";
+import { usePageFind } from "@/features/pages/page-find";
 import { DocumentCodec } from "@/features/document/document-codec";
 import { documentUnitsForSave } from "@/features/document/document-save-model";
 import {
@@ -39,6 +40,7 @@ export function JournalEntry({
   autoFocus?: boolean;
 }) {
   const journal = useQuery({ queryKey: queryKeys.journal(date), queryFn: () => getJournal(date) });
+  const pendingDraft = useDocumentDraftOverlay(`journal-draft:${date}`);
   const [created, setCreated] = useState<Page | null>(null);
   // Once typing starts, a background journal refetch must not replace the draft editor.
   const [drafting, setDrafting] = useState(false);
@@ -52,7 +54,7 @@ export function JournalEntry({
         Could not load journal. <button onClick={() => void journal.refetch()}>Retry</button>
       </p>
     );
-  return page && (!drafting || created) ? (
+  return page && ((!drafting && !pendingDraft) || created) ? (
     <ExistingJournal
       page={page}
       paneId={paneId}
@@ -85,23 +87,31 @@ function ExistingJournal({
   const ownsWriter = usePageWriterLease(page.uuid, paneId, true);
   const active = useWorkspaceStore((state) => state.activePaneId === paneId);
   const controller = useWorkspaceController();
+  const root = useRef<HTMLDivElement>(null);
+  const find = usePageFind({ ...page, layout: "document" }, paneId, root, 0);
   return (
-    <>
+    <div ref={root}>
+      {find.bar}
       {!ownsWriter && (
         <p className="mb-4 text-xs text-muted-foreground">
           This journal is being edited in another pane.
         </p>
       )}
-      <DocumentPage
-        pageUuid={page.uuid}
-        editing={ownsWriter}
-        canEdit={ownsWriter}
-        authoringMode="live_preview"
-        focusRequest={autoFocus && active ? 1 : 0}
-        onOpenMarkdownLink={controller.openMarkdownLink}
-        editorSession={editorSession}
-      />
-    </>
+      <div className="editor-body">
+        <DocumentPage
+          findRange={
+            find.navigation ? { ...find.navigation.match, request: find.navigation.request } : null
+          }
+          pageUuid={page.uuid}
+          editing={ownsWriter}
+          canEdit={ownsWriter}
+          authoringMode="live_preview"
+          focusRequest={autoFocus && active ? 1 : 0}
+          onOpenMarkdownLink={controller.openMarkdownLink}
+          editorSession={editorSession}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -134,6 +144,8 @@ function FirstEntry({
   const client = useQueryClient();
   const autosave = useRef(new DebouncedAction()).current;
   const flight = useRef<Promise<boolean> | null>(null);
+  const composing = useRef(false);
+  const lastValue = useRef(overlay?.draft ?? "");
   const durable = useRef<{ page: Page; snapshot: PageDocumentSnapshot; prefix: string } | null>(
     null,
   );
@@ -184,7 +196,7 @@ function FirstEntry({
           client.setQueryData(queryKeys.page(current.page.uuid), current.page);
           void client.invalidateQueries({ queryKey: queryKeys.journals });
           void client.invalidateQueries({ queryKey: queryKeys.history });
-          if (mounted.current) onCreated(current.page);
+          if (mounted.current && !composing.current) onCreated(current.page);
           return true;
         }
       } catch (error) {
@@ -214,11 +226,14 @@ function FirstEntry({
       void flushRef.current();
     };
   }, [autosave]);
-  const update = (value: string, composing: boolean) => {
+  const update = (value: string, isComposing: boolean) => {
     if (!canEdit) return;
+    composing.current = isComposing;
+    lastValue.current = value;
     onTyping();
     sessions.editDocument(draftKey, value, EMPTY_DOCUMENT);
-    if (!composing) autosave.schedule(() => void flush(), 400);
+    if (isComposing) autosave.cancel();
+    else autosave.schedule(() => void flush(), 400);
   };
   return (
     <div className="relative">
@@ -236,7 +251,7 @@ function FirstEntry({
         </p>
       )}
       <ContinuousDocumentEditor
-        value={overlay?.draft ?? ""}
+        value={overlay?.draft ?? lastValue.current}
         readOnly={!canEdit}
         focusRequest={autoFocus && active ? 1 : 0}
         editorSession={editorSession}

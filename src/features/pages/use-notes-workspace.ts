@@ -211,6 +211,13 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
 
   const openJournal = useCallback(
     async (date: JournalDate, disposition: OpenDisposition = currentDisposition) => {
+      if (date === todayJournalDate() && disposition === currentDisposition) {
+        ++navigationEpochRef.current;
+        setNewNote(null);
+        openTarget(homeTarget, disposition);
+        showEditor();
+        return;
+      }
       if (journalBusyRef.current) return;
       const navigationEpoch = ++navigationEpochRef.current;
       journalBusyRef.current = true;
