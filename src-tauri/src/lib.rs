@@ -326,25 +326,22 @@ pub fn run() {
             let finished = finished.clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
-                    // Packing is bounded but not instant, and a busy database can
-                    // block it. Quitting must not hang on it: whatever is left is
-                    // durable and finishes on the next launch.
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        ink.complete_all(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            tracing::warn!(?error, "Ink exit completion retained for recovery");
-                        }
-                        Err(_) => tracing::warn!(
-                            "Ink exit completion timed out; retained for recovery on next launch"
-                        ),
+                    // A timed-out waiter does not stop spawn_blocking work.
+                    // Confirm every raw connection has drained before closing
+                    // the text workers, including on publication failure.
+                    if let Err(error) = ink.shutdown().await {
+                        tracing::warn!(?error, "Ink drained; publication retained for recovery");
                     }
                 }
                 sync::finish_before_exit(&app).await;
+                if let Some(state) = app.try_state::<commands::AppState>() {
+                    match state.store.close().await {
+                        Ok(()) => tracing::info!("Workspace SQLite workers closed"),
+                        Err(error) => {
+                            tracing::error!(?error, "Workspace SQLite close failed during exit");
+                        }
+                    }
+                }
                 finished.store(true, Ordering::Relaxed);
                 app.exit(code.unwrap_or(0));
             });

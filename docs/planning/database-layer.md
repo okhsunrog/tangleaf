@@ -382,6 +382,19 @@
   его доступ после commit. Store suite — 27 passed / 1 ignored; CONTENT и прежний workload
   прошли пять повторов без скрытых retries, со сверкой ink/blobs/outbox/cursor после reopen.
 
+- Ink runtime получил общий workspace admission/stop/drain. Каждый raw blocking job
+  регистрируется до spawn и владеет permit до фактического завершения, независимо от waiter.
+  Shared packing lane также принадлежит blocking job. Completion — принятая owned continuation;
+  публикация, close и callback сохраняют порядок при отмене вызывающего. Scheduler просыпается
+  на stop; поздний job/session/completion больше не открывает файл. Shutdown сначала дренирует
+  принятые задачи, завершает durable publication intent, затем очищает cached callbacks.
+  Даже при ошибке публикации terminal result выдаётся после ухода raw file users.
+  Exit теперь ждёт ink shutdown, останавливает background sync, делает best-effort upload,
+  закрывает и join оба Store worker; старый пятисекундный timeout не считается остановкой job.
+  Прошли 10 core lifecycle, 50 Tauri lib tests (1 ignored), общий lib/tests Clippy чистый.
+  Android callback вне Tokio проверен обычным std::thread тестом. Pen/frame/eraser/display код
+  не менялся; реальная BOOX проверка ещё нужна. Отдельно закрывается race выхода во время startup.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
