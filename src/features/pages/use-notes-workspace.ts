@@ -182,32 +182,27 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
     [openTarget, queryClient, showEditor],
   );
 
-  const moveHistory = useCallback(
-    async (direction: "undo" | "redo") => {
-      const navigationEpoch = ++navigationEpochRef.current;
-      try {
-        const result = direction === "undo" ? await undo() : await redo();
-        if (result === "skipped") {
-          notifyInfo(
-            direction === "undo"
-              ? "Undo skipped — the content changed since that action."
-              : "Redo skipped — the content changed since that action.",
-          );
-          return;
-        }
-        if (result === "applied" && navigationEpoch === navigationEpochRef.current) {
-          dispatchWorkspace({ type: "reset" });
-          notifyInfo(
-            direction === "undo" ? "Undid structural change." : "Redid structural change.",
-          );
-          await queryClient.invalidateQueries({ queryKey: queryKeys.root });
-        }
-      } catch (error) {
-        notifyError(direction, error);
+  const moveHistory = useCallback(async (direction: "undo" | "redo") => {
+    const navigationEpoch = ++navigationEpochRef.current;
+    try {
+      const result = direction === "undo" ? await undo() : await redo();
+      if (result === "skipped") {
+        notifyInfo(
+          direction === "undo"
+            ? "Undo skipped — the content changed since that action."
+            : "Redo skipped — the content changed since that action.",
+        );
+        return;
       }
-    },
-    [dispatchWorkspace, queryClient],
-  );
+      if (result === "applied" && navigationEpoch === navigationEpochRef.current) {
+        // Committed changes refresh affected snapshots and handle deleted pages.
+        // History movement itself leaves pane layout and navigation intact.
+        notifyInfo(direction === "undo" ? "Undid structural change." : "Redid structural change.");
+      }
+    } catch (error) {
+      notifyError(direction, error);
+    }
+  }, []);
 
   const openJournal = useCallback(
     async (date: JournalDate, disposition: OpenDisposition = currentDisposition) => {
