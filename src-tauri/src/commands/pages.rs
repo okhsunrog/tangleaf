@@ -16,11 +16,11 @@ pub async fn rename_page(
     title: Option<String>,
     expected_revision: ContentRevision,
 ) -> CommandResult<db::Page> {
-    let applied = db::rename_page_if_revision_with_ops(&state.conn, uuid, title, expected_revision)
+    let committed = observed_store(&app, &state)
+        .rename_page_if_revision(uuid, title, expected_revision)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -31,11 +31,11 @@ pub async fn set_page_layout(
     uuid: uuid::Uuid,
     layout: PageLayout,
 ) -> CommandResult<db::Page> {
-    let applied = db::set_page_layout_with_ops(&state.conn, uuid, layout)
+    let committed = observed_store(&app, &state)
+        .set_page_layout(uuid, layout)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]

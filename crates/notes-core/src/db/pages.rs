@@ -138,27 +138,10 @@ pub async fn rename_page(
     uuid: uuid::Uuid,
     title: Option<String>,
 ) -> Result<Page> {
-    let page = get_page(conn, uuid)
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .rename_page_with_expected_revision(uuid, title, None)
         .await?
-        .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-    if page.kind.is_journal() {
-        return Err(
-            crate::CoreError::invalid("journal page titles are derived from their date").into(),
-        );
-    }
-    let title = title
-        .map(|title| title.trim().to_owned())
-        .filter(|title| !title.is_empty());
-    if page.title != title {
-        apply_local(
-            conn,
-            vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })],
-        )
-        .await?;
-    }
-    get_page(conn, uuid)
-        .await?
-        .context("renamed page disappeared")
+        .value)
 }
 
 /// Rename a page only when the caller still represents its current title.
@@ -181,55 +164,13 @@ pub async fn rename_page_if_revision_with_ops(
     title: Option<String>,
     expected_revision: ContentRevision,
 ) -> Result<AppliedMutation<Page>> {
-    let title = title
-        .map(|title| title.trim().to_owned())
-        .filter(|title| !title.is_empty());
-    conn.call_domain(
-        move |database| -> crate::CoreResult<AppliedMutation<Page>> {
-            let transaction = database.transaction()?;
-            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
-            let page = transaction
-                .query_row(&sql, [uuid], row_to_page)
-                .optional()?
-                .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-            if page.kind.is_journal() {
-                return Err(crate::CoreError::invalid(
-                    "journal page titles are derived from their date",
-                ));
-            }
-            if page.title == title {
-                transaction.commit()?;
-                return Ok(AppliedMutation {
-                    value: page,
-                    operations: Vec::new(),
-                });
-            }
-            if page.title_revision != expected_revision {
-                return Err(crate::CoreError::conflict(
-                    "page title changed since editing began",
-                ));
-            }
-            if let Some(title) = title.as_deref() {
-                let normalized_title = crate::model::normalize_title(title);
-                if operation::resolve_page_alias(&transaction, &normalized_title)?
-                    .is_some_and(|owner_uuid| owner_uuid != uuid)
-                {
-                    return Err(crate::CoreError::conflict(
-                        "another page already owns this title",
-                    ));
-                }
-            }
-            let operations = vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })];
-            operation::apply_local_kinds_in_transaction(&transaction, operations.clone())?;
-            let page = transaction.query_row(&sql, [uuid], row_to_page)?;
-            transaction.commit()?;
-            Ok(AppliedMutation {
-                value: page,
-                operations,
-            })
-        },
-    )
-    .await
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .rename_page_if_revision(uuid, title, expected_revision)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn set_page_layout(
@@ -246,22 +187,102 @@ pub async fn set_page_layout_with_ops(
     uuid: uuid::Uuid,
     layout: PageLayout,
 ) -> Result<AppliedMutation<Page>> {
-    let page = get_page(conn, uuid)
-        .await?
-        .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
-    let operations = if page.layout != layout {
-        apply_local(
-            conn,
-            vec![OpKind::PageSetLayout(PageSetLayout { uuid, layout })],
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-    let value = get_page(conn, uuid)
-        .await?
-        .context("updated page disappeared")?;
-    Ok(AppliedMutation { value, operations })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .set_page_layout(uuid, layout)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
+}
+
+impl crate::store::NotesStore {
+    pub async fn rename_page_if_revision(
+        &self,
+        uuid: uuid::Uuid,
+        title: Option<String>,
+        expected_revision: ContentRevision,
+    ) -> Result<crate::store::Committed<Page>> {
+        self.rename_page_with_expected_revision(uuid, title, Some(expected_revision))
+            .await
+    }
+
+    // The legacy unguarded API retains its existing title-collision semantics.
+    // Interactive edits use the revision-safe entry point above.
+    async fn rename_page_with_expected_revision(
+        &self,
+        uuid: uuid::Uuid,
+        title: Option<String>,
+        expected_revision: Option<ContentRevision>,
+    ) -> Result<crate::store::Committed<Page>> {
+        let title = title
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty());
+        self.write(move |write| -> crate::CoreResult<Page> {
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+            let page = write
+                .sql()
+                .query_row(&sql, [uuid], row_to_page)
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
+            if page.kind.is_journal() {
+                return Err(crate::CoreError::invalid(
+                    "journal page titles are derived from their date",
+                ));
+            }
+            // Retrying the same title is idempotent even with an older revision.
+            if page.title == title {
+                return Ok(page);
+            }
+            if let Some(expected_revision) = expected_revision {
+                if page.title_revision != expected_revision {
+                    return Err(crate::CoreError::conflict(
+                        "page title changed since editing began",
+                    ));
+                }
+                if let Some(title) = title.as_deref() {
+                    let normalized_title = crate::model::normalize_title(title);
+                    if operation::resolve_page_alias(write.sql(), &normalized_title)?
+                        .is_some_and(|owner_uuid| owner_uuid != uuid)
+                    {
+                        return Err(crate::CoreError::conflict(
+                            "another page already owns this title",
+                        ));
+                    }
+                }
+            }
+            write.apply_local(
+                vec![OpKind::PageSetTitle(PageSetTitle { uuid, title })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(write.sql().query_row(&sql, [uuid], row_to_page)?)
+        })
+        .await
+    }
+
+    pub async fn set_page_layout(
+        &self,
+        uuid: uuid::Uuid,
+        layout: PageLayout,
+    ) -> Result<crate::store::Committed<Page>> {
+        self.write(move |write| -> crate::CoreResult<Page> {
+            let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
+            let page = write
+                .sql()
+                .query_row(&sql, [uuid], row_to_page)
+                .optional()?
+                .ok_or_else(|| crate::CoreError::not_found("page not found"))?;
+            if page.layout == layout {
+                return Ok(page);
+            }
+            write.apply_local(
+                vec![OpKind::PageSetLayout(PageSetLayout { uuid, layout })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(write.sql().query_row(&sql, [uuid], row_to_page)?)
+        })
+        .await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
