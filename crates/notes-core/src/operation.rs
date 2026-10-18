@@ -14,6 +14,21 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+mod structure;
+#[cfg(test)]
+mod structure_activation_tests;
+#[cfg(test)]
+mod structure_tests;
+
+use structure::{OwnedStructureInput, StructureDirty, StructureLoadStats};
+
+/// Selects the structural rows to load, independently of when a projection runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructureProjectionMode {
+    Full,
+    Components,
+}
+
 pub const FORMAT_VERSION: u32 = 7;
 pub const PERSISTED_ENVELOPE_VERSION: u32 = 2;
 
@@ -325,15 +340,24 @@ pub(crate) fn apply_local_kinds_with_policy(
     kinds: Vec<OpKind>,
     policy: ProjectionPolicy,
 ) -> CoreResult<LocalBatchApply> {
-    Ok(apply_local_kinds_internal(transaction, kinds, policy, false)?.0)
+    Ok(apply_local_kinds_internal(
+        transaction,
+        kinds,
+        policy,
+        false,
+        StructureProjectionMode::Full,
+    )?
+    .0)
 }
 
 pub(crate) fn apply_local_kinds_tracked(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
     policy: ProjectionPolicy,
+    structure_mode: StructureProjectionMode,
 ) -> CoreResult<TrackedLocalBatchApply> {
-    let (applied, changes) = apply_local_kinds_internal(transaction, kinds, policy, true)?;
+    let (applied, changes) =
+        apply_local_kinds_internal(transaction, kinds, policy, true, structure_mode)?;
     Ok(TrackedLocalBatchApply {
         operations: applied.operations,
         stats: applied.stats,
@@ -346,6 +370,7 @@ fn apply_local_kinds_internal(
     kinds: Vec<OpKind>,
     policy: ProjectionPolicy,
     tracked: bool,
+    structure_mode: StructureProjectionMode,
 ) -> CoreResult<(LocalBatchApply, Option<crate::ChangeSet>)> {
     // Validate the complete input before even creating the local device row.
     // This keeps the external-import boundary observably mutation-free when
@@ -386,6 +411,7 @@ fn apply_local_kinds_internal(
         ProjectionPolicy::Immediate => ApplyEffects::immediate(),
     };
     effects.changes = tracked.then(ChangeTracker::default);
+    effects.structure_mode = structure_mode;
     for operation in &operations {
         apply_one_with_effects(transaction, operation, &mut effects)?;
         transaction.execute(
@@ -684,6 +710,15 @@ pub async fn apply_sequenced_batch(
     conn: &Connection,
     operations: Vec<(u64, Op)>,
 ) -> Result<Vec<ApplyOutcome>> {
+    apply_sequenced_batch_with_projection_mode(conn, operations, StructureProjectionMode::Full)
+        .await
+}
+
+async fn apply_sequenced_batch_with_projection_mode(
+    conn: &Connection,
+    operations: Vec<(u64, Op)>,
+    structure_mode: StructureProjectionMode,
+) -> Result<Vec<ApplyOutcome>> {
     for (_, operation) in &operations {
         validate(operation)?;
     }
@@ -709,6 +744,7 @@ pub async fn apply_sequenced_batch(
             .unwrap_or_default();
         let mut outcomes = Vec::with_capacity(operations.len());
         let mut effects = ApplyEffects::deferred();
+        effects.structure_mode = structure_mode;
         for (seq, operation) in operations {
             if seq <= cursor {
                 let operation_at_seq = transaction
@@ -1445,6 +1481,15 @@ pub async fn apply_batch(
     operations: &[Op],
     origin: Origin,
 ) -> Result<Vec<ApplyOutcome>> {
+    apply_batch_with_projection_mode(conn, operations, origin, StructureProjectionMode::Full).await
+}
+
+async fn apply_batch_with_projection_mode(
+    conn: &Connection,
+    operations: &[Op],
+    origin: Origin,
+    structure_mode: StructureProjectionMode,
+) -> Result<Vec<ApplyOutcome>> {
     for operation in operations {
         validate(operation)?;
     }
@@ -1454,6 +1499,7 @@ pub async fn apply_batch(
         let publishes = publishes_authored_ops(&transaction)?;
         let mut outcomes = Vec::with_capacity(operations.len());
         let mut effects = ApplyEffects::deferred();
+        effects.structure_mode = structure_mode;
         for operation in operations {
             let exists = transaction
                 .query_row(
@@ -1594,11 +1640,19 @@ pub fn validate_attachment_filename(filename: &str) -> CoreResult<()> {
 pub(crate) struct DeferredApplyStats {
     pub structure_reconciliations: u32,
     pub reference_projections: u32,
+    pub full_structure_reconciliations: u32,
+    pub structure_blocks_read: usize,
+    pub structure_intents_read: usize,
+    pub structure_pages_read: usize,
+    pub structure_vertices_visited: usize,
+    pub structure_seed_rows_read: usize,
 }
 
 struct ApplyEffects {
     deferred: bool,
     structure_dirty: bool,
+    structure_mode: StructureProjectionMode,
+    structure_seeds: StructureDirty,
     graph_changed_blocks: BTreeSet<uuid::Uuid>,
     pending_block_refs: BTreeMap<uuid::Uuid, (String, i64)>,
     pending_page_links: BTreeSet<String>,
@@ -1647,6 +1701,8 @@ impl ApplyEffects {
         Self {
             deferred: false,
             structure_dirty: false,
+            structure_mode: StructureProjectionMode::Full,
+            structure_seeds: StructureDirty::default(),
             graph_changed_blocks: BTreeSet::new(),
             pending_block_refs: BTreeMap::new(),
             pending_page_links: BTreeSet::new(),
@@ -1662,6 +1718,69 @@ impl ApplyEffects {
         }
     }
 
+    fn touch_structure_block(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        uuid: uuid::Uuid,
+        new_parent: Option<uuid::Uuid>,
+    ) -> rusqlite::Result<()> {
+        if self.structure_mode == StructureProjectionMode::Components {
+            let before = self.structure_seeds.seed_rows_read();
+            self.structure_seeds
+                .touch_block(transaction, uuid, new_parent)?;
+            self.stats.structure_seed_rows_read += self.structure_seeds.seed_rows_read() - before;
+        }
+        Ok(())
+    }
+
+    fn touch_structure_page(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        uuid: uuid::Uuid,
+    ) -> rusqlite::Result<()> {
+        if self.structure_mode == StructureProjectionMode::Components {
+            let before = self.structure_seeds.seed_rows_read();
+            self.structure_seeds.touch_page(transaction, uuid)?;
+            self.stats.structure_seed_rows_read += self.structure_seeds.seed_rows_read() - before;
+        }
+        Ok(())
+    }
+
+    fn deleting_structure_block(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        uuid: uuid::Uuid,
+    ) -> rusqlite::Result<()> {
+        if self.structure_mode == StructureProjectionMode::Components {
+            let before = self.structure_seeds.seed_rows_read();
+            self.structure_seeds.deleting_block(transaction, uuid)?;
+            self.stats.structure_seed_rows_read += self.structure_seeds.seed_rows_read() - before;
+        }
+        Ok(())
+    }
+
+    fn project_structure(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> rusqlite::Result<()> {
+        let seeds = std::mem::take(&mut self.structure_seeds);
+        let report = reconcile_structure_with_mode(
+            transaction,
+            self.structure_mode,
+            &seeds,
+            self.changes.as_mut(),
+        )?;
+        self.stats.structure_reconciliations += 1;
+        self.stats.full_structure_reconciliations +=
+            u32::from(self.structure_mode == StructureProjectionMode::Full);
+        self.stats.structure_blocks_read += report.blocks_read;
+        self.stats.structure_intents_read += report.intents_read;
+        self.stats.structure_pages_read += report.pages_read;
+        self.stats.structure_vertices_visited += report.vertices_visited;
+        self.structure_dirty = false;
+        Ok(())
+    }
+
     fn request_structure(
         &mut self,
         transaction: &rusqlite::Transaction<'_>,
@@ -1669,8 +1788,7 @@ impl ApplyEffects {
         if self.deferred {
             self.structure_dirty = true;
         } else {
-            reconcile_structure_tracked(transaction, self.changes.as_mut())?;
-            self.stats.structure_reconciliations += 1;
+            self.project_structure(transaction)?;
         }
         Ok(())
     }
@@ -1682,9 +1800,7 @@ impl ApplyEffects {
         transaction: &rusqlite::Transaction<'_>,
     ) -> rusqlite::Result<()> {
         if self.structure_dirty {
-            reconcile_structure_tracked(transaction, self.changes.as_mut())?;
-            self.structure_dirty = false;
-            self.stats.structure_reconciliations += 1;
+            self.project_structure(transaction)?;
         }
         Ok(())
     }
@@ -1843,13 +1959,16 @@ fn apply_one_with_effects(
                 return Ok(vec![payload.uuid]);
             }
             let mut affected = vec![payload.uuid];
-            if previous_existence_hlc
+            let replaces_generation = previous_existence_hlc
                 .as_deref()
-                .is_some_and(|current| current < operation.hlc.to_string().as_str())
-            {
-                // Replacing a generation must examine the page's current
-                // members, including moves earlier in this same transaction.
+                .is_some_and(|current| current < operation.hlc.to_string().as_str());
+            if replaces_generation {
+                // Drain prior writes before capturing the current operation's
+                // dependencies; this barrier must not consume its future seeds.
                 effects.ensure_structure_current(transaction)?;
+            }
+            effects.touch_structure_page(transaction, payload.uuid)?;
+            if replaces_generation {
                 let stale_blocks = {
                     let mut statement = transaction.prepare(
                         "SELECT uuid FROM blocks
@@ -1863,6 +1982,7 @@ fn apply_one_with_effects(
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 for block_uuid in &stale_blocks {
+                    effects.deleting_structure_block(transaction, *block_uuid)?;
                     if let Some(changes) = effects.changes.as_mut() {
                         changes.deleting_block(transaction, *block_uuid)?;
                     }
@@ -2012,6 +2132,7 @@ fn apply_one_with_effects(
             // Resolve pending moves before choosing the cascade's members.
             // Otherwise packet boundaries decide which blocks are deleted.
             effects.ensure_structure_current(transaction)?;
+            effects.touch_structure_page(transaction, payload.uuid)?;
             let reference_aliases = page_reference_aliases(transaction, payload.uuid)?;
             let blocks = {
                 let mut statement =
@@ -2028,6 +2149,7 @@ fn apply_one_with_effects(
                 &operation.hlc,
             )?;
             for block_uuid in &blocks {
+                effects.deleting_structure_block(transaction, *block_uuid)?;
                 write_tombstone(
                     transaction,
                     *block_uuid,
@@ -2114,6 +2236,7 @@ fn apply_one_with_effects(
                 )?;
                 return Ok(vec![payload.uuid, payload.page_uuid]);
             }
+            effects.touch_structure_block(transaction, payload.uuid, payload.parent_uuid)?;
             transaction.execute(
                 "INSERT INTO blocks(uuid, page_uuid, parent_uuid, order_key, style, markdown,
                                     body_stemmed, markdown_hlc, style_hlc, structure_hlc,
@@ -2214,6 +2337,7 @@ fn apply_one_with_effects(
                     // Preserve that fallback before overwriting pending intent.
                     effects.ensure_structure_current(transaction)?;
                 }
+                effects.touch_structure_block(transaction, payload.uuid, payload.parent_uuid)?;
                 write_structure_intent(
                     transaction,
                     payload.uuid,
@@ -2254,6 +2378,7 @@ fn apply_one_with_effects(
                 &operation.hlc,
             )?;
             if tombstone_equals(transaction, payload.uuid, &operation.hlc)? {
+                effects.deleting_structure_block(transaction, payload.uuid)?;
                 effects.discard_block_refs(payload.uuid);
                 transaction.execute(
                     "DELETE FROM block_structure_lww WHERE block_uuid = ?1",
@@ -2567,15 +2692,72 @@ fn resolve_structure(input: StructureInput<'_>) -> HashMap<uuid::Uuid, Structure
     intents
 }
 
-fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
-    reconcile_structure_tracked(transaction, None)
+const STRUCTURE_PROJECTION_VERSION: i64 = 1;
+
+/// Refuse component writes until startup establishes a supported baseline.
+pub(crate) fn require_initialized_structure_projection(
+    transaction: &rusqlite::Transaction<'_>,
+) -> CoreResult<()> {
+    let version: i64 = transaction.query_row(
+        "SELECT structure_projection_version FROM store_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if version != STRUCTURE_PROJECTION_VERSION {
+        return Err(CoreError::invalid(format!(
+            "structural projection version {version} is not supported for component updates; initialize the database through db::open"
+        )));
+    }
+    Ok(())
 }
 
-fn reconcile_structure_tracked(
+/// Establish the canonical baseline once before exposing a newly opened store.
+/// Rebuild and marker share a writer transaction; interrupted/failed activation
+/// must retry rather than trusting partially repaired materializations.
+pub(crate) async fn initialize_structure_projection(conn: &Connection) -> Result<bool> {
+    conn.call_domain(|database| -> anyhow::Result<bool> {
+        let transaction =
+            database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = transaction.query_row(
+            "SELECT structure_projection_version FROM store_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if version > STRUCTURE_PROJECTION_VERSION {
+            anyhow::bail!("unsupported structural projection version {version}");
+        }
+        if version == STRUCTURE_PROJECTION_VERSION {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        reconcile_structure(&transaction)?;
+        transaction.execute(
+            "UPDATE store_state SET structure_projection_version = ?1 WHERE singleton = 1",
+            [STRUCTURE_PROJECTION_VERSION],
+        )?;
+        transaction.commit()?;
+        tracing::info!(
+            version = STRUCTURE_PROJECTION_VERSION,
+            "initialized structural projection baseline"
+        );
+        Ok(true)
+    })
+    .await
+}
+
+fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    reconcile_structure_with_mode(
+        transaction,
+        StructureProjectionMode::Full,
+        &StructureDirty::default(),
+        None,
+    )
+    .map(|_| ())
+}
+
+fn load_full_structure(
     transaction: &rusqlite::Transaction<'_>,
-    mut changes: Option<&mut ChangeTracker>,
-) -> rusqlite::Result<()> {
-    let started = std::time::Instant::now();
+) -> rusqlite::Result<OwnedStructureInput> {
     let existing = {
         let mut statement = transaction.prepare(
             "SELECT uuid, existence_hlc, page_uuid, parent_uuid, order_key, structure_hlc,
@@ -2625,6 +2807,37 @@ fn reconcile_structure_tracked(
             .inspect(|_| intents_read += 1)
             .collect::<rusqlite::Result<HashMap<_, _>>>()?
     };
+    let stats = StructureLoadStats {
+        blocks_read: existing.len(),
+        pages_read: pages.len(),
+        intents_read,
+        vertices_visited: existing.len(),
+        seed_rows_read: 0,
+    };
+    Ok(OwnedStructureInput {
+        existing,
+        pages,
+        intents,
+        stats,
+    })
+}
+
+fn reconcile_structure_with_mode(
+    transaction: &rusqlite::Transaction<'_>,
+    mode: StructureProjectionMode,
+    seeds: &StructureDirty,
+    mut changes: Option<&mut ChangeTracker>,
+) -> rusqlite::Result<StructureLoadStats> {
+    let started = std::time::Instant::now();
+    let OwnedStructureInput {
+        existing,
+        pages,
+        intents,
+        stats,
+    } = match mode {
+        StructureProjectionMode::Full => load_full_structure(transaction)?,
+        StructureProjectionMode::Components => structure::load_components(transaction, seeds)?,
+    };
     let read = started.elapsed();
     let resolving = std::time::Instant::now();
     let intents = resolve_structure(StructureInput {
@@ -2637,11 +2850,8 @@ fn reconcile_structure_tracked(
     let mut blocks_written = 0usize;
     for (uuid, intent) in intents {
         let updated_at = sql_hlc(intent.hlc.clone(), 4)?.timestamp_seconds();
-        // Reconciliation walks every block in the workspace, but a structural operation changes
-        // the placement of a handful of them; the rest resolve to exactly the row that is already
-        // stored. Writing those anyway costs an index update each on a table that grows with the
-        // workspace, in one transaction, on the single connection every other query waits behind —
-        // which is how appending one line to a journal came to block the app for minutes.
+        // Full recovery and component loading share the same write boundary:
+        // unchanged materializations must not churn indexes or timestamps.
         if existing.get(&uuid).is_some_and(|row| {
             row.page_uuid == intent.page_uuid
                 && row.parent_uuid == intent.parent_uuid
@@ -2671,9 +2881,12 @@ fn reconcile_structure_tracked(
         blocks_written += 1;
     }
     tracing::debug!(
-        blocks_read = existing.len(),
-        pages_read = pages.len(),
-        intents_read,
+        ?mode,
+        blocks_read = stats.blocks_read,
+        pages_read = stats.pages_read,
+        intents_read = stats.intents_read,
+        vertices_visited = stats.vertices_visited,
+        seed_rows_read = stats.seed_rows_read,
         blocks_written,
         read_ms = read.as_secs_f64() * 1000.0,
         resolve_ms = resolve.as_secs_f64() * 1000.0,
@@ -2681,7 +2894,7 @@ fn reconcile_structure_tracked(
         structure_ms = started.elapsed().as_secs_f64() * 1000.0,
         "structure projection completed"
     );
-    Ok(())
+    Ok(stats)
 }
 
 fn break_structure_cycles(intents: &mut HashMap<uuid::Uuid, StructureIntent>) {

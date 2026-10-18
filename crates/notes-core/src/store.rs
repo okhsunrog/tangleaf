@@ -26,6 +26,8 @@ pub struct Committed<T> {
     /// None for a command that made no write, such as Undo on an empty stack.
     pub commit_version: Option<i64>,
     pub(crate) operations: Vec<OpKind>,
+    #[cfg(test)]
+    pub(crate) projection_stats: DeferredApplyStats,
 }
 
 /// Shares the existing SQLite worker; it does not open another connection.
@@ -33,13 +35,18 @@ pub struct Committed<T> {
 pub struct NotesStore {
     connection: Connection,
     observer: Option<Arc<CommitObserver>>,
+    structure_mode: operation::StructureProjectionMode,
 }
 
 impl NotesStore {
+    /// Wrap a writer initialized by [`db::open`] or [`db::open_in_memory`].
+    /// Initialization establishes the canonical structural projection before
+    /// commands start maintaining only affected components.
     pub fn new(connection: Connection) -> Self {
         Self {
             connection,
             observer: None,
+            structure_mode: operation::StructureProjectionMode::Components,
         }
     }
 
@@ -73,18 +80,24 @@ impl NotesStore {
         E: Into<anyhow::Error> + Send + 'static,
     {
         let observer = self.observer.clone();
+        let structure_mode = self.structure_mode;
         self.connection
             .call_domain(move |database| -> anyhow::Result<Committed<T>> {
                 let started = std::time::Instant::now();
                 // Preserve the existing deferred lock policy during migration.
                 // Changing writer acquisition is a separate concurrency change.
                 let sql = database.transaction()?;
+                if structure_mode == operation::StructureProjectionMode::Components {
+                    operation::require_initialized_structure_projection(&sql)?;
+                }
                 let mut transaction = NotesTransaction {
                     sql: &sql,
                     changes: ChangeSet::default(),
                     operations: Vec::new(),
+                    projection_stats: DeferredApplyStats::default(),
                     applied: false,
                     failed: false,
+                    structure_mode,
                 };
                 let value = command(&mut transaction).map_err(Into::into)?;
                 if transaction.failed {
@@ -93,11 +106,12 @@ impl NotesStore {
                 let NotesTransaction {
                     changes,
                     operations,
+                    projection_stats,
                     ..
                 } = transaction;
                 let commit_version = if !operations.is_empty() || !changes.is_empty() {
                     Some(sql.query_row(
-                        "UPDATE store_commit_clock SET version = version + 1
+                        "UPDATE store_state SET version = version + 1
                          WHERE singleton = 1 RETURNING version",
                         [],
                         |row| row.get(0),
@@ -124,6 +138,14 @@ impl NotesStore {
                 tracing::debug!(
                     operations = operations.len(),
                     commit_version,
+                    structure_reconciliations = projection_stats.structure_reconciliations,
+                    full_structure_reconciliations =
+                        projection_stats.full_structure_reconciliations,
+                    structure_blocks_read = projection_stats.structure_blocks_read,
+                    structure_intents_read = projection_stats.structure_intents_read,
+                    structure_pages_read = projection_stats.structure_pages_read,
+                    structure_vertices_visited = projection_stats.structure_vertices_visited,
+                    structure_seed_rows_read = projection_stats.structure_seed_rows_read,
                     commit_ms = commit.as_secs_f64() * 1000.0,
                     transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
                     "store transaction completed"
@@ -133,6 +155,8 @@ impl NotesStore {
                     changes,
                     commit_version,
                     operations,
+                    #[cfg(test)]
+                    projection_stats,
                 })
             })
             .await
@@ -146,8 +170,10 @@ pub(crate) struct NotesTransaction<'tx, 'connection> {
     sql: &'tx rusqlite::Transaction<'connection>,
     changes: ChangeSet,
     operations: Vec<OpKind>,
+    projection_stats: DeferredApplyStats,
     applied: bool,
     failed: bool,
+    structure_mode: operation::StructureProjectionMode,
 }
 
 impl<'connection> NotesTransaction<'_, 'connection> {
@@ -178,11 +204,13 @@ impl<'connection> NotesTransaction<'_, 'connection> {
                     "ink writes have not migrated to the text store",
                 ));
             }
-            let applied = operation::apply_local_kinds_tracked(self.sql, kinds, policy)?;
+            let applied =
+                operation::apply_local_kinds_tracked(self.sql, kinds, policy, self.structure_mode)?;
             let history_changed = self.changes.history_changed;
             self.changes = applied.changes;
             self.changes.history_changed |= history_changed;
             self.operations = applied.operations.into_iter().map(|op| op.kind).collect();
+            self.projection_stats = applied.stats;
             self.applied = true;
             Ok(applied.stats)
         })();
@@ -257,11 +285,7 @@ mod tests {
 
     async fn clock(connection: &Connection) -> i64 {
         connection
-            .call(|db| {
-                db.query_row("SELECT version FROM store_commit_clock", [], |row| {
-                    row.get(0)
-                })
-            })
+            .call(|db| db.query_row("SELECT version FROM store_state", [], |row| row.get(0)))
             .await
             .unwrap()
     }
@@ -305,9 +329,7 @@ mod tests {
             // A separate connection sees committed facts, never uncommitted state.
             let reader = rusqlite::Connection::open(&path).unwrap();
             let version: i64 = reader
-                .query_row("SELECT version FROM store_commit_clock", [], |row| {
-                    row.get(0)
-                })
+                .query_row("SELECT version FROM store_state", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(version, notice.commit_version);
             for change in &notice.changes.blocks {
@@ -333,6 +355,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(split.commit_version, Some(1));
+        assert_eq!(split.projection_stats.structure_reconciliations, 1);
         assert_eq!(split.changes.affected_pages, vec![block.page_uuid]);
         assert!(split.changes.changed_pages.is_empty());
         assert_eq!(split.changes.blocks.len(), 3);
@@ -348,6 +371,7 @@ mod tests {
         let undo = store.undo().await.unwrap();
         assert_eq!(undo.value, HistoryMoveResult::Applied);
         assert_eq!(undo.commit_version, Some(2));
+        assert_eq!(undo.projection_stats.structure_reconciliations, 1);
         assert_eq!(
             undo.changes
                 .blocks
@@ -359,6 +383,7 @@ mod tests {
         let redo = store.redo().await.unwrap();
         assert_eq!(redo.value, HistoryMoveResult::Applied);
         assert_eq!(redo.commit_version, Some(3));
+        assert_eq!(redo.projection_stats.structure_reconciliations, 1);
         assert_eq!(
             observed
                 .lock()
@@ -387,6 +412,120 @@ mod tests {
                 .unwrap()
                 .commit_version,
             Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn store_rejects_uninitialized_structure_projection_before_planning_and_publishing() {
+        let (_directory, connection, block) = fixture().await;
+        let other = db::create_note(&connection, Some("Unrelated source".into()))
+            .await
+            .unwrap()
+            .into_created()
+            .unwrap();
+        let wrong_page = db::create_page(&connection, "Stale placement".into())
+            .await
+            .unwrap();
+        let unrelated_uuid = other.initial_block.uuid;
+        connection
+            .call(move |database| {
+                database.execute(
+                    "UPDATE blocks SET page_uuid = ?2 WHERE uuid = ?1",
+                    rusqlite::params![unrelated_uuid, wrong_page.uuid],
+                )?;
+                database.execute(
+                    "UPDATE store_state SET structure_projection_version = 0",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let notices = observed.clone();
+        let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
+            notices.lock().unwrap().push(notice.clone());
+        });
+        let before = state(&connection).await;
+
+        let error = store
+            .split_block(block.uuid, parts(), block.markdown_revision.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("structural projection version 0")
+        );
+        assert_eq!(state(&connection).await, before);
+        assert!(observed.lock().unwrap().is_empty());
+
+        assert!(
+            operation::initialize_structure_projection(&connection)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            db::get_block(&connection, unrelated_uuid)
+                .await
+                .unwrap()
+                .unwrap()
+                .page_uuid,
+            other.page.uuid
+        );
+        assert!(
+            observed.lock().unwrap().is_empty(),
+            "startup repair does not publish a user command"
+        );
+        store
+            .split_block(block.uuid, parts(), block.markdown_revision)
+            .await
+            .unwrap();
+        assert_eq!(observed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn store_rejects_future_structure_projection_before_mutation() {
+        let (_directory, connection, block) = fixture().await;
+        connection
+            .call(|database| {
+                database.execute(
+                    "UPDATE store_state SET structure_projection_version = 2",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let notices = observed.clone();
+        let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
+            notices.lock().unwrap().push(notice.clone());
+        });
+        let before = state(&connection).await;
+
+        let error = store
+            .split_block(block.uuid, parts(), block.markdown_revision)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("structural projection version 2")
+        );
+        assert_eq!(state(&connection).await, before);
+        assert!(observed.lock().unwrap().is_empty());
+        assert_eq!(
+            connection
+                .call(|database| database.query_row(
+                    "SELECT structure_projection_version FROM store_state",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                ))
+                .await
+                .unwrap(),
+            2
         );
     }
 
@@ -463,7 +602,7 @@ mod tests {
         connection
             .call(|db| {
                 db.execute_batch(
-                    "CREATE TEMP TRIGGER reject_clock BEFORE UPDATE ON store_commit_clock
+                    "CREATE TEMP TRIGGER reject_clock BEFORE UPDATE ON store_state
              BEGIN SELECT RAISE(ABORT, 'injected clock failure'); END;",
                 )
             })
@@ -586,6 +725,123 @@ mod tests {
                 .markdown,
             "Accepted"
         );
+    }
+
+    #[tokio::test]
+    async fn page_delete_counts_seed_reads_without_requesting_a_new_projection() {
+        let (_directory, connection, block) = fixture().await;
+        let store = NotesStore::new(connection.clone());
+        let deleted = store
+            .write(move |write| -> CoreResult<()> {
+                write.apply_action(
+                    "delete page",
+                    vec![OpKind::PageDelete(crate::PageDelete {
+                        uuid: block.page_uuid,
+                    })],
+                    ProjectionPolicy::Deferred,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted.projection_stats.structure_reconciliations, 0);
+        assert!(deleted.projection_stats.structure_seed_rows_read > 0);
+        assert_eq!(deleted.changes.deleted_pages, vec![block.page_uuid]);
+        assert!(
+            db::get_page(&connection, block.page_uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    async fn assert_split_component_scope(unrelated_blocks: usize) {
+        let (_directory, connection, block) = fixture().await;
+        let unrelated = db::create_page(&connection, "Unrelated".into())
+            .await
+            .unwrap();
+        let kinds = (0..unrelated_blocks)
+            .map(|index| {
+                OpKind::BlockCreate(crate::BlockCreate {
+                    uuid: uuid::Uuid::now_v7(),
+                    page_uuid: unrelated.uuid,
+                    parent_uuid: None,
+                    order_key: crate::OrderKey::from_ordinal(index + 1),
+                    style: BlockStyle::Bullet,
+                    markdown: format!("Unrelated {index}"),
+                    created_at: 1,
+                })
+            })
+            .collect();
+        connection
+            .call_domain(move |database| -> CoreResult<()> {
+                let tx = database.transaction()?;
+                operation::apply_local_kinds_deferred_in_transaction(&tx, kinds)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut store = NotesStore::new(connection.clone());
+        store.structure_mode = operation::StructureProjectionMode::Components;
+        let parts = (0..243)
+            .map(|index| BlockContent {
+                markdown: format!("Part {index}"),
+            })
+            .collect();
+        let split = store
+            .split_block(block.uuid, parts, block.markdown_revision)
+            .await
+            .unwrap();
+        assert_eq!(split.value.len(), 243);
+        assert_eq!(split.projection_stats.structure_reconciliations, 1);
+        assert_eq!(split.projection_stats.full_structure_reconciliations, 0);
+        // Only the 242 new roots need resolution. Updating the existing first
+        // block's Markdown does not introduce a structural dependency.
+        assert_eq!(split.projection_stats.structure_blocks_read, 242);
+        assert_eq!(split.projection_stats.structure_intents_read, 242);
+        assert_eq!(split.projection_stats.structure_pages_read, 1);
+        assert_eq!(split.projection_stats.structure_vertices_visited, 242);
+        assert_eq!(split.projection_stats.structure_seed_rows_read, 0);
+        assert_eq!(split.changes.blocks.len(), 243);
+        let undo = store.undo().await.unwrap();
+        assert_eq!(undo.value, HistoryMoveResult::Applied);
+        assert_eq!(undo.projection_stats.structure_reconciliations, 1);
+        assert_eq!(undo.projection_stats.full_structure_reconciliations, 0);
+        assert_eq!(undo.projection_stats.structure_blocks_read, 0);
+        assert_eq!(undo.projection_stats.structure_intents_read, 0);
+        assert_eq!(undo.projection_stats.structure_vertices_visited, 242);
+        assert_eq!(undo.projection_stats.structure_seed_rows_read, 484);
+        let redo = store.redo().await.unwrap();
+        assert_eq!(redo.value, HistoryMoveResult::Applied);
+        assert_eq!(redo.projection_stats.structure_reconciliations, 1);
+        assert_eq!(redo.projection_stats.full_structure_reconciliations, 0);
+        assert_eq!(redo.projection_stats.structure_blocks_read, 242);
+        assert_eq!(redo.projection_stats.structure_intents_read, 242);
+        assert_eq!(redo.projection_stats.structure_pages_read, 1);
+        let unchanged = db::list_block_children(&connection, unrelated.uuid, None)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.len(), unrelated_blocks);
+        assert!(
+            unchanged
+                .iter()
+                .enumerate()
+                .all(|(index, b)| b.markdown == format!("Unrelated {index}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn split_component_reads_are_independent_of_unrelated_database_size() {
+        for count in [1_000, 10_000] {
+            assert_split_component_scope(count).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit scale validation with 100000 unrelated blocks"]
+    async fn split_component_reads_with_one_hundred_thousand_unrelated_blocks() {
+        assert_split_component_scope(100_000).await;
     }
 
     #[tokio::test]

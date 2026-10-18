@@ -15,7 +15,12 @@ async fn apply(
 ) -> ChangeSet {
     conn.call_domain(move |db| -> crate::CoreResult<_> {
         let tx = db.transaction()?;
-        let applied = apply_local_kinds_tracked(&tx, kinds, policy)?;
+        let applied = apply_local_kinds_tracked(
+            &tx,
+            kinds,
+            policy,
+            crate::operation::StructureProjectionMode::Components,
+        )?;
         tx.commit()?;
         Ok(applied.changes)
     })

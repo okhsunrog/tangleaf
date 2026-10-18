@@ -86,6 +86,7 @@ async fn initialize_connection(conn: Connection) -> Result<Connection> {
     .await?;
     migrations::migrate(&conn).await?;
     workspace::initialize_workspace(&conn).await?;
+    operation::initialize_structure_projection(&conn).await?;
     Ok(conn)
 }
 

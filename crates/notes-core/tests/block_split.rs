@@ -3,34 +3,35 @@ use notes_core::{BlockCreate, BlockStyle, Connection, OpKind, OrderKey};
 use std::cell::Cell;
 
 thread_local! {
-    static TREE_SCANS: Cell<usize> = const { Cell::new(0) };
+    static FULL_TREE_SCANS: Cell<usize> = const { Cell::new(0) };
 }
 
-async fn count_tree_scans(connection: &Connection, start: bool) -> usize {
+async fn count_full_tree_scans(connection: &Connection, start: bool) -> usize {
     connection
         .call(move |database| {
             if start {
-                TREE_SCANS.set(0);
+                FULL_TREE_SCANS.set(0);
                 database.trace_v2(
                     rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
                     Some(|event| {
                         let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
                             return;
                         };
-                        // Count the workspace-wide structural reads, independently
-                        // of machine speed and the size of this test's fixture.
+                        // Guard against a workspace-wide loader in the migrated
+                        // path. Explicit executor stats count projections separately.
                         if statement
                             .sql()
                             .starts_with("SELECT uuid, existence_hlc, page_uuid")
+                            && statement.sql().trim_end().ends_with("FROM blocks")
                         {
-                            TREE_SCANS.set(TREE_SCANS.get() + 1);
+                            FULL_TREE_SCANS.set(FULL_TREE_SCANS.get() + 1);
                         }
                     }),
                 );
             } else {
                 database.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
             }
-            Ok(TREE_SCANS.get())
+            Ok(FULL_TREE_SCANS.get())
         })
         .await
         .unwrap()
@@ -131,7 +132,7 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
         .unwrap();
     let history_before = db::history_status(&connection).await.unwrap().undo_count;
 
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     let split = db::split_block_with_ops(
         &connection,
         source.uuid,
@@ -146,7 +147,7 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
     )
     .await
     .unwrap();
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     assert_eq!(split.operations.len(), 3);
     let result = split.value.0;
     assert_eq!(result[0].uuid, source.uuid);
@@ -199,12 +200,12 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
         1
     );
     replay_and_compare(&connection, &replica, page.uuid).await;
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     assert_eq!(
         db::undo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     assert_eq!(
         db::get_block(&connection, source.uuid)
             .await
@@ -230,12 +231,12 @@ async fn split_preserves_neighbors_and_children_and_replays_with_history() {
             .is_empty()
     );
     replay_and_compare(&connection, &replica, page.uuid).await;
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     assert_eq!(
         db::redo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     replay_and_compare(&connection, &replica, page.uuid).await;
 }
 
@@ -283,7 +284,7 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
             .await
             .unwrap();
         let source = &before[0];
-        count_tree_scans(&connection, true).await;
+        count_full_tree_scans(&connection, true).await;
         let split = db::split_block(
             &connection,
             source.uuid,
@@ -296,7 +297,7 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
         )
         .await
         .unwrap();
-        assert_eq!(count_tree_scans(&connection, false).await, 1);
+        assert_eq!(count_full_tree_scans(&connection, false).await, 0);
         let after = db::list_block_children(&connection, page.uuid, None)
             .await
             .unwrap();
@@ -314,12 +315,12 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
                 .windows(2)
                 .all(|pair| pair[0].order_key < pair[1].order_key)
         );
-        count_tree_scans(&connection, true).await;
+        count_full_tree_scans(&connection, true).await;
         assert_eq!(
             db::undo_history(&connection).await.unwrap(),
             db::HistoryMoveResult::Applied
         );
-        assert_eq!(count_tree_scans(&connection, false).await, 1);
+        assert_eq!(count_full_tree_scans(&connection, false).await, 0);
         let restored = db::list_block_children(&connection, page.uuid, None)
             .await
             .unwrap();
@@ -333,12 +334,12 @@ async fn split_rebalances_only_when_order_key_space_is_exhausted() {
                 .map(|block| (&block.uuid, &block.order_key))
                 .collect::<Vec<_>>()
         );
-        count_tree_scans(&connection, true).await;
+        count_full_tree_scans(&connection, true).await;
         assert_eq!(
             db::redo_history(&connection).await.unwrap(),
             db::HistoryMoveResult::Applied
         );
-        assert_eq!(count_tree_scans(&connection, false).await, 1);
+        assert_eq!(count_full_tree_scans(&connection, false).await, 0);
         assert_eq!(
             db::list_block_children(&connection, page.uuid, None)
                 .await
@@ -359,7 +360,7 @@ async fn single_part_split_does_not_reorder_or_scan_the_tree() {
         .unwrap()
         .into_created()
         .unwrap();
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     let split = db::split_block_with_ops(
         &connection,
         note.initial_block.uuid,
@@ -370,7 +371,7 @@ async fn single_part_split_does_not_reorder_or_scan_the_tree() {
     )
     .await
     .unwrap();
-    assert_eq!(count_tree_scans(&connection, false).await, 0);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     assert_eq!(split.operations.len(), 1);
     assert_eq!(split.value.0[0].order_key, note.initial_block.order_key);
 }
@@ -421,7 +422,7 @@ async fn split_at_end_allocates_new_keys_without_moving_existing_blocks() {
 }
 
 #[tokio::test]
-async fn large_paragraph_split_and_history_each_reconcile_once() {
+async fn large_paragraph_split_and_history_avoid_full_tree_reads() {
     let (_directory, connection) = database().await;
     let page = db::create_page(&connection, "Large split".into())
         .await
@@ -440,7 +441,7 @@ async fn large_paragraph_split_and_history_each_reconcile_once() {
     )
     .await
     .unwrap();
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     let blocks = db::split_block(
         &connection,
         source.uuid,
@@ -453,7 +454,7 @@ async fn large_paragraph_split_and_history_each_reconcile_once() {
     )
     .await
     .unwrap();
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     assert_eq!(
         blocks
             .iter()
@@ -468,12 +469,12 @@ async fn large_paragraph_split_and_history_each_reconcile_once() {
             .len(),
         paragraphs.len()
     );
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     assert_eq!(
         db::undo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     let restored = db::list_block_children(&connection, page.uuid, None)
         .await
         .unwrap();
@@ -486,12 +487,12 @@ async fn large_paragraph_split_and_history_each_reconcile_once() {
             .len(),
         1
     );
-    count_tree_scans(&connection, true).await;
+    count_full_tree_scans(&connection, true).await;
     assert_eq!(
         db::redo_history(&connection).await.unwrap(),
         db::HistoryMoveResult::Applied
     );
-    assert_eq!(count_tree_scans(&connection, false).await, 1);
+    assert_eq!(count_full_tree_scans(&connection, false).await, 0);
     let restored = db::list_block_children(&connection, page.uuid, None)
         .await
         .unwrap();

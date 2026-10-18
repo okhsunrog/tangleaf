@@ -11,6 +11,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/V005__outbox_quarantine.sql")),
         M::up(include_str!("migrations/V006__store_commit_clock.sql")),
         M::up(include_str!("migrations/V007__structure_dependencies.sql")),
+        M::up(include_str!("migrations/V008__store_projection_state.sql")),
     ])
 }
 
@@ -215,8 +216,7 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn v007_upgrade_preserves_all_v006_rows_and_database_integrity() {
+    async fn populated_v006_database() -> (tempfile::NamedTempFile, Connection) {
         use crate::db::{self, BlockContent};
         use crate::{AttachmentOwner, BlobHash, BlockStyle};
 
@@ -273,23 +273,15 @@ mod tests {
         )
         .await
         .unwrap();
-        db::split_block(
+        db::set_block_content(
             &connection,
             source.initial_block.uuid,
-            ["First [[Migration target]]", "Second"]
-                .into_iter()
-                .map(|markdown| BlockContent {
-                    markdown: markdown.into(),
-                })
-                .collect(),
-            source.initial_block.markdown_revision,
+            BlockContent {
+                markdown: "First [[Migration target]]\n\nSecond".into(),
+            },
         )
         .await
         .unwrap();
-        assert_eq!(
-            db::undo_history(&connection).await.unwrap(),
-            db::HistoryMoveResult::Applied
-        );
         let ink_page =
             db::create_handwritten_note_with_ops(&connection, Some("Existing ink".into()))
                 .await
@@ -313,11 +305,35 @@ mod tests {
                 WHERE rowid = (SELECT MIN(rowid) FROM sync_outbox)",
                     [],
                 )?;
+                // Populate both old-schema stacks without invoking commands
+                // whose current executor now requires store_state from V008.
+                database.execute_batch(
+                    "INSERT INTO history_redo(action_uuid, action, forward_json, inverse_json, created_at)
+                     SELECT action_uuid, action, forward_json, inverse_json, created_at
+                       FROM history_undo ORDER BY id DESC LIMIT 1;
+                     DELETE FROM history_undo WHERE id = (SELECT MAX(id) FROM history_undo);",
+                )?;
                 Ok(())
             })
             .await
             .unwrap();
+        (file, connection)
+    }
 
+    async fn migrate_to_version(connection: &Connection, version: usize) {
+        connection
+            .call(move |database| {
+                migrations()
+                    .to_version(database, version)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v007_upgrade_preserves_all_v006_rows_and_database_integrity() {
+        let (_file, connection) = populated_v006_database().await;
         let before = persistent_rows(&connection).await;
         for table in [
             "blocks",
@@ -332,7 +348,7 @@ mod tests {
         ] {
             assert!(!before[table].is_empty(), "fixture must populate {table}");
         }
-        migrate(&connection).await.unwrap();
+        migrate_to_version(&connection, 7).await;
         assert_eq!(persistent_rows(&connection).await, before);
         connection
             .call(|database| {
@@ -355,7 +371,87 @@ mod tests {
             })
             .await
             .unwrap();
-        migrate(&connection).await.unwrap();
+        migrate_to_version(&connection, 7).await;
         assert_eq!(persistent_rows(&connection).await, before);
+    }
+
+    #[tokio::test]
+    async fn v008_preserves_commit_order_and_content_and_requires_runtime_projection_activation() {
+        use rusqlite::types::Value;
+
+        let (_file, connection) = populated_v006_database().await;
+        migrate_to_version(&connection, 7).await;
+        connection
+            .call(|database| {
+                database.execute(
+                    "UPDATE store_commit_clock SET version = 37 WHERE singleton = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut before = persistent_rows(&connection).await;
+        assert_eq!(
+            before.remove("store_commit_clock").unwrap(),
+            [vec![Value::Integer(1), Value::Integer(37)]]
+        );
+
+        migrate_to_version(&connection, 8).await;
+
+        let mut after = persistent_rows(&connection).await;
+        assert!(!after.contains_key("store_commit_clock"));
+        assert_eq!(
+            after.remove("store_state").unwrap(),
+            [vec![
+                Value::Integer(1),
+                Value::Integer(37),
+                Value::Integer(0)
+            ]]
+        );
+        assert_eq!(
+            after, before,
+            "all other persistent rows must survive unchanged"
+        );
+        connection
+            .call(|database| {
+                assert_eq!(
+                    database
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+                    8
+                );
+                assert!(
+                    database
+                        .execute(
+                            "UPDATE store_state SET structure_projection_version = -1",
+                            []
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    database.query_row(
+                        "SELECT structure_projection_version FROM store_state WHERE singleton = 1",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    0
+                );
+                let foreign_key_errors = database
+                    .prepare("PRAGMA foreign_key_check")?
+                    .query_map([], |_| Ok(()))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert!(foreign_key_errors.is_empty());
+                let integrity = database
+                    .prepare("PRAGMA integrity_check")?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert_eq!(integrity, ["ok"]);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let once = persistent_rows(&connection).await;
+        migrate_to_version(&connection, 8).await;
+        assert_eq!(persistent_rows(&connection).await, once);
     }
 }

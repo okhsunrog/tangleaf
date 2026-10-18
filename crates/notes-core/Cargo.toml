@@ -13,7 +13,7 @@ async-channel.workspace = true
 chrono.workspace = true
 notes-blob.workspace = true
 notes-markdown.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["cache"] }
 rusqlite_migration.workspace = true
 rust-stemmers.workspace = true
 serde.workspace = true

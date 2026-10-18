@@ -911,12 +911,6 @@ pub(crate) fn move_history_in_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-
-    thread_local! {
-        static TREE_SCANS: Cell<usize> = const { Cell::new(0) };
-    }
-
     #[derive(Clone, Copy)]
     enum StoredPolicy {
         BareOperations,
@@ -992,32 +986,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn tree_scan_count(connection: &Connection, start: bool) -> usize {
-        connection
-            .call(move |database| {
-                if start {
-                    TREE_SCANS.set(0);
-                    database.trace_v2(
-                        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-                        Some(|event| {
-                            if let rusqlite::trace::TraceEvent::Stmt(statement, _) = event
-                                && statement
-                                    .sql()
-                                    .starts_with("SELECT uuid, existence_hlc, page_uuid")
-                            {
-                                TREE_SCANS.set(TREE_SCANS.get() + 1);
-                            }
-                        }),
-                    );
-                } else {
-                    database.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
-                }
-                Ok(TREE_SCANS.get())
-            })
-            .await
-            .unwrap()
-    }
-
     async fn assert_stored_policy(
         connection: &Connection,
         table: &'static str,
@@ -1045,17 +1013,19 @@ mod tests {
     async fn assert_split_history_policy(
         policy: StoredPolicy,
         action: &str,
-        expected_scans: usize,
+        expected_projections: u32,
     ) {
         let (connection, page_uuid) = split_fixture().await;
         rewrite_split_entry(&connection, action, policy).await;
 
-        tree_scan_count(&connection, true).await;
+        let store = crate::store::NotesStore::new(connection.clone());
+        let undo = store.undo().await.unwrap();
+        assert_eq!(undo.value, HistoryMoveResult::Applied);
         assert_eq!(
-            undo_history(&connection).await.unwrap(),
-            HistoryMoveResult::Applied
+            undo.projection_stats.structure_reconciliations,
+            expected_projections
         );
-        assert_eq!(tree_scan_count(&connection, false).await, expected_scans);
+        assert_eq!(undo.projection_stats.full_structure_reconciliations, 0);
         assert_eq!(
             list_block_children(&connection, page_uuid, None)
                 .await
@@ -1063,19 +1033,20 @@ mod tests {
                 .markdown,
             "one\n\ntwo\n\nthree\n\nfour"
         );
-        let expected_policy = if expected_scans == 1 {
+        let expected_policy = if expected_projections == 1 {
             ProjectionPolicy::Deferred
         } else {
             ProjectionPolicy::Immediate
         };
         assert_stored_policy(&connection, "history_redo", expected_policy).await;
 
-        tree_scan_count(&connection, true).await;
+        let redo = store.redo().await.unwrap();
+        assert_eq!(redo.value, HistoryMoveResult::Applied);
         assert_eq!(
-            redo_history(&connection).await.unwrap(),
-            HistoryMoveResult::Applied
+            redo.projection_stats.structure_reconciliations,
+            expected_projections
         );
-        assert_eq!(tree_scan_count(&connection, false).await, expected_scans);
+        assert_eq!(redo.projection_stats.full_structure_reconciliations, 0);
         assert_eq!(
             list_block_children(&connection, page_uuid, None)
                 .await
