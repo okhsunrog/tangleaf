@@ -529,7 +529,7 @@ fn ink_body_rows(path: &std::path::Path) -> (i64, i64) {
 }
 
 #[tokio::test]
-async fn deleting_a_note_purges_its_drawing_on_every_replica() {
+async fn deleting_a_note_purges_live_ink_and_retains_local_bodies_only_for_history() {
     let dir = tempfile::tempdir().unwrap();
     let lp = dir.path().join("left.db");
     let rp = dir.path().join("right.db");
@@ -562,6 +562,7 @@ async fn deleting_a_note_purges_its_drawing_on_every_replica() {
         let (records, chunks) = ink_body_rows(path);
         assert!(records > 0 && chunks > 0, "the note has bodies to lose");
     }
+    let retained_bodies = ink_body_rows(&lp);
 
     assert!(db::delete_page(&l, id).await.unwrap().is_some());
 
@@ -583,12 +584,17 @@ async fn deleting_a_note_purges_its_drawing_on_every_replica() {
     .await
     .unwrap();
 
+    assert_eq!(
+        ink_body_rows(&lp),
+        retained_bodies,
+        "local Undo owns the immutable bodies"
+    );
+    assert_eq!(
+        ink_body_rows(&rp),
+        (0, 0),
+        "remote deletion creates no local history owner"
+    );
     for (path, conn) in [(&lp, &l), (&rp, &r)] {
-        assert_eq!(
-            ink_body_rows(path),
-            (0, 0),
-            "a deleted note leaves no records or chunks behind"
-        );
         assert!(
             notes_core::export_sync_snapshot(conn, 0)
                 .await
@@ -596,6 +602,12 @@ async fn deleting_a_note_purges_its_drawing_on_every_replica() {
                 .ink_versions
                 .is_empty(),
             "a deleted note is not exported as a published version"
+        );
+        let archive = db::export_archive(conn).await.unwrap();
+        assert!(archive.ink.documents.is_empty());
+        assert!(
+            archive.ink_blobs.is_empty(),
+            "local recovery pins are not live archive data"
         );
         let sql = rusqlite::Connection::open(path).unwrap();
         for table in [
@@ -610,10 +622,34 @@ async fn deleting_a_note_purges_its_drawing_on_every_replica() {
             assert_eq!(rows, 0, "{table} still holds rows for the deleted note");
         }
     }
-    assert!(
-        Store::new(&lp, id).read().is_err()
-            || Store::new(&lp, id).read().unwrap().draft.strokes.is_empty()
+    assert!(left.read().is_err());
+    assert!(right.read().is_err());
+    assert_eq!(
+        db::undo_history(&l).await.unwrap(),
+        db::HistoryMoveResult::Applied
     );
+    assert_eq!(left.read().unwrap().draft.strokes.len(), 2);
+    assert_eq!(db::history_status(&l).await.unwrap().redo_count, 1);
+    assert_eq!(
+        db::redo_history(&l).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert_eq!(
+        ink_body_rows(&lp),
+        retained_bodies,
+        "Redo still owns its recovery bodies"
+    );
+
+    // Snapshot replacement intentionally clears both local history stacks.
+    // With no live drawing or history owner, its bodies must be collectible.
+    let snapshot = notes_core::export_sync_snapshot(&l, 0).await.unwrap();
+    notes_core::import_sync_snapshot(&l, snapshot)
+        .await
+        .unwrap();
+    assert_eq!(db::history_status(&l).await.unwrap().undo_count, 0);
+    assert_eq!(db::history_status(&l).await.unwrap().redo_count, 0);
+    assert_eq!(ink_body_rows(&lp), (0, 0));
+    assert_eq!(ink_body_rows(&rp), (0, 0));
 }
 
 /// Undo followed by redo leaves the document exactly where it started, but marks

@@ -1229,6 +1229,7 @@ pub async fn import_sync_snapshot(conn: &Connection, snapshot: SyncSnapshot) -> 
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [snapshot.seq.to_string()],
         )?;
+        crate::ink::history_retention::cleanup(&transaction)?;
         transaction.commit()?;
         Ok(())
     })

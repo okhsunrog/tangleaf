@@ -440,6 +440,7 @@ where
         }
         transaction.execute("DELETE FROM history_undo", [])?;
         transaction.execute("DELETE FROM history_redo", [])?;
+        crate::ink::history_retention::cleanup(&transaction)?;
         precommit()?;
         transaction.commit()?;
         Ok(stats)

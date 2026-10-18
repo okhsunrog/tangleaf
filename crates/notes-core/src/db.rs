@@ -287,13 +287,13 @@ pub(crate) fn apply_local_action_in_transaction(
     action: &str,
     kinds: Vec<OpKind>,
 ) -> crate::CoreResult<()> {
-    let inverse = history::capture_inverse_kinds(transaction, &kinds)?;
+    let prepared = history::prepare_action(transaction, &kinds)?;
     operation::apply_local_kinds_in_transaction(transaction, kinds.clone())?;
-    history::record_action(
+    history::record_prepared_action(
         transaction,
         action,
         kinds,
-        inverse,
+        prepared,
         operation::ProjectionPolicy::Immediate,
     )?;
     Ok(())

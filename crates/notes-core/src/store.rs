@@ -204,15 +204,43 @@ impl<'connection> NotesTransaction<'_, 'connection> {
         kinds: Vec<OpKind>,
         policy: ProjectionPolicy,
     ) -> CoreResult<DeferredApplyStats> {
+        self.apply_kinds(kinds, policy, false)
+    }
+
+    /// The history module alone constructs a validated restoration plan. Normal
+    /// commands cannot use this boundary to publish arbitrary ink versions.
+    pub(crate) fn apply_history_restore(
+        &mut self,
+        plan: &db::history::HistoryRestorePlan,
+        policy: ProjectionPolicy,
+    ) -> CoreResult<DeferredApplyStats> {
+        let result = (|| {
+            let stats = self.apply_kinds(plan.operations().to_vec(), policy, true)?;
+            plan.restore_native(self.sql)?;
+            Ok(stats)
+        })();
+        // Native metadata belongs to the same restoration as its replicated
+        // operations. Catching a late failure cannot authorize a partial commit.
+        self.failed |= result.is_err();
+        result
+    }
+
+    fn apply_kinds(
+        &mut self,
+        kinds: Vec<OpKind>,
+        policy: ProjectionPolicy,
+        history_restore: bool,
+    ) -> CoreResult<DeferredApplyStats> {
         let result = (|| {
             if self.failed || self.applied {
                 return Err(CoreError::invalid(
                     "a store command must apply one ordered batch",
                 ));
             }
-            if kinds
-                .iter()
-                .any(|kind| matches!(kind, OpKind::InkPublish(_)))
+            if !history_restore
+                && kinds
+                    .iter()
+                    .any(|kind| matches!(kind, OpKind::InkPublish(_)))
             {
                 return Err(CoreError::invalid(
                     "ink writes have not migrated to the text store",
@@ -239,10 +267,10 @@ impl<'connection> NotesTransaction<'_, 'connection> {
         policy: ProjectionPolicy,
     ) -> CoreResult<DeferredApplyStats> {
         let result = (|| {
-            let inverse = db::history::capture_inverse_kinds(self.sql, &kinds)?;
-            let has_history = !inverse.is_empty();
+            let prepared = db::history::prepare_action(self.sql, &kinds)?;
+            let has_history = prepared.has_history();
             let stats = self.apply_local(kinds.clone(), policy)?;
-            db::history::record_action(self.sql, action, kinds, inverse, policy)?;
+            db::history::record_prepared_action(self.sql, action, kinds, prepared, policy)?;
             if has_history {
                 self.mark_history_changed();
             }

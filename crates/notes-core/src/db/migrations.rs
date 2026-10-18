@@ -12,6 +12,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/V006__store_commit_clock.sql")),
         M::up(include_str!("migrations/V007__structure_dependencies.sql")),
         M::up(include_str!("migrations/V008__store_projection_state.sql")),
+        M::up(include_str!("migrations/V009__history_ink_retention.sql")),
     ])
 }
 
@@ -500,6 +501,54 @@ mod tests {
             .unwrap();
         let once = persistent_rows(&connection).await;
         migrate_to_version(&connection, 8).await;
+        assert_eq!(persistent_rows(&connection).await, once);
+    }
+
+    #[tokio::test]
+    async fn v009_adds_empty_history_retention_without_changing_existing_data() {
+        let (_file, connection) = populated_v006_database().await;
+        migrate_to_version(&connection, 8).await;
+        connection
+            .call(|database| {
+                database.execute(
+                    "UPDATE store_state SET version=73,structure_projection_version=1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before = persistent_rows(&connection).await;
+        migrate_to_version(&connection, 9).await;
+        let mut after = persistent_rows(&connection).await;
+        assert!(after.remove("history_ink_snapshots").unwrap().is_empty());
+        assert!(after.remove("history_ink_roots").unwrap().is_empty());
+        assert_eq!(after, before);
+        connection
+            .call(|database| {
+                assert_eq!(
+                    database
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+                    9
+                );
+                assert!(
+                    database
+                        .prepare("PRAGMA foreign_key_check")?
+                        .query_map([], |_| Ok(()))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                        .is_empty()
+                );
+                assert_eq!(
+                    database
+                        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?,
+                    "ok"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let once = persistent_rows(&connection).await;
+        migrate_to_version(&connection, 9).await;
         assert_eq!(persistent_rows(&connection).await, once);
     }
 }

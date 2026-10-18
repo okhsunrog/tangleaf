@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 type HistoryRow = (i64, uuid::Uuid, String, String, String);
 const HISTORY_PAYLOAD_VERSION: u32 = 2;
+const INK_HISTORY_PAYLOAD_VERSION: u32 = 3;
+use crate::ink::history_retention;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +71,10 @@ struct HistoryGuard {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 enum HistoryScopeGuard {
+    InkState {
+        page_uuid: uuid::Uuid,
+        expected: history_retention::SemanticState,
+    },
     PageBlocks {
         page_uuid: uuid::Uuid,
         expected_block_uuids: Vec<uuid::Uuid>,
@@ -88,6 +94,8 @@ struct GuardedHistoryPayload {
     guards: Vec<HistoryGuard>,
     #[serde(default)]
     scope_guards: Vec<HistoryScopeGuard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ink_restore_pages: Vec<uuid::Uuid>,
 }
 
 impl GuardedHistoryPayload {
@@ -118,7 +126,15 @@ fn encode_history_payload(payload: &GuardedHistoryPayload) -> serde_json::Result
 fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPayload> {
     match operation::decode_persisted_envelope::<StoredHistoryPayload>(value)? {
         StoredHistoryPayload::Guarded(payload)
-            if payload.history_format_version == HISTORY_PAYLOAD_VERSION =>
+            if matches!(
+                payload.history_format_version,
+                HISTORY_PAYLOAD_VERSION | INK_HISTORY_PAYLOAD_VERSION
+            ) && (payload.history_format_version == INK_HISTORY_PAYLOAD_VERSION
+                || (payload.ink_restore_pages.is_empty()
+                    && !payload
+                        .scope_guards
+                        .iter()
+                        .any(|scope| matches!(scope, HistoryScopeGuard::InkState { .. })))) =>
         {
             Ok(payload)
         }
@@ -136,8 +152,84 @@ fn decode_history_payload(value: &str) -> serde_json::Result<GuardedHistoryPaylo
             // behavior once; the entry becomes guarded when moved to the opposite stack.
             guards: Vec::new(),
             scope_guards: Vec::new(),
+            ink_restore_pages: Vec::new(),
         }),
     }
+}
+
+pub(crate) struct PreparedAction {
+    action_uuid: uuid::Uuid,
+    inverse: Vec<OpKind>,
+    ink_restore_pages: Vec<uuid::Uuid>,
+}
+
+impl PreparedAction {
+    pub(crate) fn has_history(&self) -> bool {
+        !self.inverse.is_empty()
+    }
+}
+
+pub(crate) fn prepare_action(
+    transaction: &rusqlite::Transaction<'_>,
+    forward: &[OpKind],
+) -> crate::CoreResult<PreparedAction> {
+    let inverse = capture_inverse_kinds(transaction, forward)?;
+    let action_uuid = uuid::Uuid::now_v7();
+    let mut ink_restore_pages = Vec::new();
+    for operation in forward {
+        if let OpKind::PageDelete(payload) = operation
+            && history_retention::is_ink_page(transaction, payload.uuid)?
+            && !ink_restore_pages.contains(&payload.uuid)
+        {
+            history_retention::capture(transaction, action_uuid, payload.uuid)?;
+            ink_restore_pages.push(payload.uuid);
+        }
+    }
+    Ok(PreparedAction {
+        action_uuid,
+        inverse,
+        ink_restore_pages,
+    })
+}
+
+/// Only history validation can construct this plan. Store accepts its ink
+/// operations without exposing a general allow-ink switch to other commands.
+pub(crate) struct HistoryRestorePlan {
+    operations: Vec<OpKind>,
+    ink: history_retention::Restore,
+}
+
+impl HistoryRestorePlan {
+    pub(crate) fn operations(&self) -> &[OpKind] {
+        &self.operations
+    }
+
+    pub(crate) fn restore_native(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> crate::CoreResult<()> {
+        self.ink.restore_native(transaction)
+    }
+}
+
+pub(crate) fn record_prepared_action(
+    transaction: &rusqlite::Transaction<'_>,
+    action: &str,
+    forward: Vec<OpKind>,
+    prepared: PreparedAction,
+    policy: ProjectionPolicy,
+) -> crate::CoreResult<()> {
+    record_action_with_id(
+        transaction,
+        action,
+        forward,
+        prepared.inverse,
+        policy,
+        prepared.action_uuid,
+        prepared.ink_restore_pages,
+    )?;
+    history_retention::cleanup(transaction)?;
+    Ok(())
 }
 
 pub(crate) fn capture_inverse_kinds(
@@ -407,7 +499,26 @@ fn capture_history_scope_guards(
     let mut scopes = Vec::new();
     let mut seen_pages = HashSet::new();
     let mut seen_blocks = HashSet::new();
+    let mut seen_ink = HashSet::new();
     for operation in operations {
+        let ink_page = match operation {
+            OpKind::PageDelete(payload) => Some(payload.uuid),
+            OpKind::PageCreate(payload) if payload.kind == PageKind::Handwriting => {
+                Some(payload.uuid)
+            }
+            _ => None,
+        };
+        if let Some(page_uuid) = ink_page
+            && seen_ink.insert(page_uuid)
+            && history_retention::is_ink_page(database, page_uuid)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+        {
+            scopes.push(HistoryScopeGuard::InkState {
+                page_uuid,
+                expected: history_retention::semantic_state(database, page_uuid)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+            });
+        }
         match operation {
             OpKind::PageDelete(payload) if seen_pages.insert(payload.uuid) => {
                 scopes.push(HistoryScopeGuard::PageBlocks {
@@ -649,7 +760,21 @@ fn scope_guards_match(
     guards: &[HistoryScopeGuard],
 ) -> rusqlite::Result<bool> {
     for guard in guards {
+        if let HistoryScopeGuard::InkState {
+            page_uuid,
+            expected,
+        } = guard
+        {
+            if &history_retention::semantic_state(database, *page_uuid)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+                != expected
+            {
+                return Ok(false);
+            }
+            continue;
+        }
         let (current, expected) = match guard {
+            HistoryScopeGuard::InkState { .. } => unreachable!("handled above"),
             HistoryScopeGuard::PageBlocks {
                 page_uuid,
                 expected_block_uuids,
@@ -740,6 +865,7 @@ fn refresh_payload_guards(
     changed
 }
 
+#[cfg(test)]
 pub(crate) fn record_action(
     transaction: &rusqlite::Transaction<'_>,
     action: &str,
@@ -747,27 +873,56 @@ pub(crate) fn record_action(
     inverse: Vec<OpKind>,
     apply_policy: ProjectionPolicy,
 ) -> rusqlite::Result<()> {
+    record_action_with_id(
+        transaction,
+        action,
+        forward,
+        inverse,
+        apply_policy,
+        uuid::Uuid::now_v7(),
+        Vec::new(),
+    )
+}
+
+fn record_action_with_id(
+    transaction: &rusqlite::Transaction<'_>,
+    action: &str,
+    forward: Vec<OpKind>,
+    inverse: Vec<OpKind>,
+    apply_policy: ProjectionPolicy,
+    action_uuid: uuid::Uuid,
+    ink_restore_pages: Vec<uuid::Uuid>,
+) -> rusqlite::Result<()> {
     if inverse.is_empty() {
         return Ok(());
     }
-    let action_uuid = uuid::Uuid::now_v7();
     let action = action.to_owned();
     let inverse_guards = capture_history_guards(transaction, &inverse)?;
     let inverse_scope_guards = capture_history_scope_guards(transaction, &inverse)?;
+    let has_ink_scope = inverse_scope_guards
+        .iter()
+        .any(|scope| matches!(scope, HistoryScopeGuard::InkState { .. }));
+    let version = if has_ink_scope || !ink_restore_pages.is_empty() {
+        INK_HISTORY_PAYLOAD_VERSION
+    } else {
+        HISTORY_PAYLOAD_VERSION
+    };
     let forward_json = encode_history_payload(&GuardedHistoryPayload {
-        history_format_version: HISTORY_PAYLOAD_VERSION,
+        history_format_version: version,
         operations: forward,
         apply_policy: Some(apply_policy),
         guards: Vec::new(),
         scope_guards: Vec::new(),
+        ink_restore_pages: Vec::new(),
     })
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let inverse_json = encode_history_payload(&GuardedHistoryPayload {
-        history_format_version: HISTORY_PAYLOAD_VERSION,
+        history_format_version: version,
         operations: inverse,
         apply_policy: Some(apply_policy),
         guards: inverse_guards,
         scope_guards: inverse_scope_guards,
+        ink_restore_pages,
     })
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
@@ -860,13 +1015,67 @@ pub(crate) fn move_history_in_transaction(
         || !scope_guards_match(transaction, &selected.scope_guards)?
     {
         transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+        history_retention::cleanup(transaction)?;
         write.mark_history_changed();
         return Ok(HistoryMoveResult::Skipped);
     }
-    let kinds = selected.operations.clone();
+    let mut kinds = selected.operations.clone();
+    let restore_pages = selected.ink_restore_pages.clone();
+    let restoring_ink = kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            OpKind::PageCreate(payload) if payload.kind == PageKind::Handwriting => {
+                Some(payload.uuid)
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if restoring_ink.len() != restore_pages.len()
+        || restoring_ink != restore_pages.iter().copied().collect()
+    {
+        return Err(crate::CoreError::not_found(
+            "Drawing recovery data is unavailable for this older history entry; restore a backup",
+        )
+        .into());
+    }
+    // A creation's Undo can delete a drawing too. New entries carry an ink
+    // scope; a legacy unguarded creation may delete only a provably untouched
+    // empty page. Otherwise skip rather than erase later primary content.
+    let mut deleted_ink = Vec::new();
+    for kind in &kinds {
+        if let OpKind::PageDelete(payload) = kind
+            && history_retention::is_ink_page(transaction, payload.uuid)?
+        {
+            let guarded = selected.scope_guards.iter().any(|scope| matches!(scope, HistoryScopeGuard::InkState { page_uuid, .. } if *page_uuid == payload.uuid));
+            if !guarded && !history_retention::is_untouched_empty(transaction, payload.uuid)? {
+                transaction.execute(&format!("DELETE FROM {source} WHERE id = ?1"), [entry_id])?;
+                history_retention::cleanup(transaction)?;
+                write.mark_history_changed();
+                return Ok(HistoryMoveResult::Skipped);
+            }
+            if !history_retention::has_retention(transaction, action_uuid, payload.uuid)? {
+                history_retention::capture(transaction, action_uuid, payload.uuid)?;
+            }
+            deleted_ink.push(payload.uuid);
+        }
+    }
+    let restoration = if restore_pages.is_empty() {
+        None
+    } else {
+        let ink = history_retention::prepare_restore(transaction, action_uuid, &restore_pages)?;
+        kinds.extend_from_slice(ink.operations());
+        Some(HistoryRestorePlan {
+            operations: kinds.clone(),
+            ink,
+        })
+    };
     let validation = started.elapsed();
     let applying = std::time::Instant::now();
-    write.apply_local(kinds.clone(), apply_policy)?;
+    if let Some(plan) = &restoration {
+        write.apply_history_restore(plan, apply_policy)?;
+    } else {
+        write.apply_local(kinds.clone(), apply_policy)?;
+    }
     let apply = applying.elapsed();
     let recording = std::time::Instant::now();
     let transaction = write.sql();
@@ -874,9 +1083,23 @@ pub(crate) fn move_history_in_transaction(
     if undo {
         forward.guards = next_guards;
         forward.scope_guards = capture_history_scope_guards(transaction, &forward.operations)?;
+        forward.ink_restore_pages.extend(deleted_ink);
     } else {
         inverse.guards = next_guards;
         inverse.scope_guards = capture_history_scope_guards(transaction, &inverse.operations)?;
+        inverse.ink_restore_pages.extend(deleted_ink);
+    }
+    for payload in [&mut forward, &mut inverse] {
+        payload.ink_restore_pages.sort_unstable();
+        payload.ink_restore_pages.dedup();
+        if !payload.ink_restore_pages.is_empty()
+            || payload
+                .scope_guards
+                .iter()
+                .any(|scope| matches!(scope, HistoryScopeGuard::InkState { .. }))
+        {
+            payload.history_format_version = INK_HISTORY_PAYLOAD_VERSION;
+        }
     }
     let forward_json = encode_history_payload(&forward)?;
     let inverse_json = encode_history_payload(&inverse)?;
@@ -896,6 +1119,7 @@ pub(crate) fn move_history_in_transaction(
         ),
         rusqlite::params![action_uuid, action, forward_json, inverse_json],
     )?;
+    history_retention::cleanup(transaction)?;
     let history = recording.elapsed();
     write.mark_history_changed();
     tracing::debug!(
@@ -1147,5 +1371,149 @@ mod tests {
 
         assert_eq!(database_facts(&connection, page_uuid).await, before);
         assert_eq!(history_status(&connection).await.unwrap().redo_count, 0);
+    }
+
+    #[tokio::test]
+    async fn undo_handwriting_creation_does_not_delete_later_native_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.db");
+        let connection = super::super::open(&path).await.unwrap();
+        let created = super::super::create_handwritten_note_with_ops(&connection, None)
+            .await
+            .unwrap();
+        let page = created.value.uuid;
+        connection
+            .call_domain(move |database| -> crate::CoreResult<()> {
+                let transaction = database.transaction()?;
+                record_action(
+                    &transaction,
+                    "create ink",
+                    created.operations,
+                    vec![OpKind::PageDelete(PageDelete { uuid: page })],
+                    ProjectionPolicy::Immediate,
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let ink = crate::ink::Store::new(path, page);
+        ink.patch(
+            crate::ink::InkDraftPatch {
+                order: vec![],
+                upserts: vec![],
+                background: crate::ink::InkBackground::Grid,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            undo_history(&connection).await.unwrap(),
+            HistoryMoveResult::Skipped
+        );
+        assert!(matches!(
+            ink.read().unwrap().draft.background,
+            crate::ink::InkBackground::Grid
+        ));
+    }
+
+    #[tokio::test]
+    async fn caught_native_restore_error_poisoning_prevents_partial_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.db");
+        let connection = super::super::open(&path).await.unwrap();
+        crate::configure_sync(&connection, "https://history.example.test")
+            .await
+            .unwrap();
+        let page = super::super::create_handwritten_note_with_ops(&connection, None)
+            .await
+            .unwrap()
+            .value;
+        let ink = crate::ink::Store::new(path, page.uuid);
+        ink.patch(
+            crate::ink::InkDraftPatch {
+                order: vec![],
+                upserts: vec![],
+                background: crate::ink::InkBackground::Grid,
+            },
+            None,
+        )
+        .unwrap();
+        super::super::delete_page(&connection, page.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        connection.call(|database| database.execute_batch("CREATE TRIGGER fail_native_restore BEFORE INSERT ON ink_history WHEN NEW.seq > 0 BEGIN SELECT RAISE(ABORT,'native restore failed'); END")).await.unwrap();
+        let before = crate::export_sync_snapshot(&connection, 0).await.unwrap();
+        let outbox = crate::pending_outbox(&connection, 100).await.unwrap();
+        let history = history_status(&connection).await.unwrap();
+        let notices = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = notices.clone();
+        let result = crate::store::NotesStore::new(connection.clone())
+            .with_commit_observer(move |_| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .write(|write| -> crate::CoreResult<()> {
+                assert!(move_history_in_transaction(write, true).is_err());
+                Ok(())
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "a caught native restoration error must poison the executor"
+        );
+        assert_eq!(
+            crate::export_sync_snapshot(&connection, 0).await.unwrap(),
+            before
+        );
+        assert_eq!(
+            crate::pending_outbox(&connection, 100).await.unwrap(),
+            outbox
+        );
+        assert_eq!(history_status(&connection).await.unwrap(), history);
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn untouched_empty_handwriting_creation_still_round_trips_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.db");
+        let connection = super::super::open(&path).await.unwrap();
+        let created = super::super::create_handwritten_note_with_ops(&connection, None)
+            .await
+            .unwrap();
+        let page = created.value.uuid;
+        connection
+            .call_domain(move |database| -> crate::CoreResult<()> {
+                let transaction = database.transaction()?;
+                record_action(
+                    &transaction,
+                    "create ink",
+                    created.operations,
+                    vec![OpKind::PageDelete(PageDelete { uuid: page })],
+                    ProjectionPolicy::Immediate,
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            undo_history(&connection).await.unwrap(),
+            HistoryMoveResult::Applied
+        );
+        assert!(
+            super::super::get_page(&connection, page)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            redo_history(&connection).await.unwrap(),
+            HistoryMoveResult::Applied
+        );
+        let ink = crate::ink::Store::new(path, page);
+        assert!(ink.read().unwrap().draft.strokes.is_empty());
+        assert!(!ink.open_editor(false).unwrap().can_undo);
     }
 }

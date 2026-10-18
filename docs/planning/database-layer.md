@@ -184,6 +184,20 @@
   11 прежних document-тестов и 2 Tauri domain events проходят; проверены no-op, competing
   revisions и rollback как в середине Apply, так и после чтения результата.
 
+- Найдена и исправлена потеря рисунка в Delete → Undo: прежняя история сохраняла только
+  metadata страницы, а удаление собирало её ink bodies. V009 удерживает immutable roots
+  и компактные recovery metadata локального действия до удаления. Undo атомарно восстанавливает
+  native history/cursor и создаёт новые синхронизируемые публикации для сохранённых вариантов.
+  Guards защищают новые штрихи от Redo; pruning, clear и замена workspace освобождают pins.
+  Живые exports удалённой страницы остаются пустыми; remote delete не создаёт local history.
+  Формат 3 используется только для ink recovery/guards, текстовая история остаётся v2;
+  старый decoder отклоняет v3, отсутствующие/повреждённые recovery данные не дают частичного
+  восстановления. Уже собранные старой версией рисунки требуют backup.
+  Прошли 15 ink recovery, 9 handwriting storage, 22 history/archive, 9 history unit и 6 migration
+  тестов; проверены replica replay, concurrent variants, compaction/shared roots и rollback.
+  Полный Tauri: 46 passed / 1 ignored; core/Tauri all-target Clippy чистый. Native input,
+  frame fence, eraser и display ownership не менялись; аппаратная проверка этим не заявляется.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
