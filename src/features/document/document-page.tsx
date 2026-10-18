@@ -26,6 +26,7 @@ import { documentUnitsForSave } from "./document-save-model";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 import type { BlockAnchor } from "@/features/markdown/rehype-block-anchors";
 import type { DocumentRange } from "./document-codec";
+import { useSaveAcknowledgement } from "@/features/pages/save-acknowledgement";
 
 type Props = {
   editorSession?: DocumentEditorSession;
@@ -123,7 +124,7 @@ type LoadedProps = Props & {
 function LoadedDocumentPage({
   editorSession,
   pageUuid,
-  persisted,
+  persisted: incoming,
   editing,
   canEdit,
   authoringMode,
@@ -135,6 +136,7 @@ function LoadedDocumentPage({
   queryClient,
   findRange,
 }: LoadedProps) {
+  const [persisted, acknowledgeSave] = useSaveAcknowledgement(pageUuid, incoming);
   const sessions = usePageSessionRegistry();
   const overlay = useDocumentDraftOverlay(pageUuid);
   const buffer = overlay?.draft ?? persisted.buffer;
@@ -185,6 +187,7 @@ function LoadedDocumentPage({
           const updated = await replacePageDocument(pageUuid, attempt.expectedRevision, units);
           const rebased = pageDocumentToPersisted(updated);
           publishQuerySnapshot(queryClient, publication, updated);
+          acknowledgeSave(attempt.expectedRevision, rebased);
           sessions.acknowledgeDocumentSave(pageUuid, attempt, rebased);
           if (sessions.getSnapshot(pageUuid).document) continue;
           setSaveState("saved");
@@ -217,7 +220,7 @@ function LoadedDocumentPage({
     } finally {
       if (saveInFlight.current === pending) saveInFlight.current = null;
     }
-  }, [autosave, pageUuid, queryClient, sessions]);
+  }, [acknowledgeSave, autosave, pageUuid, queryClient, sessions]);
 
   // The window can be destroyed without unmounting anything, and debounced
   // autosave never fires then. A process-level drain reaches this draft here.

@@ -3,6 +3,9 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { undo } from "@codemirror/commands";
+import { StateEffect, Transaction } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   CommandFailure,
@@ -160,6 +163,130 @@ async function editor(mode: Mode) {
 }
 
 describe.each(["block", "document"] as const)("%s editor snapshot publication", (mode) => {
+  it.each([false, true])(
+    "preserves selection replacement and local Undo across autosave acknowledgement (own event: %s)",
+    async (ownEvent) => {
+      const mounted = await editor(mode);
+      const view = EditorView.findFromDOM(
+        mounted.container.querySelector<HTMLElement>(".cm-editor")!,
+      )!;
+      const observed: string[] = [];
+      act(() => {
+        view.dispatch({
+          effects: StateEffect.appendConfig.of(
+            EditorView.updateListener.of((update) => {
+              if (update.docChanged) observed.push(update.state.doc.toString());
+            }),
+          ),
+          selection: { anchor: 0, head: view.state.doc.length },
+        });
+        view.dispatch({
+          ...view.state.replaceSelection("Saved draft"),
+          annotations: Transaction.userEvent.of("input.type"),
+        });
+      });
+      let saving!: Promise<boolean>;
+      await act(async () => {
+        saving = mounted.registry.flushAll();
+        await Promise.resolve();
+      });
+      let refreshing: Promise<void> | undefined;
+      if (ownEvent)
+        await act(async () => {
+          refreshing = changed(mounted.client);
+        });
+      await act(async () => {
+        mounted.acknowledge();
+        await saving;
+      });
+      if (ownEvent) {
+        await act(async () => {
+          mounted.resolveRead("Saved draft", "2");
+          await refreshing;
+        });
+      }
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const afterAcknowledgement = [...observed];
+      act(() => {
+        undo(view);
+      });
+      try {
+        expect.soft(afterAcknowledgement).toEqual(["Saved draft"]);
+        expect(view.state.doc.toString()).toBe("Base");
+      } finally {
+        // Undo creates another real dirty edit. Drain it before this fixture
+        // unmounts so its400ms autosave cannot spill into the following test.
+        const savedUndo = snapshot(view.state.doc.toString(), "3");
+        vi.mocked(setBlockContent).mockResolvedValue(savedUndo.blocks[0]);
+        vi.mocked(replacePageDocument).mockResolvedValue(savedUndo);
+        await act(async () => {
+          await mounted.registry.flushAll();
+        });
+      }
+    },
+  );
+
+  it("keeps newer typing during acknowledgement and saves it against the acknowledged revision", async () => {
+    const mounted = await editor(mode);
+    const view = EditorView.findFromDOM(
+      mounted.container.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    const replace = (markdown: string) =>
+      act(() => {
+        view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        view.dispatch({
+          ...view.state.replaceSelection(markdown),
+          annotations: Transaction.userEvent.of("input.type"),
+        });
+      });
+    replace("Saved draft");
+    let saving!: Promise<boolean>;
+    await act(async () => {
+      saving = mounted.registry.flushAll();
+      await Promise.resolve();
+    });
+    replace("Newer local draft");
+    const secondBlockSave = deferred<Block>();
+    const secondDocumentSave = deferred<PageDocumentSnapshot>();
+    vi.mocked(setBlockContent).mockReturnValueOnce(secondBlockSave.promise);
+    vi.mocked(replacePageDocument).mockReturnValueOnce(secondDocumentSave.promise);
+    await act(async () => {
+      mounted.acknowledge();
+      await Promise.resolve();
+    });
+    expect(view.state.doc.toString()).toBe("Newer local draft");
+    expect(mounted.overlay()).toMatchObject({
+      draft: "Newer local draft",
+      baseRevision: mode === "block" ? "b2" : "d2",
+      inFlight: { draft: "Newer local draft" },
+    });
+    if (mode === "block") {
+      expect(setBlockContent).toHaveBeenNthCalledWith(
+        2,
+        "block",
+        { markdown: "Newer local draft" },
+        "b2",
+      );
+    } else {
+      expect(replacePageDocument).toHaveBeenNthCalledWith(2, "page", "d2", expect.any(Array));
+    }
+    await act(async () => {
+      const saved = snapshot("Newer local draft", "3");
+      secondBlockSave.resolve(saved.blocks[0]);
+      secondDocumentSave.resolve(saved);
+      expect(await saving).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mounted.overlay()).toBeFalsy();
+    expect(mounted.cached()?.blocks[0].markdown).toBe("Newer local draft");
+    expect(view.state.doc.toString()).toBe("Newer local draft");
+    await act(async () => {
+      await mounted.registry.flushAll();
+    });
+  });
+
   it.each([false, true])(
     "rejects a late save result after another commit (refresh completed: %s)",
     async (completeRefreshFirst) => {

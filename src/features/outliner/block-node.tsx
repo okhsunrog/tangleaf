@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -65,6 +65,7 @@ import {
 } from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { useBlockDraftOverlay, usePageSessionRegistry } from "@/features/pages/page-session";
+import { useSaveAcknowledgement } from "@/features/pages/save-acknowledgement";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
 import {
   BLOCK_STYLE_OPTIONS,
@@ -105,7 +106,30 @@ function lastOrderedBlock(blocks: Block[]) {
   );
 }
 
-export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, style }: Props) {
+export function BlockNode({
+  block: incomingBlock,
+  depth,
+  ordinal,
+  measureRef,
+  virtualIndex,
+  style,
+}: Props) {
+  const incomingText = useMemo(
+    () => ({ text: incomingBlock.markdown, revision: incomingBlock.markdownRevision }),
+    [incomingBlock.markdown, incomingBlock.markdownRevision],
+  );
+  const [persistedText, acknowledgeSave] = useSaveAcknowledgement(incomingBlock.uuid, incomingText);
+  const block = useMemo(
+    () =>
+      persistedText === incomingText
+        ? incomingBlock
+        : {
+            ...incomingBlock,
+            markdown: persistedText.text,
+            markdownRevision: persistedText.revision,
+          },
+    [incomingBlock, incomingText, persistedText],
+  );
   const store = useOutliner();
   const queryClient = useQueryClient();
   const sessions = usePageSessionRegistry();
@@ -277,6 +301,10 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
             attempt.expectedRevision,
           );
           applyBlockSnapshot(updated, publication);
+          acknowledgeSave(attempt.expectedRevision, {
+            text: updated.markdown,
+            revision: updated.markdownRevision,
+          });
           sessions.acknowledgeBlockSave(current.pageUuid, current.uuid, attempt, {
             text: updated.markdown,
             revision: updated.markdownRevision,
@@ -312,7 +340,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     } finally {
       if (saveInFlight.current === pending) saveInFlight.current = null;
     }
-  }, [applyBlockSnapshot, captureBlockPublication, sessions]);
+  }, [acknowledgeSave, applyBlockSnapshot, captureBlockPublication, sessions]);
 
   // The window can be destroyed without unmounting anything, and debounced
   // autosave never fires then. A process-level drain reaches this draft here.
