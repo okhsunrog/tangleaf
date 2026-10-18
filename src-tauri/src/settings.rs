@@ -362,6 +362,21 @@ pub fn create_main_window(
     let builder = builder.transparent(true);
     let window = builder.build()?;
     #[cfg(target_os = "linux")]
+    window.with_webview(|webview| {
+        use webkit2gtk::{SecurityManagerExt as _, WebContextExt as _, WebViewExt as _};
+        if let Some(manager) = webview
+            .inner()
+            .context()
+            .and_then(|context| context.security_manager())
+        {
+            // Attachments use anonymous CORS requests, including when the dev
+            // document is served over HTTP. WebKit requires opt-in per scheme.
+            manager.register_uri_scheme_as_cors_enabled(
+                crate::attachment_protocol::ATTACHMENT_PROTOCOL,
+            );
+        }
+    })?;
+    #[cfg(target_os = "linux")]
     let requires_restart = {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         matches!(

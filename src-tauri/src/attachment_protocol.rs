@@ -364,9 +364,65 @@ pub(crate) fn protocol<R: Runtime>(
         return;
     }
     let app = context.app_handle().clone();
-    tauri::async_runtime::spawn(async move {
-        responder.respond(protocol_response(app, request).await);
+    let origin = app.get_webview_window("main").and_then(|webview| {
+        let url = webview.url().ok()?;
+        image_document_origin(
+            &url,
+            if tauri::is_dev() {
+                app.config().build.dev_url.as_ref()
+            } else {
+                None
+            },
+        )
     });
+    let Some(origin) = origin else {
+        responder.respond(empty_response(tauri::http::StatusCode::FORBIDDEN));
+        return;
+    };
+    if request
+        .headers()
+        .get(tauri::http::header::ORIGIN)
+        .is_some_and(|requested| requested != origin)
+    {
+        responder.respond(empty_response(tauri::http::StatusCode::FORBIDDEN));
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut response = protocol_response(app, request).await;
+        // Return the trusted document origin even for errors. Never reflect an
+        // arbitrary Origin or allow credentials to read private attachments.
+        response
+            .headers_mut()
+            .insert(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        response.headers_mut().insert(
+            tauri::http::header::VARY,
+            tauri::http::HeaderValue::from_static("Origin"),
+        );
+        responder.respond(response);
+    });
+}
+
+fn image_document_origin(
+    url: &url::Url,
+    dev_url: Option<&url::Url>,
+) -> Option<tauri::http::HeaderValue> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let bundled = url.port().is_none()
+        && matches!(
+            (url.scheme(), url.host_str()),
+            ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))
+        );
+    let development = matches!(url.scheme(), "http" | "https")
+        && dev_url.is_some_and(|dev| dev.origin() == url.origin());
+    if !bundled && !development {
+        return None;
+    }
+    // URL::origin serializes non-HTTP schemes as "null"; WebKit uses the
+    // custom-scheme authority, just as Tauri's own asset protocol does.
+    let origin = &url[..url::Position::BeforePath];
+    tauri::http::HeaderValue::from_str(origin).ok()
 }
 
 async fn protocol_response<R: Runtime>(
@@ -715,6 +771,54 @@ mod tests {
         let mut encoded = Cursor::new(Vec::new());
         image.write_to(&mut encoded, ImageFormat::Png).unwrap();
         encoded.into_inner()
+    }
+
+    #[test]
+    fn image_cors_origin_is_limited_to_the_application_document() {
+        let dev = url::Url::parse("http://localhost:1420/").unwrap();
+        for (url, expected) in [
+            (
+                "http://localhost:1420/note?id=1#block",
+                "http://localhost:1420",
+            ),
+            ("tauri://localhost/index.html", "tauri://localhost"),
+            (
+                "http://tauri.localhost/index.html",
+                "http://tauri.localhost",
+            ),
+            (
+                "https://tauri.localhost/index.html",
+                "https://tauri.localhost",
+            ),
+        ] {
+            assert_eq!(
+                image_document_origin(&url.parse().unwrap(), Some(&dev)).unwrap(),
+                expected
+            );
+        }
+        for url in [
+            "https://example.com/",
+            "http://localhost:1421/",
+            "http://localhost.evil:1420/",
+            "tauri://evil/",
+            "tauri://localhost:1420/",
+            "http://tauri.localhost.evil/",
+            "http://user:password@localhost:1420/",
+            "data:text/html,hi",
+            "file:///index.html",
+        ] {
+            let url = url.parse().unwrap();
+            assert!(image_document_origin(&url, Some(&dev)).is_none(), "{url}");
+        }
+        assert!(
+            image_document_origin(&dev, None).is_none(),
+            "release must not authorize the dev server"
+        );
+        let android_dev = "http://192.0.2.1:1420/".parse().unwrap();
+        assert_eq!(
+            image_document_origin(&android_dev, Some(&android_dev)).unwrap(),
+            "http://192.0.2.1:1420"
+        );
     }
 
     #[tokio::test]

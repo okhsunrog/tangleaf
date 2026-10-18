@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { registerBackOverlay } from "@/lib/back-overlays";
-import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { ImageOff, Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -16,19 +16,24 @@ type Transform = { scale: number; x: number; y: number };
 const MIN_SCALE = 1;
 const MAX_SCALE = 8;
 
-export function MarkdownImageViewer({
-  alt,
-  image,
-  inline = false,
-  title,
-}: {
+interface ImageViewerProps {
   alt: string;
   image: MarkdownResolvedImage;
   inline?: boolean;
   title?: string;
-}) {
+}
+
+export function MarkdownImageViewer(props: ImageViewerProps) {
+  // A changed attachment must not inherit a previous image's loaded/error state.
+  return <ImageViewer key={`${props.image.src}\n${props.image.originalSrc}`} {...props} />;
+}
+
+function ImageViewer({ alt, image, inline = false, title }: ImageViewerProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const [originalFailed, setOriginalFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [transform, setTransform] = useState<Transform>({ scale: 1, x: 0, y: 0 });
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<{
@@ -41,6 +46,8 @@ export function MarkdownImageViewer({
   const changeOpen = useCallback((next: boolean) => {
     setOpen(next);
     setLoaded(false);
+    setOriginalFailed(false);
+    if (next) setPreviewFailed(false);
     setTransform({ scale: 1, x: 0, y: 0 });
     pointers.current.clear();
     gesture.current = null;
@@ -63,20 +70,36 @@ export function MarkdownImageViewer({
         aria-label={alt ? `Open image: ${alt}` : "Open image viewer"}
         onClick={(event) => event.stopPropagation()}
       >
-        <img
-          alt={alt}
-          decoding="async"
-          draggable={false}
-          height={image.height}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          src={image.src}
-          title={title}
-          width={image.width}
-        />
-        <span className="reveal-on-hover pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white shadow-sm surface-blur transition">
-          <Maximize2 className="size-4" />
-        </span>
+        {previewFailed ? (
+          <span className="flex min-h-28 max-w-full items-center gap-3 rounded-xl border border-border bg-muted/40 px-5 py-4 text-muted-foreground">
+            <ImageOff className="size-5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 text-sm">
+              <span className="block font-medium text-foreground">Preview unavailable</span>
+              {alt && <span className="block truncate">{alt}</span>}
+              <span className="block text-xs">Open image to view or retry</span>
+            </span>
+          </span>
+        ) : (
+          <img
+            key={attempt}
+            alt={alt}
+            crossOrigin="anonymous"
+            decoding="async"
+            draggable={false}
+            height={image.height}
+            loading="lazy"
+            onError={() => setPreviewFailed(true)}
+            referrerPolicy="no-referrer"
+            src={image.src}
+            title={title}
+            width={image.width}
+          />
+        )}
+        {!previewFailed && (
+          <span className="reveal-on-hover pointer-events-none absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-black/65 text-white shadow-sm surface-blur transition">
+            <Maximize2 className="size-4" />
+          </span>
+        )}
       </DialogTrigger>
       <DialogContent
         data-fullscreen="true"
@@ -125,6 +148,26 @@ export function MarkdownImageViewer({
             ×
           </button>
         </div>
+        {originalFailed && (
+          <div
+            role="status"
+            className="absolute right-4 bottom-[max(1rem,var(--safe-area-inset-bottom))] left-4 z-20 mx-auto flex w-fit max-w-[calc(100%_-_2rem)] flex-wrap items-center justify-center gap-3 rounded-xl border border-white/20 bg-black/85 px-4 py-3 text-sm text-white shadow-panel"
+          >
+            <span>Could not load the full image.</span>
+            <button
+              type="button"
+              className="rounded-lg border border-white/25 px-3 py-2 hover:bg-white/15 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+              onClick={() => {
+                setLoaded(false);
+                setOriginalFailed(false);
+                setPreviewFailed(false);
+                setAttempt((current) => current + 1);
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
         <div
           className="relative flex h-full w-full touch-none select-none items-center justify-center overflow-hidden"
           onDoubleClick={() => (transform.scale === 1 ? zoom(2) : reset())}
@@ -171,31 +214,51 @@ export function MarkdownImageViewer({
             gesture.current = gestureState(pointers.current, transform);
           }}
         >
-          {!loaded && (
+          {!loaded && !originalFailed && previewFailed && (
+            <span role="status" className="absolute text-sm text-white/70">
+              Loading image…
+            </span>
+          )}
+          {!loaded && !previewFailed && (
             <div className="absolute inset-0 flex items-center justify-center">
               <img
+                key={attempt}
                 aria-hidden="true"
+                crossOrigin="anonymous"
                 className="max-h-full max-w-full object-contain"
                 draggable={false}
+                onError={() => setPreviewFailed(true)}
+                referrerPolicy="no-referrer"
                 src={image.src}
               />
             </div>
           )}
           <img
+            key={attempt}
             alt={alt}
+            crossOrigin="anonymous"
             className="max-h-full max-w-full object-contain will-change-transform"
             decoding="async"
             draggable={false}
+            onError={() => {
+              setLoaded(false);
+              setOriginalFailed(true);
+            }}
             onLoad={async (event) => {
               const element = event.currentTarget;
               try {
                 await element.decode();
                 // A closing dialog can unmount while decoding is in flight.
-                if (element.isConnected) setLoaded(true);
+                if (element.isConnected) {
+                  setLoaded(true);
+                  setOriginalFailed(false);
+                }
               } catch {
-                // Keep the preview if the original cannot be decoded.
+                // A failed original keeps the preview and exposes an explicit retry.
+                if (element.isConnected) setOriginalFailed(true);
               }
             }}
+            referrerPolicy="no-referrer"
             src={open ? image.originalSrc : undefined}
             style={{
               visibility: loaded ? "visible" : "hidden",
