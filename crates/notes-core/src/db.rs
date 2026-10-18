@@ -90,13 +90,8 @@ pub(crate) async fn open_in_memory() -> Result<Connection> {
 
 async fn initialize_connection(conn: Connection) -> Result<Connection> {
     let initialized = async {
-        conn.call_domain(|database| {
-            crate::sqlite::policy::configure_writer(
-                database,
-                crate::sqlite::policy::WriterDurability::Normal,
-            )
-        })
-        .await?;
+        conn.call_domain(|database| crate::sqlite::policy::configure_primary_writer(database))
+            .await?;
         migrations::migrate(&conn).await?;
         workspace::initialize_workspace(&conn).await?;
         operation::initialize_structure_projection(&conn).await?;

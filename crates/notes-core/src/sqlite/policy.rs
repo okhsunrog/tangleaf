@@ -1,5 +1,6 @@
-//! Shared connection settings. Callers choose write durability explicitly;
-//! migrating connection setup must not silently change existing guarantees.
+//! Shared connection settings and durability for persistent application state.
+//! Primary writers use WAL/FULL, including files mixing primary and derived data.
+//! Explicit profiles remain available for disposable fixtures and measurements.
 
 use anyhow::{Result, ensure};
 use rusqlite::Connection;
@@ -11,6 +12,19 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum WriterDurability {
     Normal,
     Full,
+}
+
+const PRIMARY_WRITER_DURABILITY: WriterDurability = WriterDurability::Full;
+
+/// The common durability contract for primary content and persistent state.
+pub fn configure_primary_writer(connection: &Connection) -> Result<()> {
+    configure_writer(connection, PRIMARY_WRITER_DURABILITY)
+}
+
+/// Apply the same contract to a short-lived connection without reassigning the
+/// initialized database's persistent journal mode while other writers use it.
+pub fn configure_existing_primary_writer(connection: &Connection) -> Result<()> {
+    configure_existing_wal_writer(connection, PRIMARY_WRITER_DURABILITY)
 }
 
 impl WriterDurability {
@@ -124,26 +138,43 @@ mod tests {
                     .unwrap();
                 let actual = connection.call(|raw| Ok(settings(raw))).await.unwrap();
                 assert_eq!(actual, ("wal".into(), synchronous, 1, 2, 5000, 0));
+                connection.close().await.unwrap();
             }
         }
     }
 
     #[tokio::test]
-    async fn main_database_open_uses_normal_and_the_same_shared_settings() {
+    async fn main_database_open_uses_primary_full_and_the_same_shared_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("notes.db");
         for _ in 0..2 {
             let connection = crate::db::open(&path).await.unwrap();
             assert_eq!(
                 connection.call(|raw| Ok(settings(raw))).await.unwrap(),
-                ("wal".into(), 1, 1, 2, 5000, 0)
+                ("wal".into(), 2, 1, 2, 5000, 0)
             );
+            connection.close().await.unwrap();
         }
         let memory = crate::db::open_in_memory().await.unwrap();
         assert_eq!(
             memory.call(|raw| Ok(settings(raw))).await.unwrap(),
-            ("memory".into(), 1, 1, 2, 5000, 0)
+            ("memory".into(), 2, 1, 2, 5000, 0)
         );
+        memory.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn primary_writer_opener_uses_full_and_shared_settings_on_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("primary.db");
+        for _ in 0..2 {
+            let connection = AsyncConnection::open_primary_writer(&path).await.unwrap();
+            assert_eq!(
+                connection.call(|raw| Ok(settings(raw))).await.unwrap(),
+                ("wal".into(), 2, 1, 2, 5000, 0)
+            );
+            connection.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -266,7 +297,7 @@ mod tests {
         let path = directory.path().join("legacy.db");
         let raw = Connection::open(&path).unwrap();
         assert_eq!(settings(&raw).0, "delete");
-        let error = configure_existing_wal_writer(&raw, WriterDurability::Full).unwrap_err();
+        let error = configure_existing_primary_writer(&raw).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -291,7 +322,7 @@ mod tests {
                 }
             }),
         );
-        configure_existing_wal_writer(&raw, WriterDurability::Full).unwrap();
+        configure_existing_primary_writer(&raw).unwrap();
         assert_eq!(settings(&raw), ("wal".into(), 2, 1, 2, 5000, 0));
         STATEMENTS.with_borrow(|statements| {
             assert!(statements.iter().any(|statement| {

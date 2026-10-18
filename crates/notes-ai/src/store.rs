@@ -225,12 +225,9 @@ impl AiStore {
         }
         let initialize_control = !path.as_ref().exists();
         register_sqlite_vec();
-        let connection = Connection::open_writer(
-            path.as_ref(),
-            notes_core::sqlite::policy::WriterDurability::Normal,
-        )
-        .await
-        .context("opening server AI database")?;
+        let connection = Connection::open_primary_writer(path.as_ref())
+            .await
+            .context("opening server AI database")?;
         Self::initialize_connection(
             connection,
             identity,
@@ -1847,7 +1844,7 @@ mod tests {
     use notes_core::{BlockStyle, PageLayout};
 
     #[tokio::test]
-    async fn actual_ai_store_open_uses_normal_and_shared_connection_settings() {
+    async fn actual_ai_store_open_uses_primary_full_and_shared_connection_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ai.db");
         for _ in 0..2 {
@@ -1868,7 +1865,8 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(actual, ("wal".into(), 1, 1, 2, 5000, 0));
+            assert_eq!(actual, ("wal".into(), 2, 1, 2, 5000, 0));
+            store.connection.close().await.unwrap();
         }
     }
 

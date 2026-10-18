@@ -74,7 +74,7 @@ async fn file_runtime_owns_an_independent_read_only_worker_with_the_shared_polic
             assert!(!db.is_readonly("main")?);
             assert_eq!(
                 db.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
-                1
+                2
             );
             Ok(std::thread::current().id())
         })

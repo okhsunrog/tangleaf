@@ -35,9 +35,7 @@ impl std::error::Error for QuotaExceeded {}
 
 impl BlobOwnership {
     pub async fn open(path: &Path) -> Result<Self> {
-        let connection =
-            Connection::open_writer(path, notes_core::sqlite::policy::WriterDurability::Full)
-                .await?;
+        let connection = Connection::open_primary_writer(path).await?;
         connection
             .call(|database| {
                 database.execute_batch(
@@ -175,6 +173,7 @@ mod connection_policy_tests {
                 .await
                 .unwrap();
             assert_eq!(actual, ("wal".into(), 2, 1, 2, 5000, 0));
+            store.connection.close().await.unwrap();
         }
     }
 }

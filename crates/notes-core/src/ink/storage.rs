@@ -21,11 +21,7 @@ pub(super) fn open(store: &Store) -> CommandResult<Connection> {
     let conn =
         Connection::open_with_flags(&store.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(err)?;
-    crate::sqlite::policy::configure_existing_wal_writer(
-        &conn,
-        crate::sqlite::policy::WriterDurability::Full,
-    )
-    .map_err(err)?;
+    crate::sqlite::policy::configure_existing_primary_writer(&conn).map_err(err)?;
     ensure_document(&conn, store.document)?;
     conn.execute(
         "INSERT OR IGNORE INTO ink_documents(page_uuid) VALUES(?1)",
@@ -715,6 +711,18 @@ mod connection_policy_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("notes.db");
         let writer = crate::db::open(&path).await.unwrap();
+        writer
+            .call(|raw| {
+                assert_eq!(
+                    raw.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                    2
+                );
+                // Explicitly lower only this fixture connection. Opening native
+                // writers must preserve connection-local policy independence.
+                raw.pragma_update(None, "synchronous", "NORMAL")
+            })
+            .await
+            .unwrap();
         let page = crate::db::create_handwritten_note_with_ops(&writer, None)
             .await
             .unwrap()
@@ -752,6 +760,7 @@ mod connection_policy_tests {
                 1
             );
         }
+        writer.close().await.unwrap();
     }
 
     #[test]

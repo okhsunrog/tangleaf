@@ -1,5 +1,5 @@
 use super::NotesStore;
-use crate::sqlite::policy::{WriterDurability, configure_writer};
+use crate::sqlite::policy::configure_primary_writer;
 use anyhow::{Context, Result, anyhow, ensure};
 use notes_blob::BlobHash;
 use rusqlite::backup::{Backup, StepResult};
@@ -274,7 +274,7 @@ fn write_snapshot(
         .tempfile_in(parent)?;
     {
         let mut target = rusqlite::Connection::open(temporary.path())?;
-        configure_writer(&target, WriterDurability::Full)?;
+        configure_primary_writer(&target)?;
         {
             let backup = Backup::new(&source, &mut target)?;
             let mut retries = BusyRetries {

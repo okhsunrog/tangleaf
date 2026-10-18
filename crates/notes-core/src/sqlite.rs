@@ -111,6 +111,18 @@ impl Connection {
         Self::open_with(move || Ok(rusqlite::Connection::open(path)?)).await
     }
 
+    /// Open persistent application state with the shared WAL/FULL contract.
+    pub async fn open_primary_writer(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        Self::open_with(move || {
+            let connection = rusqlite::Connection::open(path)?;
+            policy::configure_primary_writer(&connection)?;
+            Ok(connection)
+        })
+        .await
+    }
+
+    /// Explicit profile for disposable fixtures and durability measurements.
     pub async fn open_writer(
         path: impl AsRef<Path>,
         durability: policy::WriterDurability,
