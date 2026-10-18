@@ -66,7 +66,7 @@ export function SyncStatusIndicator({ status, onOpenSettings, compact = false }:
         )}
       >
         {presentation.tone === "success" ? (
-          <span className="size-1.5 rounded-full bg-primary" />
+          <span className="size-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400 eink:bg-foreground" />
         ) : (
           <Icon
             className={cn("size-3.5", presentation.animated && "animate-spin eink:animate-none")}
