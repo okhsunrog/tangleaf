@@ -3,6 +3,7 @@ mod android_tls;
 mod attachment_protocol;
 mod commands;
 mod settings;
+mod startup;
 mod sync;
 
 use std::sync::{Arc, RwLock};
@@ -196,6 +197,8 @@ pub fn run() {
 
     let builder = builder
         .setup(move |app| {
+            let (startup_lifecycle, registration) = startup::StartupLifecycle::register();
+            app.manage(startup_lifecycle.clone());
             #[cfg(not(mobile))]
             settings::create_main_window(app, &main_window_config)?;
             specta_builder.mount_events(app);
@@ -227,14 +230,26 @@ pub fn run() {
             let configured_settings = match settings::runtime(&handle) {
                 Ok(settings) => settings,
                 Err(error) => {
-                    report_startup_error(&handle, &startup, error);
+                    finish_startup_error(
+                        registration,
+                        &startup_lifecycle,
+                        &handle,
+                        &startup,
+                        error,
+                    );
                     return Ok(());
                 }
             };
             let sync_credentials = match configured_settings.sync_credentials() {
                 Ok(credentials) => credentials,
                 Err(error) => {
-                    report_startup_error(&handle, &startup, error);
+                    finish_startup_error(
+                        registration,
+                        &startup_lifecycle,
+                        &handle,
+                        &startup,
+                        error,
+                    );
                     return Ok(());
                 }
             };
@@ -247,7 +262,13 @@ pub fn run() {
             let remote_ai = match remote_ai {
                 Ok(remote) => remote,
                 Err(error) => {
-                    report_startup_error(&handle, &startup, error);
+                    finish_startup_error(
+                        registration,
+                        &startup_lifecycle,
+                        &handle,
+                        &startup,
+                        error,
+                    );
                     return Ok(());
                 }
             };
@@ -256,27 +277,36 @@ pub fn run() {
                     message: "Opening local notes database…".into(),
                 };
 
-            tauri::async_runtime::spawn(async move {
-                match notes_core::store::NotesStore::open(&db_path).await {
-                    Ok(store) => {
-                        let conn = store.write_connection().clone();
-                        handle.manage(commands::AppState {
-                            store,
-                            blob_store: blob_store.clone(),
-                            image_cache,
-                            preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),
-                            remote_ai,
-                            chat_cancellations: Arc::new(std::sync::Mutex::new(
-                                std::collections::HashMap::new(),
-                            )),
-                        });
-                        let ink = handle.state::<commands::HandwritingStore>().inner().clone();
-                        if let Err(error) = ink.recover(&handle, &conn).await {
-                            tracing::warn!(
-                                ?error,
-                                "Ink recovery deferred; existing notes remain available"
-                            );
-                        }
+            let failure_handle = handle.clone();
+            let failure_status = startup.clone();
+            registration.spawn(
+                async move {
+                    let store = notes_core::store::NotesStore::open(&db_path).await?;
+                    // Retain before any subsequent await or state installation;
+                    // exit can still close this Store if initialization fails.
+                    startup_lifecycle.retain_store(&store);
+                    let conn = store.write_connection().clone();
+                    handle.manage(commands::AppState {
+                        store,
+                        blob_store: blob_store.clone(),
+                        image_cache,
+                        preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),
+                        remote_ai,
+                        chat_cancellations: Arc::new(std::sync::Mutex::new(
+                            std::collections::HashMap::new(),
+                        )),
+                    });
+                    if startup_lifecycle.is_stopping() {
+                        return Ok(());
+                    }
+                    let ink = handle.state::<commands::HandwritingStore>().inner().clone();
+                    if let Err(error) = ink.recover(&handle, &conn).await {
+                        tracing::warn!(
+                            ?error,
+                            "Ink recovery deferred; existing notes remain available"
+                        );
+                    }
+                    startup_lifecycle.while_starting(|| {
                         if let Some((server_url, token)) = sync_credentials {
                             sync::spawn_worker(
                                 handle.clone(),
@@ -292,18 +322,11 @@ pub fn run() {
                             commands::StartupStatus::Ready;
                         let _ = commands::StartupReadyEvent.emit(&handle);
                         tracing::info!(?db_path, "tangleaf ready");
-                    }
-                    Err(error) => {
-                        let message = format!("{error:#}");
-                        tracing::error!(%message, "tangleaf startup failed");
-                        *startup.write().unwrap_or_else(|e| e.into_inner()) =
-                            commands::StartupStatus::Error {
-                                message: message.clone(),
-                            };
-                        let _ = commands::StartupErrorEvent { message }.emit(&handle);
-                    }
-                }
-            });
+                    });
+                    Ok(())
+                },
+                move |message| report_startup_error(&failure_handle, &failure_status, message),
+            );
 
             Ok(())
         })
@@ -322,9 +345,22 @@ pub fn run() {
             if finishing.swap(true, Ordering::Relaxed) {
                 return;
             }
+            // Close Ready/sync publication synchronously, before the exit task
+            // can be delayed by the executor or a long-running opener.
+            let startup = app
+                .try_state::<startup::StartupLifecycle>()
+                .map(|state| state.inner().clone());
+            if let Some(startup) = &startup {
+                startup.stop();
+            }
             let app = app.clone();
             let finished = finished.clone();
             tauri::async_runtime::spawn(async move {
+                if let Some(startup) = &startup
+                    && let Err(error) = startup.wait().await
+                {
+                    tracing::warn!(%error, "Startup finished with an error before exit drain");
+                }
                 if let Some(ink) = app.try_state::<commands::HandwritingStore>() {
                     // A timed-out waiter does not stop spawn_blocking work.
                     // Confirm every raw connection has drained before closing
@@ -334,8 +370,15 @@ pub fn run() {
                     }
                 }
                 sync::finish_before_exit(&app).await;
-                if let Some(state) = app.try_state::<commands::AppState>() {
-                    match state.store.close().await {
+                let store = startup
+                    .as_ref()
+                    .and_then(startup::StartupLifecycle::opened_store)
+                    .or_else(|| {
+                        app.try_state::<commands::AppState>()
+                            .map(|state| state.store.clone())
+                    });
+                if let Some(store) = store {
+                    match store.close().await {
                         Ok(()) => tracing::info!("Workspace SQLite workers closed"),
                         Err(error) => {
                             tracing::error!(?error, "Workspace SQLite close failed during exit");
@@ -352,14 +395,25 @@ pub fn run() {
 fn report_startup_error(
     handle: &tauri::AppHandle,
     startup: &Arc<RwLock<commands::StartupStatus>>,
-    error: anyhow::Error,
+    message: String,
 ) {
-    let message = format!("{error:#}");
     tracing::error!(%message, "tangleaf startup failed");
     *startup.write().unwrap_or_else(|error| error.into_inner()) = commands::StartupStatus::Error {
         message: message.clone(),
     };
     let _ = commands::StartupErrorEvent { message }.emit(handle);
+}
+
+fn finish_startup_error(
+    registration: startup::Registration,
+    lifecycle: &startup::StartupLifecycle,
+    handle: &tauri::AppHandle,
+    startup: &Arc<RwLock<commands::StartupStatus>>,
+    error: anyhow::Error,
+) {
+    let message = format!("{error:#}");
+    lifecycle.while_starting(|| report_startup_error(handle, startup, message.clone()));
+    registration.finish(Err(message));
 }
 
 #[cfg(not(target_os = "android"))]

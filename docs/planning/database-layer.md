@@ -405,6 +405,14 @@
   Два обычных workload tests прошли, включая пять повторов; targeted Clippy чистый.
   Длинные release-замеры выполняются после фиксации production изменений.
 
+- Закрыт отдельный startup/exit race: opener регистрируется до асинхронного запуска, сохраняет
+  Store сразу после open и завершается через supervised barrier. Exit синхронно запрещает Ready/
+  sync publication, ждёт opener/recovery без отмены, затем выполняет ink→sync→SQLite drain.
+  Даже поздний open или ошибка/panic до установки AppState не скрывают Store от владельца.
+  Ошибка миграции/инициализации проекции теперь также await-close/join невыданного соединения,
+  а не только его Drop. Прошли 6 startup и 2 initializer tests, full Tauri lib и Clippy;
+  отмена waiter не отменяет cleanup, production abort API не добавлен.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

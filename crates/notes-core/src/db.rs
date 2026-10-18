@@ -20,6 +20,8 @@ mod journals;
 mod migrations;
 mod pages;
 #[cfg(test)]
+mod open_tests;
+#[cfg(test)]
 mod read_tests;
 mod search;
 mod workspace;
@@ -82,16 +84,30 @@ pub(crate) async fn open_in_memory() -> Result<Connection> {
 }
 
 async fn initialize_connection(conn: Connection) -> Result<Connection> {
-    conn.call_domain(|database| {
-        crate::sqlite::policy::configure_writer(
-            database,
-            crate::sqlite::policy::WriterDurability::Normal,
-        )
-    })
-    .await?;
-    migrations::migrate(&conn).await?;
-    workspace::initialize_workspace(&conn).await?;
-    operation::initialize_structure_projection(&conn).await?;
+    let initialized = async {
+        conn.call_domain(|database| {
+            crate::sqlite::policy::configure_writer(
+                database,
+                crate::sqlite::policy::WriterDurability::Normal,
+            )
+        })
+        .await?;
+        migrations::migrate(&conn).await?;
+        workspace::initialize_workspace(&conn).await?;
+        operation::initialize_structure_projection(&conn).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = initialized {
+        // Startup owns this connection even when no Store could be returned.
+        // Await its drain/join before reporting failure to the exit barrier.
+        return match conn.close().await {
+            Ok(()) => Err(error),
+            Err(close) => Err(error.context(format!(
+                "SQLite initialization cleanup also failed: {close:#}"
+            ))),
+        };
+    }
     Ok(conn)
 }
 
