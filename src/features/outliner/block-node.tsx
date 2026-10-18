@@ -121,6 +121,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveInFlight = useRef<Promise<boolean> | null>(null);
   const editRef = useRef<BlockEditHandle>(null);
+  const initialPointer = useRef<{ x: number; y: number } | null>(null);
   const [draftLen, setDraftLen] = useState(effectiveMarkdown.length);
   const longBlock = (editing ? draftLen : effectiveMarkdown.length) >= LONG_BLOCK_CHARS;
 
@@ -723,8 +724,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
         )}
         <div
           className="relative min-w-0 flex-1"
-          onClick={() => {
+          onClick={(event) => {
             if (!editing && !readOnly) {
+              initialPointer.current = { x: event.clientX, y: event.clientY };
               draftRef.current = effectiveMarkdown;
               store.setEditing(block.uuid);
             }
@@ -734,9 +736,15 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
             <>
               <BlockEdit
                 ref={editRef}
+                stateCache={store.editorStates}
+                blockUuid={block.uuid}
+                initialPointer={initialPointer.current}
                 initial={effectiveMarkdown}
                 onChange={onDraftChange}
-                onBlur={onBlur}
+                onBlur={() => {
+                  initialPointer.current = null;
+                  onBlur();
+                }}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 autoFocus

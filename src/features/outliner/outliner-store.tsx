@@ -1,8 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { MarkdownImageResolver, MarkdownOpenHandler } from "@/features/markdown";
 import type { Block, PageLayout } from "@/lib/api";
+import type { EditorState } from "@codemirror/state";
 
 type Store = {
+  editorStates: Map<string, EditorState>;
   editingUuid: string | null;
   setEditing: (uuid: string | null) => void;
   layout: PageLayout;
@@ -50,6 +52,7 @@ export function OutlinerProvider({
   const [editingUuid, setEditing] = useState<string | null>(
     initialEditingRequest > 0 ? initialEditingUuid : null,
   );
+  const [editorStates] = useState(() => new Map<string, EditorState>());
   const [collapsedUuids, setCollapsedUuids] = useState<ReadonlySet<string>>(() => {
     const collapsed = new Set<string>();
     for (const block of blocks) {
@@ -113,6 +116,7 @@ export function OutlinerProvider({
 
   const store = useMemo(
     () => ({
+      editorStates,
       editingUuid,
       setEditing,
       layout,
@@ -123,7 +127,16 @@ export function OutlinerProvider({
       isCollapsed: (uuid: string) => collapsedUuids.has(uuid),
       toggleCollapsed,
     }),
-    [collapsedUuids, editingUuid, layout, onOpenMarkdownLink, parentUuids, readOnly, resolveImage],
+    [
+      editorStates,
+      collapsedUuids,
+      editingUuid,
+      layout,
+      onOpenMarkdownLink,
+      parentUuids,
+      readOnly,
+      resolveImage,
+    ],
   );
 
   return <OutlinerCtx.Provider value={store}>{children}</OutlinerCtx.Provider>;
