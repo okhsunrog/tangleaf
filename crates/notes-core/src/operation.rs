@@ -18,6 +18,8 @@ mod structure;
 #[cfg(test)]
 mod structure_activation_tests;
 #[cfg(test)]
+pub(crate) mod structure_rollout_tests;
+#[cfg(test)]
 mod structure_tests;
 
 use structure::{OwnedStructureInput, StructureDirty, StructureLoadStats};
@@ -331,8 +333,16 @@ pub(crate) enum ProjectionPolicy {
 pub(crate) fn apply_local_kinds_deferred_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
+    structure_mode: StructureProjectionMode,
 ) -> CoreResult<LocalBatchApply> {
-    apply_local_kinds_with_policy(transaction, kinds, ProjectionPolicy::Deferred)
+    Ok(apply_local_kinds_internal(
+        transaction,
+        kinds,
+        ProjectionPolicy::Deferred,
+        false,
+        structure_mode,
+    )?
+    .0)
 }
 
 pub(crate) fn apply_local_kinds_with_policy(
@@ -345,7 +355,7 @@ pub(crate) fn apply_local_kinds_with_policy(
         kinds,
         policy,
         false,
-        StructureProjectionMode::Full,
+        StructureProjectionMode::Components,
     )?
     .0)
 }
@@ -377,6 +387,9 @@ fn apply_local_kinds_internal(
     // any late element in a large batch is malformed.
     for kind in &kinds {
         validate_kind(kind)?;
+    }
+    if structure_mode == StructureProjectionMode::Components {
+        require_initialized_structure_projection(transaction)?;
     }
     let device_id = meta_or_insert_device_id(transaction)?;
     let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
@@ -710,8 +723,12 @@ pub async fn apply_sequenced_batch(
     conn: &Connection,
     operations: Vec<(u64, Op)>,
 ) -> Result<Vec<ApplyOutcome>> {
-    apply_sequenced_batch_with_projection_mode(conn, operations, StructureProjectionMode::Full)
-        .await
+    apply_sequenced_batch_with_projection_mode(
+        conn,
+        operations,
+        StructureProjectionMode::Components,
+    )
+    .await
 }
 
 async fn apply_sequenced_batch_with_projection_mode(
@@ -724,6 +741,9 @@ async fn apply_sequenced_batch_with_projection_mode(
     }
     conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
+        if structure_mode == StructureProjectionMode::Components {
+            require_initialized_structure_projection(&transaction)?;
+        }
         let mut cursor = transaction
             .query_row(
                 "SELECT value FROM sync_meta WHERE key = 'last_server_seq'",
@@ -1223,7 +1243,13 @@ pub async fn project_sync_snapshot(
     let seq = snapshot.seq;
     let projected = crate::db::open_in_memory().await?;
     import_sync_snapshot(&projected, snapshot).await?;
-    apply_batch(&projected, operations, Origin::Remote).await?;
+    apply_batch_with_projection_mode(
+        &projected,
+        operations,
+        Origin::Remote,
+        StructureProjectionMode::Full,
+    )
+    .await?;
     export_sync_snapshot(&projected, seq).await
 }
 
@@ -1481,7 +1507,13 @@ pub async fn apply_batch(
     operations: &[Op],
     origin: Origin,
 ) -> Result<Vec<ApplyOutcome>> {
-    apply_batch_with_projection_mode(conn, operations, origin, StructureProjectionMode::Full).await
+    apply_batch_with_projection_mode(
+        conn,
+        operations,
+        origin,
+        StructureProjectionMode::Components,
+    )
+    .await
 }
 
 async fn apply_batch_with_projection_mode(
@@ -1496,6 +1528,9 @@ async fn apply_batch_with_projection_mode(
     let operations = operations.to_vec();
     conn.call_domain(move |database| -> CoreResult<Vec<ApplyOutcome>> {
         let transaction = database.transaction()?;
+        if structure_mode == StructureProjectionMode::Components {
+            require_initialized_structure_projection(&transaction)?;
+        }
         let publishes = publishes_authored_ops(&transaction)?;
         let mut outcomes = Vec::with_capacity(operations.len());
         let mut effects = ApplyEffects::deferred();

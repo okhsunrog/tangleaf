@@ -100,6 +100,13 @@
   скрытая панель тоже сохраняет активную строку. 49 outliner-тестов и `vp check` проходят,
   включая живой рост 1→243, дальнюю цель, narrow desktop и Android. Реальная проверка
   прокрутки/фокуса после этого изменения ещё впереди.
+- Обычные local, remote и sequenced Apply теперь используют Components и проверяют startup
+  marker до изменения данных. Массовые archive/external import, snapshot и его operation tail
+  явно выбирают Full. Публичные create/move/remote/sequenced читают одинаковый объём структуры
+  при 0 и 2048 посторонних блоков; отказ marker 0/2 сохраняет все таблицы, cursor и outbox.
+  Общий core-прогон на этом срезе: 264 passed / 4 ignored; server 54, sync 10; общий Clippy
+  трёх crates с `-D warnings` проходит. В core также вошли новые пакетные и search snapshot tests;
+  финальные 12 graph-тестов проверены отдельно после его компиляции.
 
 ## Решение и масштаб
 

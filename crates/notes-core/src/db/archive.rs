@@ -401,6 +401,7 @@ where
         let applied = operation::apply_local_kinds_deferred_in_transaction(
             &transaction,
             restore_kinds,
+            operation::StructureProjectionMode::Full,
         )?;
         let ink_operations = crate::ink::archive::restore(
             &transaction,

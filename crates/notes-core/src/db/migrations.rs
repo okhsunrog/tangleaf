@@ -217,8 +217,14 @@ mod tests {
     }
 
     async fn populated_v006_database() -> (tempfile::NamedTempFile, Connection) {
-        use crate::db::{self, BlockContent};
-        use crate::{AttachmentOwner, BlobHash, BlockStyle};
+        use crate::db;
+        use crate::operation::{
+            self, AttachmentAdd, BlockCreate, BlockSetMarkdown, OpKind, PageCreate,
+            ProjectionPolicy, StructureProjectionMode,
+        };
+        use crate::{
+            AttachmentOwner, BlobHash, BlockStyle, CoreResult, OrderKey, PageKind, PageLayout,
+        };
 
         let file = tempfile::NamedTempFile::new().unwrap();
         let connection = Connection::open(file.path()).await.unwrap();
@@ -243,51 +249,93 @@ mod tests {
         crate::configure_sync(&connection, "https://migration.example.test")
             .await
             .unwrap();
-        let target = db::create_note(&connection, Some("Migration target".into()))
+        let ink_page = uuid::Uuid::from_u128(0x6003);
+        connection
+            .call_domain(move |database| -> CoreResult<()> {
+                let transaction = database.transaction()?;
+                let target = uuid::Uuid::from_u128(0x6001);
+                let source = uuid::Uuid::from_u128(0x6002);
+                let target_block = uuid::Uuid::from_u128(0x6011);
+                let source_block = uuid::Uuid::from_u128(0x6012);
+                let child = uuid::Uuid::from_u128(0x6013);
+                let create_page = |uuid, kind, title: &str| {
+                    OpKind::PageCreate(PageCreate {
+                        uuid,
+                        kind,
+                        title: Some(title.into()),
+                        layout: PageLayout::Outline,
+                        created_at: 1,
+                    })
+                };
+                let create_block = |uuid, page_uuid, parent_uuid, markdown: String| {
+                    OpKind::BlockCreate(BlockCreate {
+                        uuid,
+                        page_uuid,
+                        parent_uuid,
+                        order_key: OrderKey::first(),
+                        style: BlockStyle::Bullet,
+                        markdown,
+                        created_at: 1,
+                    })
+                };
+                // Historical migration fixtures deliberately populate the old
+                // schema through the explicit full projector. Normal current
+                // commands require the canonical marker introduced in V008.
+                let kinds = vec![
+                    create_page(target, PageKind::Note, "Migration target"),
+                    create_page(source, PageKind::Note, "Version six note"),
+                    create_page(ink_page, PageKind::Handwriting, "Existing ink"),
+                    create_block(target_block, target, None, String::new()),
+                    create_block(source_block, source, None, String::new()),
+                    create_block(
+                        child,
+                        source,
+                        Some(source_block),
+                        format!("Nested (({target_block}))"),
+                    ),
+                    OpKind::AttachmentAdd(AttachmentAdd {
+                        owner: AttachmentOwner::Block(source_block),
+                        blob_hash: BlobHash::from_bytes([0x71; 32]),
+                        filename: "kept.bin".into(),
+                        mime: "application/octet-stream".into(),
+                        size: 13,
+                    }),
+                ];
+                let inverse = db::history::capture_inverse_kinds(&transaction, &kinds)?;
+                operation::apply_local_kinds_deferred_in_transaction(
+                    &transaction,
+                    kinds.clone(),
+                    StructureProjectionMode::Full,
+                )?;
+                db::history::record_action(
+                    &transaction,
+                    "Fixture create",
+                    kinds,
+                    inverse,
+                    ProjectionPolicy::Deferred,
+                )?;
+                let kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                    uuid: source_block,
+                    markdown: "First [[Migration target]]\n\nSecond".into(),
+                })];
+                let inverse = db::history::capture_inverse_kinds(&transaction, &kinds)?;
+                operation::apply_local_kinds_deferred_in_transaction(
+                    &transaction,
+                    kinds.clone(),
+                    StructureProjectionMode::Full,
+                )?;
+                db::history::record_action(
+                    &transaction,
+                    "Fixture edit",
+                    kinds,
+                    inverse,
+                    ProjectionPolicy::Deferred,
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
             .await
-            .unwrap()
-            .into_created()
             .unwrap();
-        let source = db::create_note(&connection, Some("Version six note".into()))
-            .await
-            .unwrap()
-            .into_created()
-            .unwrap();
-        db::create_block(
-            &connection,
-            source.page.uuid,
-            Some(source.initial_block.uuid),
-            None,
-            BlockStyle::Bullet,
-            format!("Nested (({}))", target.initial_block.uuid),
-        )
-        .await
-        .unwrap();
-        db::create_attachment(
-            &connection,
-            AttachmentOwner::Block(source.initial_block.uuid),
-            BlobHash::from_bytes([0x71; 32]),
-            "kept.bin".into(),
-            "application/octet-stream".into(),
-            13,
-        )
-        .await
-        .unwrap();
-        db::set_block_content(
-            &connection,
-            source.initial_block.uuid,
-            BlockContent {
-                markdown: "First [[Migration target]]\n\nSecond".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let ink_page =
-            db::create_handwritten_note_with_ops(&connection, Some("Existing ink".into()))
-                .await
-                .unwrap()
-                .value
-                .uuid;
         connection
             .call(move |database| {
                 let root = uuid::Uuid::from_u128(0x7001);

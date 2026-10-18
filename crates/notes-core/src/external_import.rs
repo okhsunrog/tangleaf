@@ -497,7 +497,9 @@ pub async fn apply_external_import(
         for kind in &kinds {
             operation::validate_kind(kind)?;
         }
-        let applied = operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds)?;
+        let applied = operation::apply_local_kinds_deferred_in_transaction(
+            &transaction, kinds, operation::StructureProjectionMode::Full,
+        )?;
         let receipt_uuid = uuid::Uuid::now_v7();
         transaction.execute(
             "INSERT INTO external_import_receipts(
@@ -1365,13 +1367,20 @@ mod tests {
 
     #[tokio::test]
     async fn large_tree_runs_one_final_structure_reconciliation() {
+        use tracing::instrument::WithSubscriber;
+
         let (_file, connection) = database().await;
         let mut input = batch(&connection, 2_000).await;
         for index in 1..input.pages[0].blocks.len() {
             input.pages[0].blocks[index].parent_id = Some(input.pages[0].blocks[index - 1].id);
             input.pages[0].blocks[index].order_key = OrderKey::first();
         }
-        let outcome = apply_external_import(&connection, input).await.unwrap();
+        let capture = crate::operation::structure_rollout_tests::ProjectionCapture::default();
+        let outcome = apply_external_import(&connection, input)
+            .with_subscriber(capture.dispatch())
+            .await
+            .unwrap();
+        capture.assert_full();
         assert!(matches!(
             outcome,
             ExternalImportOutcome::Applied {

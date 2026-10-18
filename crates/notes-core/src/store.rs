@@ -776,7 +776,11 @@ mod tests {
         connection
             .call_domain(move |database| -> CoreResult<()> {
                 let tx = database.transaction()?;
-                operation::apply_local_kinds_deferred_in_transaction(&tx, kinds)?;
+                operation::apply_local_kinds_deferred_in_transaction(
+                    &tx,
+                    kinds,
+                    operation::StructureProjectionMode::Full,
+                )?;
                 tx.commit()?;
                 Ok(())
             })
