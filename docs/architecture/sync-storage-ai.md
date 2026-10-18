@@ -1,10 +1,12 @@
 # Sync, Storage, and AI Architecture
 
-Status: implemented architecture and remaining pre-release work. Updated 2026-07-17.
+Status: implemented architecture and remaining release work. Updated 2026-10-18.
 
-This document describes the current code, not a compatibility target for old builds. The project
-has no users or valuable production databases yet, so storage and wire formats may still change
-deliberately before the first release.
+This document describes the current boundaries. Existing databases contain primary user data;
+being an experimental project does not authorize resetting them. Schema changes use validated
+incremental migrations, and incompatible operation/history changes need explicit compatibility
+handling. The active storage migration and its remaining acceptance gates are recorded in
+[`database-layer.md`](../planning/database-layer.md).
 
 The accepted editor and page-presentation target is recorded separately in
 [`editor.md`](editor.md). The durable `PageLayout` versus pane-local
@@ -140,7 +142,8 @@ through the blob API. A local file is deleted only after its hash/path is no lon
 
 ### SQLite schema
 
-The current clean baseline is `crates/notes-core/src/db/migrations/V001__initial.sql`:
+The schema starts with `crates/notes-core/src/db/migrations/V001__initial.sql` and evolves through
+the numbered migrations in that directory. The original text tables include:
 
 ```text
 pages, blocks
@@ -155,21 +158,55 @@ sync_meta, local_device
 The `id INTEGER PRIMARY KEY` columns on `pages` and `blocks` are local FTS row IDs only. Domain
 queries, RPCs, operations, refs, graph edges, and sync never expose them.
 
-There is intentionally no migration from the former generic-node schema. While the project is
-unreleased, a completed breaking architecture stage may replace accumulated migrations with one
-fresh V001 baseline. Development databases must then be deleted and recreated; compatibility
-tables, views, conversion code, and reset migration counters are not retained.
+Later migrations add immutable page identities, aliases, ink bodies/versions, import receipts,
+structural indexes, Store commit state and history retention. Migrations run on the writer before
+the runtime opens its read worker. Replacing V001 or deleting a database is not a migration or an
+automatic fallback on failure.
+
+### Store transaction and runtime ownership
+
+`NotesStore` owns the text writer and one file-backed `READ_ONLY`/`query_only` reader. The Tauri
+host routes genuine document/list/search/graph DTO reads to that worker; nominal reads that write
+attachment preview metadata still use the writer. Compatibility `NotesStore::new(Connection)`
+wraps one existing handle, including isolated in-memory uses.
+
+Ordinary commands plan against current state, check revisions, run one ordered Apply batch, and
+commit content, history, outbox and a local commit version together. A failed batch poisons the
+transaction even if an intermediate caller catches its error. The structural projection maintains
+the affected dependency components using the same deterministic resolver as the Full oracle;
+Full remains explicit for prepared imports and isolated snapshot projection.
+
+Prepared archive/external imports and sync snapshots have a closed bulk boundary with their
+existing history and replication semantics. Successful replacement increments a local workspace
+epoch and emits one replacement notice. That epoch is not a universal ink revision or a runtime
+generation for replacing the physical database file.
+
+Commit observers run on the writer after commit and before the next job. They publish actual
+before/after `ChangeSet` facts, including old and new containers; they do not infer changes from
+input operations. Observer failure cannot turn an already committed write into a reported failure.
+
+Each SQLite worker admits at most 64 outstanding jobs. Admission is cancelable before acceptance;
+an accepted write remains owned by the worker when its waiting frontend future disappears.
+Explicit Store close stops and drains both workers and joins their threads. Raw native ink
+connections still require separate lifecycle coordination before that close; opening a reader
+does not make the text writer the only writer of the file.
+
+Connection policy lives in `sqlite::policy`. During measurement the main and AI stores retain
+`NORMAL`; native ink and server oplog/OAuth/blob ownership retain `FULL`. `FULL` is the candidate
+common guarantee for primary data; a production policy change needs the mixed-workload and
+recovery checks in the database plan.
 
 ## 4. Operation and apply model
 
-The current operation format is version 5. An envelope contains:
+The current operation format is version 7. Compatible text-only version 6 envelopes remain
+readable under the Apply validation rules. An envelope contains:
 
 ```text
 op_id: UUIDv7
 workspace_uuid: UUID
 device_id: UUID
 hlc: hybrid logical clock
-format_version: 5
+format_version: 7
 kind + typed payload
 ```
 
@@ -180,6 +217,7 @@ The closed operation set is:
 | Page       | `page_create`, `page_alias_set`, `page_set_title`, `page_set_layout`, `page_delete`   |
 | Block      | `block_create`, `block_set_markdown`, `block_set_style`, `block_move`, `block_delete` |
 | Attachment | `attachment_add`, `attachment_remove`                                                 |
+| Ink        | `ink_publish`                                                                         |
 
 `PageCreate` carries `PageLayout`. `BlockCreate` carries page/parent UUIDs, `OrderKey`,
 `BlockStyle`, Markdown, and creation time. A block move carries its page, optional parent, and
@@ -202,6 +240,9 @@ All local and remote operations use the same apply engine. It provides:
 Undo and redo store forward and inverse operation templates, not database snapshots. Replaying a
 history action creates fresh operation IDs and HLC values, so undo/redo is sync-visible and does not
 force a full AI reindex. History is device-local and is cleared by whole-workspace archive import.
+Text actions retain compatible v2 templates; v3 ink deletion actions also retain native recovery
+metadata and immutable roots until the action is discarded. Native stroke history has its own
+cursor and guards; it is not a second copy of text history.
 
 ## 5. Snapshots and sync protocol
 
@@ -244,16 +285,17 @@ On a new replica:
 
 The server assigns a gapless per-user `seq` in its oplog and materializes the same operations into
 its own notes-core replica. Server replay resumes from the materialized replica cursor rather than
-reapplying the log from zero.
+reapplying the log from zero. The notes database and oplog are separate SQLite files; this is not
+a distributed transaction. The durable outbox/replay paths bridge their commit boundaries.
 
 ### Server-authored writes
 
 The server writes to the graph itself: the chat agent creates pages, and further server-side writers
 will follow. On the server the notes replica is a materialization of the oplog and nothing else, so
-such a write is complete only once every operation behind it carries a `seq`. Until then it is not
-durable, not visible to any device, and absent from the log that a snapshot taken meanwhile claims
-to represent — and it cannot be repaired afterwards, because only the operation envelope carries the
-HLC and it was never persisted.
+such a write is published only once every operation behind it carries a `seq`. Before publication,
+the locally committed envelopes remain in the server replica's durable outbox for retry. A local
+notes commit alone does not claim successful publication to devices or an atomic commit with the
+oplog.
 
 Two rules keep that from being possible to forget:
 
@@ -315,21 +357,27 @@ Sync status is explicit (`disabled`, `connecting`, `syncing`, `online`, `offline
 Semantic search and chat return an explicit unavailable error when no server is configured; they
 do not silently fall back to another AI implementation.
 
-Persisted Rust state is cached by TanStack Query. A generated, typed `DomainEvent` invalidates page,
-block, child-tree, graph, backlink, attachment, history, sync, settings, and server-AI query keys.
+Persisted Rust state is cached by TanStack Query. A generated, typed `DomainEvent` carries ordered
+Store commit facts and remaining native/settings/sync events. The consumer invalidates affected
+page, block, child-tree, graph, backlink, attachment and history query keys. Query epochs and
+cancellation stop an old read response or mutation acknowledgement from replacing newer data.
+Replacement notices retire inactive backend snapshots and refresh mounted queries.
 Editor drafts and caret state remain local to editor components so backend refreshes do not turn
 every keystroke into global UI state.
 
 ## 7. Server-owned AI
 
-Only the Axum server depends on `notes-ai`. For each configured user it opens a separate disposable
-`ai.db` containing:
+Only the Axum server depends on `notes-ai`. For each configured user it opens a separate `ai.db`
+containing:
 
 - embedding generations and their identity metadata;
 - embedding and extraction jobs with source hashes and server sequence watermarks;
 - generation-to-vector mappings and dynamically created sqlite-vec tables;
 - extracted entities and extraction edges;
 - runtime switches for automatic embeddings, entity extraction, and query rewriting.
+
+Embeddings, extraction results and their jobs are derived data. Runtime/index control is persistent
+configuration; the whole file must not be treated as disposable merely because its name is AI.
 
 The embedding identity includes endpoint, model, dimensions, and input format. A provider/model or
 dimension change creates a new generation instead of mixing incompatible vectors. Worker writes
