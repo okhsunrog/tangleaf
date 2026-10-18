@@ -9,6 +9,8 @@ use crate::operation::{
 use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
+mod metadata;
+
 type CommitObserver = dyn Fn(&CommitNotice) + Send + Sync;
 
 /// Facts captured inside a successful transaction, published after its commit.

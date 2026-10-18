@@ -271,6 +271,16 @@
   typed errors и inner panic handling сохранены. Прошли все 27 SQLite tests и core all-target
   Clippy; сам lifecycle ещё не подключён к общему shutdown/restore и координации raw ink jobs.
 
+- Role/configure/bind/quarantine/release переведены на конкретные Store metadata commands.
+  Они сохраняют URL trim, binding guards, bootstrap cursor assignment и первый quarantine
+  reason/time. Точные повторы не делают DML и не повышают counter; реальные служебные изменения
+  публикуют commit без content/history facts. Bind проверяет sequence range до записи.
+  Общий one-batch/poison guard действует между metadata и content в обе стороны.
+  Прошли 9 metadata integration, 2 private poison, 10 remote и 13 sync regression тестов;
+  общий Clippy чистый. Исторический migration fixture теперь заполняет V006 metadata напрямую,
+  поскольку текущие Store-команды требуют актуальной схемы. Archive sync-config predicate
+  пока требует консолидации с operation policy при переносе archive restore.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

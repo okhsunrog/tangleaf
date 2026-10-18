@@ -512,42 +512,64 @@ impl ReplicaRole {
 
 /// Records the role of this replica. Idempotent, and safe to call on every open.
 pub async fn set_replica_role(conn: &Connection, role: ReplicaRole) -> Result<()> {
-    conn.call(move |database| {
-        database.execute(
-            "INSERT INTO sync_meta(key, value) VALUES ('replica_role', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [role.as_stored()],
-        )?;
-        Ok(())
-    })
-    .await
+    crate::store::NotesStore::new(conn.clone())
+        .set_replica_role(role)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn set_replica_role_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    role: ReplicaRole,
+) -> CoreResult<bool> {
+    let previous = sync_metadata_value(transaction, "replica_role")?;
+    if previous.as_deref() == Some(role.as_stored()) {
+        return Ok(false);
+    }
+    transaction.execute(
+        "INSERT INTO sync_meta(key, value) VALUES ('replica_role', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [role.as_stored()],
+    )?;
+    Ok(true)
+}
+
+fn sync_metadata_value(
+    transaction: &rusqlite::Transaction<'_>,
+    key: &str,
+) -> rusqlite::Result<Option<String>> {
+    transaction
+        .prepare_cached("SELECT value FROM sync_meta WHERE key = ?1")?
+        .query_row([key], |row| row.get(0))
+        .optional()
 }
 
 pub async fn configure_sync(conn: &Connection, server_url: &str) -> Result<()> {
-    let server_url = server_url.trim().to_string();
-    conn.call(move |database| {
-        let transaction = database.transaction()?;
-        let previous = transaction
-            .query_row(
-                "SELECT value FROM sync_meta WHERE key = 'server_url'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        if previous.as_deref() != Some(server_url.as_str()) {
-            transaction.execute(
-                "DELETE FROM sync_meta WHERE key = 'bound_workspace_uuid'",
-                [],
-            )?;
-        }
-        transaction.execute(
-            "INSERT INTO sync_meta(key, value) VALUES ('server_url', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [server_url],
-        )?;
-        transaction.commit()
-    })
-    .await
+    crate::store::NotesStore::new(conn.clone())
+        .configure_sync(server_url)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn configure_sync_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    server_url: &str,
+) -> CoreResult<bool> {
+    let server_url = server_url.trim();
+    let previous = sync_metadata_value(transaction, "server_url")?;
+    if previous.as_deref() == Some(server_url) {
+        return Ok(false);
+    }
+    transaction.execute(
+        "DELETE FROM sync_meta WHERE key = 'bound_workspace_uuid'",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO sync_meta(key, value) VALUES ('server_url', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [server_url],
+    )?;
+    Ok(true)
 }
 
 pub async fn sync_bound_workspace(conn: &Connection) -> Result<Option<uuid::Uuid>> {
@@ -577,41 +599,52 @@ pub async fn bind_sync_workspace(
     workspace_uuid: uuid::Uuid,
     server_seq: u64,
 ) -> Result<()> {
-    let server_url = server_url.trim().to_string();
-    conn.call_domain(move |database| -> CoreResult<()> {
-        let transaction = database.transaction()?;
-        let configured_url = transaction
-            .query_row(
-                "SELECT value FROM sync_meta WHERE key = 'server_url'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        if configured_url.as_deref() != Some(server_url.as_str()) {
-            return Err(CoreError::conflict(
-                "sync server changed while workspace binding was established",
-            ));
-        }
-        let local_workspace_uuid = crate::db::transaction_workspace_uuid(&transaction)?;
-        if local_workspace_uuid != workspace_uuid {
-            return Err(CoreError::conflict(format!(
-                "cannot bind workspace {local_workspace_uuid} to remote workspace {workspace_uuid}"
-            )));
-        }
+    crate::store::NotesStore::new(conn.clone())
+        .bind_sync_workspace(server_url, workspace_uuid, server_seq)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn bind_sync_workspace_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    server_url: &str,
+    workspace_uuid: uuid::Uuid,
+    server_seq: u64,
+) -> CoreResult<bool> {
+    validate_server_sequence(server_seq)?;
+    let configured_url = sync_metadata_value(transaction, "server_url")?;
+    if configured_url.as_deref() != Some(server_url.trim()) {
+        return Err(CoreError::conflict(
+            "sync server changed while workspace binding was established",
+        ));
+    }
+    let local_workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
+    if local_workspace_uuid != workspace_uuid {
+        return Err(CoreError::conflict(format!(
+            "cannot bind workspace {local_workspace_uuid} to remote workspace {workspace_uuid}"
+        )));
+    }
+    let binding = workspace_uuid.to_string();
+    let cursor = server_seq.to_string();
+    let binding_changed = sync_metadata_value(transaction, "bound_workspace_uuid")?.as_deref()
+        != Some(binding.as_str());
+    let cursor_changed =
+        sync_metadata_value(transaction, "last_server_seq")?.as_deref() != Some(cursor.as_str());
+    if binding_changed {
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('bound_workspace_uuid', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [workspace_uuid.to_string()],
+            [binding],
         )?;
+    }
+    if cursor_changed {
         transaction.execute(
             "INSERT INTO sync_meta(key, value) VALUES ('last_server_seq', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [server_seq.to_string()],
+            [cursor],
         )?;
-        transaction.commit()?;
-        Ok(())
-    })
-    .await
+    }
+    Ok(binding_changed || cursor_changed)
 }
 
 pub async fn sync_cursor(conn: &Connection) -> Result<u64> {
@@ -676,16 +709,25 @@ pub async fn quarantine_outbox_op(
     reason: String,
     now_ms: i64,
 ) -> Result<bool> {
-    conn.call(move |database| {
-        let changed = database.execute(
-            "UPDATE sync_outbox
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .quarantine_outbox_op(op_id, reason, now_ms)
+        .await?
+        .value)
+}
+
+pub(crate) fn quarantine_outbox_op_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    op_id: uuid::Uuid,
+    reason: &str,
+    now_ms: i64,
+) -> CoreResult<bool> {
+    let changed = transaction.execute(
+        "UPDATE sync_outbox
                 SET quarantined_at = ?2, quarantine_reason = ?3
               WHERE op_id = ?1 AND quarantined_at IS NULL",
-            rusqlite::params![op_id, now_ms, reason],
-        )?;
-        Ok(changed > 0)
-    })
-    .await
+        rusqlite::params![op_id, now_ms, reason],
+    )?;
+    Ok(changed > 0)
 }
 
 pub async fn quarantined_outbox(conn: &Connection, limit: u32) -> Result<Vec<QuarantinedOp>> {
@@ -718,14 +760,20 @@ pub async fn quarantined_outbox(conn: &Connection, limit: u32) -> Result<Vec<Qua
 
 /// Puts every held-back operation back in the queue, in its original order.
 pub async fn release_quarantined_outbox(conn: &Connection) -> Result<usize> {
-    conn.call(move |database| {
-        database.execute(
-            "UPDATE sync_outbox SET quarantined_at = NULL, quarantine_reason = NULL
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .release_quarantined_outbox()
+        .await?
+        .value)
+}
+
+pub(crate) fn release_quarantined_outbox_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> CoreResult<usize> {
+    Ok(transaction.execute(
+        "UPDATE sync_outbox SET quarantined_at = NULL, quarantine_reason = NULL
               WHERE quarantined_at IS NOT NULL",
-            [],
-        )
-    })
-    .await
+        [],
+    )?)
 }
 
 pub async fn apply_sequenced(conn: &Connection, seq: u64, op: &Op) -> Result<ApplyOutcome> {

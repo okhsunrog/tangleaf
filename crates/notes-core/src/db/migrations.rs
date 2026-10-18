@@ -247,9 +247,12 @@ mod tests {
         db::workspace::initialize_workspace(&connection)
             .await
             .unwrap();
-        crate::configure_sync(&connection, "https://migration.example.test")
-            .await
-            .unwrap();
+        // Populate historical metadata directly: current Store commands need
+        // columns and the projection marker added after this V006 fixture.
+        connection.call(|database| {
+            database.execute("INSERT INTO sync_meta(key,value) VALUES('server_url','https://migration.example.test')", [])?;
+            Ok(())
+        }).await.unwrap();
         let ink_page = uuid::Uuid::from_u128(0x6003);
         connection
             .call_domain(move |database| -> CoreResult<()> {
