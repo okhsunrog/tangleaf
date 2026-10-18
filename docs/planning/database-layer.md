@@ -155,6 +155,12 @@
   ошибки материализации (включая clocks/outbox). Все 8 Tauri image/protocol тестов проходят.
   Неиспользуемый async `db::apply_local` удалён; его низкоуровневый fixture-adapter теперь
   доступен только тестам. Общий core/Tauri all-target Clippy проходит.
+- Create block и delete-leaf планируются в Store-транзакции: проверка page/parent/after,
+  sibling order и отсутствие детей больше не разделены await-границами с Apply.
+  Порядок и Immediate policy сохранены; sparse placement вынесен в следующий отдельный шаг.
+  14 block-command тестов, 22 history/archive и 11 document проходят. Проверены оба порядка
+  create/delete-parent, FIFO appends, no-op/invalid input и rollback истории; общий Clippy
+  будет повторён после интеграции рукописного retention.
 
 ## Решение и масштаб
 

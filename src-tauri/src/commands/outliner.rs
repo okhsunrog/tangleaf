@@ -32,19 +32,11 @@ pub async fn create_block(
     style: BlockStyle,
     markdown: String,
 ) -> CommandResult<db::Block> {
-    let applied = db::create_block_with_ops(
-        &state.conn,
-        page_uuid,
-        parent_uuid,
-        after_uuid,
-        style,
-        markdown,
-    )
-    .await
-    .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    emit_domain(&app, DomainEvent::HistoryChanged);
-    Ok(applied.value)
+    let committed = observed_store(&app, &state)
+        .create_block(page_uuid, parent_uuid, after_uuid, style, markdown)
+        .await
+        .map_err(err)?;
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -191,14 +183,11 @@ pub async fn delete_block(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    let applied = db::delete_block_with_ops(&state.conn, uuid)
+    let committed = observed_store(&app, &state)
+        .delete_block(uuid)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if applied.value {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]

@@ -522,3 +522,302 @@ async fn legacy_adapters_keep_operations_and_reference_change_flags_without_obse
     assert!(repeated.operations.is_empty());
     assert!(f.notices.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn queued_appends_plan_against_the_previous_commit_and_publish_only_created_blocks() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut first = std::pin::pin!(f.store.create_block(
+        f.block.page_uuid,
+        None,
+        None,
+        BlockStyle::Bullet,
+        "First".into(),
+    ));
+    let mut second = std::pin::pin!(f.store.create_block(
+        f.block.page_uuid,
+        None,
+        None,
+        BlockStyle::Bullet,
+        "Second".into(),
+    ));
+    enqueue(first.as_mut()).await;
+    enqueue(second.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let blocks = db::list_block_children(&f.connection, f.block.page_uuid, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        blocks.iter().map(|block| block.uuid).collect::<Vec<_>>(),
+        [f.block.uuid, first.value.uuid, second.value.uuid]
+    );
+    assert!(
+        blocks
+            .windows(2)
+            .all(|pair| pair[0].order_key < pair[1].order_key)
+    );
+    for committed in [&first, &second] {
+        assert_eq!(committed.changes.blocks.len(), 1);
+        assert_eq!(committed.changes.blocks[0].uuid, committed.value.uuid);
+        assert!(committed.changes.blocks[0].before.is_none());
+        assert!(committed.changes.blocks[0].after.is_some());
+        assert_eq!(committed.changes.affected_pages, [f.block.page_uuid]);
+        assert!(committed.changes.changed_pages.is_empty());
+        assert!(committed.changes.history_changed);
+    }
+    assert_eq!(f.notices.lock().unwrap().len(), 2);
+    let after = bookkeeping(&f.connection).await;
+    assert_eq!(after.applied, before.applied + 2);
+    assert_eq!(after.outbox, before.outbox + 2);
+    assert_eq!(after.undo, 2);
+    assert_eq!(after.version, before.version + 2);
+    for uuid in [second.value.uuid, first.value.uuid] {
+        assert_eq!(
+            f.store.undo().await.unwrap().value,
+            db::HistoryMoveResult::Applied
+        );
+        assert!(db::get_block(&f.connection, uuid).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn create_then_delete_parent_checks_leaf_guard_after_the_child_commit() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut create = std::pin::pin!(f.store.create_block(
+        f.block.page_uuid,
+        Some(f.block.uuid),
+        None,
+        BlockStyle::Bullet,
+        "Child".into(),
+    ));
+    let mut delete = std::pin::pin!(f.store.delete_block(f.block.uuid));
+    enqueue(create.as_mut()).await;
+    enqueue(delete.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (create, delete) = tokio::join!(create, delete);
+    let child = create.unwrap();
+    let delete = delete.unwrap();
+    assert!(!delete.value);
+    assert!(delete.changes.is_empty());
+    assert_eq!(delete.commit_version, None);
+    assert_eq!(
+        db::get_block(&f.connection, child.value.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent_uuid,
+        Some(f.block.uuid)
+    );
+    assert_eq!(
+        db::get_block(&f.connection, f.block.uuid)
+            .await
+            .unwrap()
+            .unwrap(),
+        f.block
+    );
+    let after = bookkeeping(&f.connection).await;
+    assert_eq!(after.outbox, before.outbox + 1);
+    assert_eq!(after.undo, before.undo + 1);
+    assert_eq!(after.version, before.version + 1);
+    assert_eq!(f.notices.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn delete_then_create_under_removed_parent_is_typed_and_does_not_resurrect_content() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let before = bookkeeping(&f.connection).await;
+    let (release, blocker) = block_worker(&f.connection).await;
+    let mut delete = std::pin::pin!(f.store.delete_block(f.block.uuid));
+    let mut create = std::pin::pin!(f.store.create_block(
+        f.block.page_uuid,
+        Some(f.block.uuid),
+        None,
+        BlockStyle::Bullet,
+        "Child".into(),
+    ));
+    enqueue(delete.as_mut()).await;
+    enqueue(create.as_mut()).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    let (delete, create) = tokio::join!(delete, create);
+    let delete = delete.unwrap();
+    assert!(delete.value);
+    let error = create.unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<CoreError>(), Some(CoreError::NotFound(message)) if message == "parent block was not found")
+    );
+    assert_eq!(delete.changes.blocks.len(), 1);
+    assert_eq!(delete.changes.blocks[0].uuid, f.block.uuid);
+    assert!(delete.changes.blocks[0].before.is_some());
+    assert!(delete.changes.blocks[0].after.is_none());
+    assert_eq!(delete.changes.affected_pages, [f.block.page_uuid]);
+    assert!(delete.changes.history_changed);
+    assert!(
+        db::list_block_children(&f.connection, f.block.page_uuid, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after = bookkeeping(&f.connection).await;
+    assert_eq!(after.outbox, before.outbox + 1);
+    assert_eq!(after.undo, 1);
+    assert_eq!(after.version, before.version + 1);
+    assert_eq!(f.notices.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn create_validation_and_absent_delete_leave_every_mutation_surface_unchanged() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let foreign_page = db::create_page(&f.connection, "Foreign".into())
+        .await
+        .unwrap();
+    let foreign = db::create_block(
+        &f.connection,
+        foreign_page.uuid,
+        None,
+        None,
+        BlockStyle::Paragraph,
+        "Foreign".into(),
+    )
+    .await
+    .unwrap();
+    let before = bookkeeping(&f.connection).await;
+    let missing = uuid::Uuid::now_v7();
+    for (page, parent, after, expected_kind) in [
+        (missing, None, None, "not_found"),
+        (f.block.page_uuid, Some(missing), None, "not_found"),
+        (f.block.page_uuid, Some(foreign.uuid), None, "conflict"),
+        (f.block.page_uuid, None, Some(foreign.uuid), "invalid"),
+    ] {
+        let error = f
+            .store
+            .create_block(page, parent, after, BlockStyle::Bullet, "Rejected".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            (error.downcast_ref::<CoreError>(), expected_kind),
+            (Some(CoreError::NotFound(_)), "not_found")
+                | (Some(CoreError::Conflict(_)), "conflict")
+                | (Some(CoreError::InvalidInput(_)), "invalid")
+        ));
+    }
+    let absent = f.store.delete_block(missing).await.unwrap();
+    assert!(!absent.value);
+    assert_eq!(absent.commit_version, None);
+    assert!(absent.changes.is_empty());
+    assert_eq!(bookkeeping(&f.connection).await, before);
+    assert!(f.notices.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_and_delete_history_failures_roll_back_content_and_bookkeeping() {
+    for deleting in [false, true] {
+        let f = fixture(BlockStyle::Paragraph).await;
+        f.connection
+            .call(|database| {
+                database.execute_batch(
+                    "CREATE TRIGGER reject_structure_history BEFORE INSERT ON history_undo
+             BEGIN SELECT RAISE(ABORT, 'injected structure history failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let before = bookkeeping(&f.connection).await;
+        let error = if deleting {
+            f.store.delete_block(f.block.uuid).await.unwrap_err()
+        } else {
+            f.store
+                .create_block(
+                    f.block.page_uuid,
+                    None,
+                    None,
+                    BlockStyle::Bullet,
+                    "Rejected".into(),
+                )
+                .await
+                .unwrap_err()
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected structure history failure")
+        );
+        assert_eq!(
+            db::list_block_children(&f.connection, f.block.page_uuid, None)
+                .await
+                .unwrap(),
+            [f.block]
+        );
+        assert_eq!(bookkeeping(&f.connection).await, before);
+        assert!(f.notices.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn legacy_middle_insertion_keeps_full_ordinal_batch_and_immediate_history_policy() {
+    let f = fixture(BlockStyle::Paragraph).await;
+    let second = db::create_block(
+        &f.connection,
+        f.block.page_uuid,
+        None,
+        None,
+        BlockStyle::Bullet,
+        "Second".into(),
+    )
+    .await
+    .unwrap();
+    let inserted = db::create_block_with_ops(
+        &f.connection,
+        f.block.page_uuid,
+        None,
+        Some(f.block.uuid),
+        BlockStyle::Bullet,
+        "Middle".into(),
+    )
+    .await
+    .unwrap();
+    // Sparse placement is a separate change: keep create + moves for all three.
+    assert_eq!(inserted.operations.len(), 4);
+    let blocks = db::list_block_children(&f.connection, f.block.page_uuid, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        blocks.iter().map(|block| block.uuid).collect::<Vec<_>>(),
+        [f.block.uuid, inserted.value.uuid, second.uuid]
+    );
+    for (index, block) in blocks.iter().enumerate() {
+        assert_eq!(
+            block.order_key,
+            notes_core::OrderKey::from_ordinal(index + 1)
+        );
+    }
+    let payload = f
+        .connection
+        .call(|database| {
+            database.query_row(
+                "SELECT inverse_json FROM history_undo ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .await
+        .unwrap();
+    let payload: serde_json::Value =
+        notes_core::operation::decode_persisted_envelope(&payload).unwrap();
+    assert_eq!(payload["apply_policy"], "immediate");
+    assert!(f.notices.lock().unwrap().is_empty());
+    assert!(
+        db::delete_block_with_ops(&f.connection, inserted.value.uuid)
+            .await
+            .unwrap()
+            .value
+    );
+}

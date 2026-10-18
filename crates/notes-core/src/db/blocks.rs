@@ -74,18 +74,24 @@ pub async fn list_block_children(
     page_uuid: uuid::Uuid,
     parent_uuid: Option<uuid::Uuid>,
 ) -> Result<Vec<Block>> {
-    conn.call(move |database| {
-        let sql = format!(
-            "SELECT {BLOCK_COLUMNS} FROM blocks
+    conn.call(move |database| read_block_children(database, page_uuid, parent_uuid))
+        .await
+}
+
+fn read_block_children(
+    database: &rusqlite::Connection,
+    page_uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+) -> rusqlite::Result<Vec<Block>> {
+    let sql = format!(
+        "SELECT {BLOCK_COLUMNS} FROM blocks
               WHERE page_uuid = ?1 AND parent_uuid IS ?2
               ORDER BY order_key, uuid"
-        );
-        database
-            .prepare(&sql)?
-            .query_map(rusqlite::params![page_uuid, parent_uuid], row_to_block)?
-            .collect()
-    })
-    .await
+    );
+    database
+        .prepare(&sql)?
+        .query_map(rusqlite::params![page_uuid, parent_uuid], row_to_block)?
+        .collect()
 }
 
 pub async fn create_block(
@@ -112,64 +118,13 @@ pub async fn create_block_with_ops(
     style: BlockStyle,
     markdown: String,
 ) -> Result<AppliedMutation<Block>> {
-    if get_page(conn, page_uuid).await?.is_none() {
-        return Err(crate::CoreError::not_found("page was not found").into());
-    }
-    if let Some(parent_uuid) = parent_uuid {
-        let parent = get_block(conn, parent_uuid)
-            .await?
-            .ok_or_else(|| crate::CoreError::not_found("parent block was not found"))?;
-        if parent.page_uuid != page_uuid {
-            return Err(
-                crate::CoreError::conflict("parent block belongs to a different page").into(),
-            );
-        }
-    }
-    let siblings = list_block_children(conn, page_uuid, parent_uuid).await?;
-    let insertion = match after_uuid {
-        Some(after) => siblings
-            .iter()
-            .position(|block| block.uuid == after)
-            .map(|index| index + 1)
-            .ok_or_else(|| {
-                crate::CoreError::invalid("after block is not a sibling of the new block")
-            })?,
-        None => siblings.len(),
-    };
-    let uuid = uuid::Uuid::now_v7();
-    let now = chrono::Utc::now().timestamp();
-    let appending = insertion == siblings.len();
-    let order_key = if appending {
-        next_append_order_key(siblings.last().map(|block| &block.order_key))?
-    } else {
-        OrderKey::from_ordinal(insertion + 1)
-    };
-    let mut kinds = vec![OpKind::BlockCreate(BlockCreate {
-        uuid,
-        page_uuid,
-        parent_uuid,
-        order_key,
-        style,
-        markdown,
-        created_at: now,
-    })];
-    if !appending {
-        let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-        ordered.insert(insertion, uuid);
-        kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-            OpKind::BlockMove(BlockMove {
-                uuid: block_uuid,
-                page_uuid,
-                parent_uuid,
-                order_key: OrderKey::from_ordinal(index + 1),
-            })
-        }));
-    }
-    let operations = apply_local_action(conn, "create block", kinds).await?;
-    let value = get_block(conn, uuid)
-        .await?
-        .context("created block disappeared")?;
-    Ok(AppliedMutation { value, operations })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .create_block(page_uuid, parent_uuid, after_uuid, style, markdown)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
 }
 
 pub async fn set_block_content(
@@ -264,11 +219,15 @@ fn require_block(
     transaction: &rusqlite::Transaction<'_>,
     uuid: uuid::Uuid,
 ) -> crate::CoreResult<Block> {
+    read_block(transaction, uuid)?.ok_or_else(|| crate::CoreError::not_found("block was not found"))
+}
+
+fn read_block(
+    transaction: &rusqlite::Transaction<'_>,
+    uuid: uuid::Uuid,
+) -> rusqlite::Result<Option<Block>> {
     let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid = ?1");
-    transaction
-        .query_row(&sql, [uuid], row_to_block)
-        .optional()?
-        .ok_or_else(|| crate::CoreError::not_found("block was not found"))
+    transaction.query_row(&sql, [uuid], row_to_block).optional()
 }
 
 fn apply_block_style(
@@ -291,6 +250,83 @@ fn apply_block_style(
 }
 
 impl crate::store::NotesStore {
+    pub async fn create_block(
+        &self,
+        page_uuid: uuid::Uuid,
+        parent_uuid: Option<uuid::Uuid>,
+        after_uuid: Option<uuid::Uuid>,
+        style: BlockStyle,
+        markdown: String,
+    ) -> Result<crate::store::Committed<Block>> {
+        self.write(move |write| -> crate::CoreResult<Block> {
+            let transaction = write.sql();
+            let page_exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pages WHERE uuid = ?1)",
+                [page_uuid],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !page_exists {
+                return Err(crate::CoreError::not_found("page was not found"));
+            }
+            if let Some(parent_uuid) = parent_uuid {
+                let parent = read_block(transaction, parent_uuid)?
+                    .ok_or_else(|| crate::CoreError::not_found("parent block was not found"))?;
+                if parent.page_uuid != page_uuid {
+                    return Err(crate::CoreError::conflict(
+                        "parent block belongs to a different page",
+                    ));
+                }
+            }
+            let siblings = read_block_children(transaction, page_uuid, parent_uuid)?;
+            let insertion = match after_uuid {
+                Some(after) => siblings
+                    .iter()
+                    .position(|block| block.uuid == after)
+                    .map(|index| index + 1)
+                    .ok_or_else(|| {
+                        crate::CoreError::invalid("after block is not a sibling of the new block")
+                    })?,
+                None => siblings.len(),
+            };
+            let uuid = uuid::Uuid::now_v7();
+            let now = chrono::Utc::now().timestamp();
+            let appending = insertion == siblings.len();
+            let order_key = if appending {
+                next_append_order_key(siblings.last().map(|block| &block.order_key))?
+            } else {
+                OrderKey::from_ordinal(insertion + 1)
+            };
+            let mut kinds = vec![OpKind::BlockCreate(BlockCreate {
+                uuid,
+                page_uuid,
+                parent_uuid,
+                order_key,
+                style,
+                markdown,
+                created_at: now,
+            })];
+            if !appending {
+                let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
+                ordered.insert(insertion, uuid);
+                kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
+                    OpKind::BlockMove(BlockMove {
+                        uuid: block_uuid,
+                        page_uuid,
+                        parent_uuid,
+                        order_key: OrderKey::from_ordinal(index + 1),
+                    })
+                }));
+            }
+            write.apply_action(
+                "create block",
+                kinds,
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            require_block(write.sql(), uuid)
+        })
+        .await
+    }
+
     /// Legacy unchecked save, serialized with all other store commands.
     pub async fn set_block_content(
         &self,
@@ -380,6 +416,33 @@ impl crate::store::NotesStore {
                 ));
             }
             apply_block_style(write, block, BlockStyle::task(state))
+        })
+        .await
+    }
+
+    /// Only a currently existing leaf can be removed by the outliner command.
+    pub async fn delete_block(&self, uuid: uuid::Uuid) -> Result<crate::store::Committed<bool>> {
+        self.write(move |write| -> crate::CoreResult<bool> {
+            let Some(block) = read_block(write.sql(), uuid)? else {
+                return Ok(false);
+            };
+            let child_count = write.sql().query_row(
+                "SELECT COUNT(*) FROM blocks WHERE parent_uuid = ?1",
+                [uuid],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if child_count != 0 {
+                return Ok(false);
+            }
+            write.apply_action(
+                "delete block",
+                vec![OpKind::BlockDelete(BlockDelete {
+                    uuid,
+                    page_uuid: block.page_uuid,
+                })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(true)
         })
         .await
     }
@@ -790,38 +853,11 @@ pub async fn delete_block_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
 ) -> Result<AppliedMutation<bool>> {
-    let Some(block) = get_block(conn, uuid).await? else {
-        return Ok(AppliedMutation {
-            value: false,
-            operations: Vec::new(),
-        });
-    };
-    let child_count = conn
-        .call(move |database| {
-            database.query_row(
-                "SELECT COUNT(*) FROM blocks WHERE parent_uuid = ?1",
-                [uuid],
-                |row| row.get::<_, i64>(0),
-            )
-        })
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .delete_block(uuid)
         .await?;
-    if child_count != 0 {
-        return Ok(AppliedMutation {
-            value: false,
-            operations: Vec::new(),
-        });
-    }
-    let operations = apply_local_action(
-        conn,
-        "delete block",
-        vec![OpKind::BlockDelete(BlockDelete {
-            uuid,
-            page_uuid: block.page_uuid,
-        })],
-    )
-    .await?;
     Ok(AppliedMutation {
-        value: true,
-        operations,
+        value: committed.value,
+        operations: committed.operations,
     })
 }
