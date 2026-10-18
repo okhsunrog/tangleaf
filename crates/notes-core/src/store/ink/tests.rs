@@ -343,9 +343,10 @@ async fn cancellation_after_admission_keeps_installation_and_observer_together()
         target.ink(source.page).read().unwrap().draft.strokes.len(),
         1
     );
-    let notices = target.notices.lock().unwrap();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].changes, expected(source.page));
-    drop(notices);
+    {
+        let notices = target.notices.lock().unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].changes, expected(source.page));
+    }
     target.connection.close().await.unwrap();
 }

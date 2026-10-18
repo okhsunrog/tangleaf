@@ -262,6 +262,7 @@ pub(super) async fn write_backup(
     crate::backup::create_recovery_backup(store, blob_store, &path).await
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 fn write_archive_atomically(
     destination: &Path,
     archive: db::DataArchive,
@@ -585,7 +586,7 @@ fn read_u64(reader: &mut impl Read) -> std::io::Result<u64> {
     Ok(u64::from_be_bytes(bytes))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(not(target_os = "android"), test)))]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
