@@ -9,6 +9,8 @@ use crate::operation::{
 use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
+mod backup;
+pub use backup::DatabaseBackup;
 pub(crate) mod bulk;
 mod metadata;
 mod runtime;

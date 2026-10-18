@@ -13,7 +13,7 @@ async-channel.workspace = true
 chrono.workspace = true
 notes-blob.workspace = true
 notes-markdown.workspace = true
-rusqlite = { workspace = true, features = ["cache"] }
+rusqlite = { workspace = true, features = ["backup", "cache"] }
 rusqlite_migration.workspace = true
 rust-stemmers.workspace = true
 serde.workspace = true
@@ -27,9 +27,9 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 ink-format = { version = "0.1.0", path = "../ink-format" }
 specta-typescript.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
 proptest.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

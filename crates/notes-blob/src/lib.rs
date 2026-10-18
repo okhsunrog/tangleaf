@@ -17,6 +17,11 @@ use sha2::{Digest, Sha256};
 use tempfile::Builder;
 use thiserror::Error;
 
+mod lease;
+use lease::DeletionGate;
+pub use lease::DeletionLease;
+use std::sync::Arc;
+
 const SHA256_BYTES: usize = 32;
 const SHA256_HEX_LEN: usize = SHA256_BYTES * 2;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -219,13 +224,27 @@ impl VerifiedBlob {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
+    deletions: Arc<DeletionGate>,
 }
 
 impl BlobStore {
     /// Creates a store rooted at `root` without touching the filesystem.
+    /// Clones share deletion leases; independently constructed stores, even at
+    /// the same root, do not. A host must share one owner for coordinated GC.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            deletions: Arc::default(),
+        }
+    }
+
+    /// Prevent canonical files from being unlinked by this owner or its clones
+    /// while a backup captures/copies them. Installation remains allowed.
+    /// Removals defer without waiting for this guard to drop. This is a local
+    /// runtime lease, not coordination with other processes or store owners.
+    pub fn lease_deletions(&self) -> DeletionLease {
+        self.deletions.acquire()
     }
 
     /// Returns the configured store root.
@@ -454,7 +473,11 @@ impl BlobStore {
     /// hashing its bytes. This is intended only for disposable derived caches
     /// after [`Self::read_verified`] has rejected an entry; authoritative blob
     /// stores should use [`Self::remove_verified`] instead.
+    /// Returns false when absent or deferred by a deletion lease.
     pub fn discard_unverified(&self, hash: BlobHash) -> Result<bool, BlobStoreError> {
+        if self.deletions.is_leased() {
+            return Ok(false);
+        }
         let path = self.path_for(hash);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -473,16 +496,7 @@ impl BlobStore {
                 expected: "a file or symlink at the exact disposable cache path",
             });
         }
-        fs::remove_file(&path).map_err(|source| BlobStoreError::Io {
-            operation: "discard disposable blob",
-            path: path.clone(),
-            source,
-        })?;
-        let shard = path
-            .parent()
-            .expect("a canonical blob path always has a shard parent");
-        sync_directory(shard)?;
-        Ok(true)
+        self.deletions.try_remove(&path, "discard disposable blob")
     }
 
     /// Reads and hashes an installed blob to verify its content-addressed name.
@@ -496,7 +510,12 @@ impl BlobStore {
     /// This is intended for host-level orphan cleanup after a metadata
     /// transaction fails. Callers must serialize the accompanying reference
     /// check with metadata mutations before invoking this method.
+    /// Returns false when absent or deferred by a deletion lease; false means
+    /// not removed and is not proof that the file is missing.
     pub fn remove_verified(&self, hash: BlobHash, max_bytes: u64) -> Result<bool, BlobStoreError> {
+        if self.deletions.is_leased() {
+            return Ok(false);
+        }
         let verified = match self.open_verified(hash, max_bytes) {
             Ok(verified) => verified,
             Err(BlobStoreError::NotFound { .. }) => return Ok(false),
@@ -507,21 +526,7 @@ impl BlobStore {
         };
         let path = verified.blob.path.clone();
         drop(verified);
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                let shard = path
-                    .parent()
-                    .expect("a canonical blob path always has a shard parent");
-                sync_directory(shard)?;
-                Ok(true)
-            }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(BlobStoreError::Io {
-                operation: "remove verified blob",
-                path,
-                source,
-            }),
-        }
+        self.deletions.try_remove(&path, "remove verified blob")
     }
 
     fn ensure_shard(&self, shard: &Path) -> Result<(), BlobStoreError> {
@@ -742,7 +747,8 @@ fn hash_reader(mut reader: impl Read, path: &Path) -> Result<(BlobHash, u64), Bl
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
+/// Flush a directory entry update using the platform's durable publication mechanism.
+pub fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| BlobStoreError::Io {
@@ -753,7 +759,8 @@ fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
+/// Flush a directory entry update using the platform's durable publication mechanism.
+pub fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
     use std::os::windows::fs::OpenOptionsExt;
 
     // FILE_FLAG_BACKUP_SEMANTICS is required to obtain a directory handle.
@@ -777,7 +784,8 @@ fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
+/// Report unsupported durable directory publication on this platform.
+pub fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
     Err(BlobStoreError::UnsupportedDurability {
         path: path.to_path_buf(),
     })

@@ -360,6 +360,19 @@
   регрессий (83 всего), включая reopen, quarantine, ACK, ошибку GC и откат migration.
   Native acquisition/runtime/BOOX paths этим изменением не менялись.
 
+- Добавлены проверенные primitives для полного backup: `NotesStore::backup_database` через
+  SQLite Online Backup API читает один стабильный snapshot на reader, сохраняя history/outbox/
+  cursor и native ink. После копирования read-транзакция сразу освобождается. Частная копия
+  проходит quick/FK/metadata checks, checkpoint, перевод в standalone DELETE mode, hash/fsync
+  и no-overwrite публикацию. Ограничено ожидание Busy/Locked, а не полезный прогресс копирования.
+  Отмена waiter не бросает принятый worker job и временный файл.
+  BlobStore clones разделяют deletion lease: захват и unlink упорядочены коротким mutex,
+  удаления при активном lease откладываются без ожидания backup внутри writer. Защита локальна
+  одному владельцу/clones, не независимым процессам или заново созданным same-path BlobStore.
+  Прошли 5 lease, 8 physical-backup и 14 прежних blob tests, targeted Clippy с `-D warnings`.
+  Сам SQLite primitive ещё не является полным backup: manifest/копирование файлов под lease
+  и проверяемый restore реализуются следующим отдельным шагом.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
