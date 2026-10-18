@@ -20,6 +20,7 @@ import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib
 import { queryKeys, refreshQueries } from "@/lib/query";
 import { profileUiMethods, uiProfilePoint, uiProfileSpan } from "@/lib/ui-profile";
 import { BlockNode } from "./block-node";
+import { measureOutlineRow } from "./row-measurement";
 import { OutlinerProvider, useOutliner } from "./outliner-store";
 
 type Props = {
@@ -184,6 +185,9 @@ function VirtualOutline({
   const virtualizer = useVirtualizer({
     count: rows.length,
     enabled: virtualize,
+    // Keep Android's hardware-tested path. On desktop, observing new rows in
+    // one ResizeObserver batch avoids layout/scroll corrections in each ref.
+    ...(isAndroid() ? {} : { measureElement: measureOutlineRow }),
     estimateSize: (index) => estimateBlockHeight(rows[index]?.block),
     getItemKey: (index) => rows[index]?.block.uuid ?? index,
     getScrollElement: () => scrollElement,
