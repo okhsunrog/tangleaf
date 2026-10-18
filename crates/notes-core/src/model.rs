@@ -640,6 +640,33 @@ impl OrderKey {
         u64::from_str_radix(&self.0, 16).expect("OrderKey is validated when constructed or read")
     }
 
+    /// Allocate ordered keys without changing either neighboring anchor.
+    /// `None` means the caller must rebalance the sibling group.
+    pub(crate) fn between(
+        lower: Option<&Self>,
+        upper: Option<&Self>,
+        count: usize,
+    ) -> Option<Vec<Self>> {
+        if count == 0 {
+            return Some(Vec::new());
+        }
+        // Reserve zero and 2^64 + 1 as virtual bounds around the complete
+        // u64 key space, including a real key of zero.
+        let lower = lower.map_or(0, |key| u128::from(key.value()) + 1);
+        let upper = upper.map_or(u128::from(u64::MAX) + 2, |key| u128::from(key.value()) + 1);
+        if upper <= lower || upper - lower - 1 < count as u128 {
+            return None;
+        }
+        let span = upper - lower;
+        let divisor = count as u128 + 1;
+        (1..=count as u128)
+            .map(|index| {
+                let coordinate = lower + span * index / divisor;
+                u64::try_from(coordinate - 1).ok().map(Self::from_value)
+            })
+            .collect()
+    }
+
     fn from_value(value: u64) -> Self {
         Self(format!("{value:016X}"))
     }

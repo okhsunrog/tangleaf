@@ -462,16 +462,14 @@ fn fill_order_key_gaps(desired: &mut [DesiredUnit], indices: &[usize]) -> bool {
                 .order_key
                 .as_ref()
                 .expect("preceding desired key is assigned")
-                .value()
         });
         let upper = indices.get(segment_end).map(|index| {
             desired[*index]
                 .order_key
                 .as_ref()
                 .expect("following desired key is assigned")
-                .value()
         });
-        let Some(keys) = order_keys_between(lower, upper, segment_end - segment_start) else {
+        let Some(keys) = OrderKey::between(lower, upper, segment_end - segment_start) else {
             return false;
         };
         for (position, key) in (segment_start..segment_end).zip(keys) {
@@ -480,37 +478,6 @@ fn fill_order_key_gaps(desired: &mut [DesiredUnit], indices: &[usize]) -> bool {
         segment_start = segment_end;
     }
     true
-}
-
-fn order_keys_between(
-    lower: Option<u64>,
-    upper: Option<u64>,
-    count: usize,
-) -> Option<Vec<OrderKey>> {
-    if count == 0 {
-        return Some(Vec::new());
-    }
-
-    // Coordinates reserve zero and 2^64 + 1 as virtual bounds around the
-    // complete u64 key space. This also permits a real key of zero.
-    let lower = lower.map_or(0, |value| u128::from(value) + 1);
-    let upper = upper.map_or(u128::from(u64::MAX) + 2, |value| u128::from(value) + 1);
-    if upper <= lower || upper - lower - 1 < count as u128 {
-        return None;
-    }
-    let span = upper - lower;
-    let divisor = count as u128 + 1;
-    let mut keys = Vec::with_capacity(count);
-    for index in 1..=count as u128 {
-        let coordinate = lower + span * index / divisor;
-        let value = u64::try_from(coordinate - 1).ok()?;
-        keys.push(
-            format!("{value:016X}")
-                .parse()
-                .expect("formatted u64 is a valid order key"),
-        );
-    }
-    Some(keys)
 }
 
 fn read_page_document(

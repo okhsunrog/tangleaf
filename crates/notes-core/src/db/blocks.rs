@@ -311,6 +311,86 @@ pub async fn split_block(
         .0)
 }
 
+fn split_placement(
+    transaction: &rusqlite::Transaction<'_>,
+    source: &Block,
+    count: usize,
+) -> crate::CoreResult<(Vec<OrderKey>, Vec<OpKind>)> {
+    if count == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // The sibling index covers this lookup; the ordinary Enter/paste path
+    // does not need to load every sibling's Markdown or renumber the page.
+    let next = transaction
+        .query_row(
+            "SELECT order_key FROM blocks
+              WHERE page_uuid = ?1 AND parent_uuid IS ?2
+                AND (order_key, uuid) > (?3, ?4)
+              ORDER BY order_key, uuid LIMIT 1",
+            rusqlite::params![
+                source.page_uuid,
+                source.parent_uuid,
+                source.order_key,
+                source.uuid,
+            ],
+            |row| row.get::<_, OrderKey>(0),
+        )
+        .optional()?;
+    let keys = if let Some(next) = next {
+        OrderKey::between(Some(&source.order_key), Some(&next), count)
+    } else {
+        let mut previous = source.order_key.clone();
+        (0..count)
+            .map(|_| {
+                let next = previous.after();
+                if next == previous {
+                    return None;
+                }
+                previous = next.clone();
+                Some(next)
+            })
+            .collect()
+    };
+    if let Some(keys) = keys {
+        return Ok((keys, Vec::new()));
+    }
+
+    // Tied or exhausted keys can occur after concurrent edits or repeated
+    // insertions. Rebalance only this sibling group and only changed keys.
+    let siblings = transaction
+        .prepare(
+            "SELECT uuid, order_key FROM blocks
+              WHERE page_uuid = ?1 AND parent_uuid IS ?2 ORDER BY order_key, uuid",
+        )?
+        .query_map(
+            rusqlite::params![source.page_uuid, source.parent_uuid],
+            |row| Ok((row.get::<_, uuid::Uuid>(0)?, row.get::<_, OrderKey>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let source_index = siblings
+        .iter()
+        .position(|(uuid, _)| *uuid == source.uuid)
+        .ok_or_else(|| crate::CoreError::conflict("split source is absent from its siblings"))?;
+    let moves = siblings
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (uuid, current))| {
+            let ordinal = index + 1 + if index > source_index { count } else { 0 };
+            let order_key = OrderKey::from_ordinal(ordinal);
+            (order_key != current).then_some(OpKind::BlockMove(BlockMove {
+                uuid,
+                page_uuid: source.page_uuid,
+                parent_uuid: source.parent_uuid,
+                order_key,
+            }))
+        })
+        .collect();
+    let keys = (1..=count)
+        .map(|offset| OrderKey::from_ordinal(source_index + offset + 1))
+        .collect();
+    Ok((keys, moves))
+}
+
 #[doc(hidden)]
 pub async fn split_block_with_ops(
     conn: &Connection,
@@ -341,59 +421,33 @@ pub async fn split_block_with_ops(
             let graph_changed =
                 crate::operation::content_references_changed(&source.markdown, &parts[0].markdown);
 
-            let siblings = {
-                let sql = format!(
-                    "SELECT {BLOCK_COLUMNS} FROM blocks
-                  WHERE page_uuid = ?1 AND parent_uuid IS ?2
-                  ORDER BY order_key, uuid"
-                );
-                transaction
-                    .prepare(&sql)?
-                    .query_map(
-                        rusqlite::params![source.page_uuid, source.parent_uuid],
-                        row_to_block,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            let source_index = siblings
-                .iter()
-                .position(|block| block.uuid == uuid)
-                .ok_or_else(|| {
-                    crate::CoreError::conflict("split source is absent from its siblings")
-                })?;
+            let (keys, moves) = split_placement(&transaction, &source, parts.len() - 1)?;
             let now = chrono::Utc::now().timestamp();
             let mut result_uuids = vec![uuid];
             let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
                 uuid,
                 markdown: parts[0].markdown.clone(),
             })];
-            for part in parts.into_iter().skip(1) {
+            for (part, order_key) in parts.into_iter().skip(1).zip(keys) {
                 let block_uuid = uuid::Uuid::now_v7();
                 result_uuids.push(block_uuid);
                 kinds.push(OpKind::BlockCreate(BlockCreate {
                     uuid: block_uuid,
                     page_uuid: source.page_uuid,
                     parent_uuid: source.parent_uuid,
-                    order_key: OrderKey::first(),
+                    order_key,
                     style: source.style,
                     markdown: part.markdown,
                     created_at: now,
                 }));
             }
-            let mut ordered = siblings.iter().map(|block| block.uuid).collect::<Vec<_>>();
-            ordered.splice(
-                source_index + 1..source_index + 1,
-                result_uuids.iter().skip(1).copied(),
-            );
-            kinds.extend(ordered.into_iter().enumerate().map(|(index, block_uuid)| {
-                OpKind::BlockMove(BlockMove {
-                    uuid: block_uuid,
-                    page_uuid: source.page_uuid,
-                    parent_uuid: source.parent_uuid,
-                    order_key: OrderKey::from_ordinal(index + 1),
-                })
-            }));
-            apply_local_action_in_transaction(&transaction, "split block", kinds.clone())?;
+            kinds.extend(moves);
+            // Every inserted block already has its final parent and key. Apply
+            // the batch atomically, then reconcile once before capturing undo
+            // guards; no operation here depends on an intermediate tree.
+            let inverse = history::capture_inverse_kinds(&transaction, &kinds)?;
+            operation::apply_local_kinds_deferred_in_transaction(&transaction, kinds.clone())?;
+            history::record_action(&transaction, "split block", kinds.clone(), inverse)?;
             let blocks = result_uuids
                 .into_iter()
                 .map(|uuid| transaction.query_row(&block_sql, [uuid], row_to_block))
