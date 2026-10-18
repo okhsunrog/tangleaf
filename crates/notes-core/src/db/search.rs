@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "search_snapshot_tests.rs"]
+mod snapshot_tests;
+
 struct RankedPage {
     page: Page,
     bm25: Option<f64>,
@@ -10,6 +14,25 @@ struct RankedBlock {
     block: Block,
     bm25: f64,
     snippet: String,
+}
+
+struct PageSearchQuery {
+    normalized: String,
+    strict: String,
+    relaxed: String,
+}
+
+impl PageSearchQuery {
+    fn new(query: &str) -> Self {
+        Self {
+            normalized: crate::model::normalize_title(query),
+            strict: crate::stem::stem_search_query_with_mode(
+                query,
+                crate::stem::SearchTokenMode::Prefix,
+            ),
+            relaxed: crate::stem::relaxed_stem_prefix_search_query(query),
+        }
+    }
 }
 
 pub async fn search_pages_by_title(
@@ -29,28 +52,39 @@ async fn search_pages_ranked(
     query: String,
     limit: u32,
 ) -> Result<Vec<RankedPage>> {
-    let normalized_query = crate::model::normalize_title(&query);
-    if normalized_query.is_empty() {
+    let query = PageSearchQuery::new(&query);
+    if query.normalized.is_empty() {
         return Ok(Vec::new());
     }
-    let strict_query =
-        crate::stem::stem_search_query_with_mode(&query, crate::stem::SearchTokenMode::Prefix);
-    let relaxed_query = crate::stem::relaxed_stem_prefix_search_query(&query);
     conn.call(move |database| {
-        let mut pages = if strict_query.is_empty() {
-            Vec::new()
-        } else {
-            query_pages_fts(database, &strict_query, &normalized_query, limit)?
-        };
-        if pages.is_empty() {
-            pages = query_pages_by_substring(database, &normalized_query, limit)?;
-        }
-        if pages.is_empty() && !relaxed_query.is_empty() {
-            pages = query_pages_fts(database, &relaxed_query, &normalized_query, limit)?;
-        }
+        let transaction = database.transaction()?;
+        let pages = read_pages_ranked(&transaction, &query, limit)?;
+        transaction.commit()?;
         Ok(pages)
     })
     .await
+}
+
+fn read_pages_ranked(
+    database: &rusqlite::Connection,
+    query: &PageSearchQuery,
+    limit: u32,
+) -> rusqlite::Result<Vec<RankedPage>> {
+    if query.normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pages = if query.strict.is_empty() {
+        Vec::new()
+    } else {
+        query_pages_fts(database, &query.strict, &query.normalized, limit)?
+    };
+    if pages.is_empty() {
+        pages = query_pages_by_substring(database, &query.normalized, limit)?;
+    }
+    if pages.is_empty() && !query.relaxed.is_empty() {
+        pages = query_pages_fts(database, &query.relaxed, &query.normalized, limit)?;
+    }
+    Ok(pages)
 }
 
 fn query_pages_fts(
@@ -130,27 +164,40 @@ async fn search_blocks_ranked(
         return Ok(Vec::new());
     }
     conn.call(move |database| {
-        let sql = format!(
-            "SELECT {QUALIFIED_BLOCK_COLUMNS}, bm25(blocks_fts)
+        read_blocks_ranked(database, &display_query, &fts_query, limit, token_mode)
+    })
+    .await
+}
+
+fn read_blocks_ranked(
+    database: &rusqlite::Connection,
+    display_query: &str,
+    fts_query: &str,
+    limit: u32,
+    token_mode: crate::stem::SearchTokenMode,
+) -> rusqlite::Result<Vec<RankedBlock>> {
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {QUALIFIED_BLOCK_COLUMNS}, bm25(blocks_fts)
                FROM blocks
               JOIN blocks_fts ON blocks_fts.rowid = blocks.id
              WHERE blocks_fts MATCH ?1
              ORDER BY bm25(blocks_fts), blocks.updated_at DESC
              LIMIT ?2"
-        );
-        database
-            .prepare(&sql)?
-            .query_map(rusqlite::params![fts_query, limit], |row| {
-                let block = row_to_block(row)?;
-                Ok(RankedBlock {
-                    snippet: raw_markdown_snippet(&block.markdown, &display_query, token_mode),
-                    block,
-                    bm25: row.get(9)?,
-                })
-            })?
-            .collect()
-    })
-    .await
+    );
+    database
+        .prepare(&sql)?
+        .query_map(rusqlite::params![fts_query, limit], |row| {
+            let block = row_to_block(row)?;
+            Ok(RankedBlock {
+                snippet: raw_markdown_snippet(&block.markdown, display_query, token_mode),
+                block,
+                bm25: row.get(9)?,
+            })
+        })?
+        .collect()
 }
 
 fn raw_markdown_snippet(
@@ -280,9 +327,18 @@ fn token_spans(text: &str) -> Vec<(usize, usize)> {
 
 pub async fn search_fts(conn: &Connection, query: String, limit: u32) -> Result<Vec<SearchHit>> {
     let query_title_tokens = stemmed_token_set(&query);
-    let pages = search_pages_ranked(conn, query.clone(), limit).await?;
-    let blocks =
-        search_blocks_ranked(conn, query, limit, crate::stem::SearchTokenMode::Prefix).await?;
+    let page_query = PageSearchQuery::new(&query);
+    let token_mode = crate::stem::SearchTokenMode::Prefix;
+    let block_query = crate::stem::stem_search_query_with_mode(&query, token_mode);
+    let (pages, blocks) = conn
+        .call(move |database| {
+            let transaction = database.transaction()?;
+            let pages = read_pages_ranked(&transaction, &page_query, limit)?;
+            let blocks = read_blocks_ranked(&transaction, &query, &block_query, limit, token_mode)?;
+            transaction.commit()?;
+            Ok((pages, blocks))
+        })
+        .await?;
 
     let (priority_pages, pages): (Vec<_>, Vec<_>) = pages.into_iter().partition(|ranked| {
         ranked.exact_title
