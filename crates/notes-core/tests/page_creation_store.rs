@@ -10,6 +10,7 @@ struct Fixture {
     connection: Connection,
     store: NotesStore,
     notices: Arc<Mutex<Vec<CommitNotice>>>,
+    initial_version: i64,
 }
 
 async fn fixture() -> Fixture {
@@ -18,6 +19,7 @@ async fn fixture() -> Fixture {
     notes_core::configure_sync(&connection, "https://sync.example")
         .await
         .unwrap();
+    let initial_version = counters(&connection).await.5;
     let notices = Arc::new(Mutex::new(Vec::new()));
     let observed = notices.clone();
     let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
@@ -28,6 +30,7 @@ async fn fixture() -> Fixture {
         connection,
         store,
         notices,
+        initial_version,
     }
 }
 
@@ -72,7 +75,10 @@ async fn empty_named_titles_are_rejected_without_writes_or_notices() {
             Some(CoreError::InvalidInput(_))
         ));
     }
-    assert_eq!(counters(&fixture.connection).await, (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (0, 0, 0, 0, 0, fixture.initial_version)
+    );
     assert!(fixture.notices.lock().unwrap().is_empty());
 }
 
@@ -101,7 +107,10 @@ async fn concurrent_named_creation_returns_one_page_and_publishes_one_commit() {
     assert!(committed.changes.history_changed);
     assert!(committed.changes.blocks.is_empty());
     assert_eq!(fixture.notices.lock().unwrap().len(), 1);
-    assert_eq!(counters(&fixture.connection).await, (1, 0, 1, 1, 1, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 0, 1, 1, 1, fixture.initial_version + 1)
+    );
 }
 
 #[tokio::test]
@@ -134,7 +143,10 @@ async fn concurrent_named_notes_create_one_initial_block_and_one_history_action(
     assert!(existing.changes.is_empty());
     assert_eq!(existing.commit_version, None);
     assert_eq!(fixture.notices.lock().unwrap().len(), 1);
-    assert_eq!(counters(&fixture.connection).await, (1, 1, 2, 2, 1, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 1, 2, 2, 1, fixture.initial_version + 1)
+    );
 }
 
 #[tokio::test]
@@ -160,7 +172,10 @@ async fn untitled_notes_are_distinct_and_each_undo_removes_its_page_and_initial_
     assert_ne!(first.initial_block.uuid, second.initial_block.uuid);
     assert!(first.page.title.is_none());
     assert!(second.page.title.is_none());
-    assert_eq!(counters(&fixture.connection).await, (2, 2, 4, 4, 2, 2));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (2, 2, 4, 4, 2, fixture.initial_version + 2)
+    );
 
     for note in [second, first] {
         let undone = fixture.store.undo().await.unwrap();
@@ -200,14 +215,17 @@ async fn handwritten_creation_keeps_primary_identity_without_a_text_block_or_tex
     assert_eq!(created.changes.changed_pages, vec![created.value.uuid]);
     assert!(created.changes.blocks.is_empty());
     assert!(!created.changes.history_changed);
-    assert_eq!(created.commit_version, Some(1));
+    assert_eq!(created.commit_version, Some(fixture.initial_version + 1));
     assert_eq!(
         db::get_page(&fixture.connection, created.value.uuid)
             .await
             .unwrap(),
         Some(created.value)
     );
-    assert_eq!(counters(&fixture.connection).await, (1, 0, 1, 1, 0, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 0, 1, 1, 0, fixture.initial_version + 1)
+    );
     assert_eq!(fixture.notices.lock().unwrap().len(), 1);
 }
 
@@ -317,7 +335,10 @@ async fn failing_creation_rolls_back_the_page_block_history_outbox_and_notice() 
             .unwrap(),
             before
         );
-        assert_eq!(counters(&fixture.connection).await, (0, 0, 0, 0, 0, 0));
+        assert_eq!(
+            counters(&fixture.connection).await,
+            (0, 0, 0, 0, 0, fixture.initial_version)
+        );
         assert!(fixture.notices.lock().unwrap().is_empty());
         assert!(
             db::get_page_by_title(&fixture.connection, "Rejected".into())

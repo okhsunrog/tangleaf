@@ -8,6 +8,7 @@ struct Fixture {
     connection: Connection,
     store: NotesStore,
     notices: Arc<Mutex<Vec<CommitNotice>>>,
+    initial_version: i64,
 }
 
 async fn fixture() -> Fixture {
@@ -16,6 +17,7 @@ async fn fixture() -> Fixture {
     notes_core::configure_sync(&connection, "https://sync.example")
         .await
         .unwrap();
+    let initial_version = counters(&connection).await.5;
     let notices = Arc::new(Mutex::new(Vec::new()));
     let observed = notices.clone();
     let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
@@ -26,6 +28,7 @@ async fn fixture() -> Fixture {
         connection,
         store,
         notices,
+        initial_version,
     }
 }
 
@@ -114,8 +117,11 @@ async fn new_capture_is_one_ordered_batch_one_notice_and_one_undo_action() {
     assert_eq!(captured.changes.blocks[0].uuid, blocks[0].uuid);
     assert!(captured.changes.blocks[0].before.is_none());
     assert!(captured.changes.history_changed);
-    assert_eq!(captured.commit_version, Some(1));
-    assert_eq!(counters(&fixture.connection).await, (1, 1, 2, 2, 1, 1));
+    assert_eq!(captured.commit_version, Some(fixture.initial_version + 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 1, 2, 2, 1, fixture.initial_version + 1)
+    );
     assert_eq!(fixture.notices.lock().unwrap().len(), 1);
     let pending = notes_core::pending_outbox(&fixture.connection, 10)
         .await
@@ -202,7 +208,10 @@ async fn blank_capture_only_ensures_a_page_and_existing_alias_is_quiet() {
         .await
         .unwrap();
     assert!(created.changes.blocks.is_empty());
-    assert_eq!(counters(&fixture.connection).await, (1, 0, 1, 1, 1, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 0, 1, 1, 1, fixture.initial_version + 1)
+    );
     alias(&fixture.connection, created.value.uuid, "Other name").await;
     let before = counters(&fixture.connection).await;
     fixture.notices.lock().unwrap().clear();
@@ -294,7 +303,10 @@ async fn concurrent_named_captures_append_every_exact_paragraph_to_one_page() {
         .map(|result| result.commit_version.unwrap())
         .collect::<Vec<_>>();
     versions.sort_unstable();
-    assert_eq!(versions, vec![1, 2, 3]);
+    let expected_versions = (1..=3)
+        .map(|offset| fixture.initial_version + offset)
+        .collect::<Vec<_>>();
+    assert_eq!(versions, expected_versions);
     let blocks = db::list_block_children(&fixture.connection, page_uuid, None)
         .await
         .unwrap();
@@ -309,7 +321,10 @@ async fn concurrent_named_captures_append_every_exact_paragraph_to_one_page() {
         .collect::<Vec<_>>();
     markdown.sort();
     assert_eq!(markdown, vec![" second", "first\n", "third **paragraph**"]);
-    assert_eq!(counters(&fixture.connection).await, (1, 3, 4, 4, 3, 3));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 3, 4, 4, 3, fixture.initial_version + 3)
+    );
     assert_eq!(
         fixture
             .notices
@@ -318,7 +333,7 @@ async fn concurrent_named_captures_append_every_exact_paragraph_to_one_page() {
             .iter()
             .map(|notice| notice.commit_version)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        expected_versions
     );
 }
 
@@ -396,7 +411,10 @@ async fn invalid_capture_title_is_rejected_without_progress() {
             .await
             .is_err()
     );
-    assert_eq!(counters(&fixture.connection).await, (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (0, 0, 0, 0, 0, fixture.initial_version)
+    );
     assert_eq!(last_hlc(&fixture.connection).await, None);
     assert!(fixture.notices.lock().unwrap().is_empty());
 }

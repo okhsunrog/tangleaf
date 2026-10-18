@@ -8,6 +8,7 @@ struct Fixture {
     connection: Connection,
     store: NotesStore,
     notices: Arc<Mutex<Vec<CommitNotice>>>,
+    initial_version: i64,
 }
 
 async fn fixture() -> Fixture {
@@ -16,6 +17,7 @@ async fn fixture() -> Fixture {
     notes_core::configure_sync(&connection, "https://sync.example")
         .await
         .unwrap();
+    let initial_version = counters(&connection).await.5;
     let notices = Arc::new(Mutex::new(Vec::new()));
     let observed = notices.clone();
     let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
@@ -26,6 +28,7 @@ async fn fixture() -> Fixture {
         connection,
         store,
         notices,
+        initial_version,
     }
 }
 
@@ -87,7 +90,10 @@ async fn preview_and_blank_capture_do_not_persist_a_day_but_explicit_ensure_does
         error.downcast_ref::<CoreError>(),
         Some(CoreError::InvalidInput(_))
     ));
-    assert_eq!(counters(&fixture.connection).await, (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (0, 0, 0, 0, 0, fixture.initial_version)
+    );
     assert!(fixture.notices.lock().unwrap().is_empty());
 
     let ensured = fixture.store.ensure_journal(date()).await.unwrap();
@@ -100,7 +106,10 @@ async fn preview_and_blank_capture_do_not_persist_a_day_but_explicit_ensure_does
     assert_eq!(ensured.changes.changed_pages, vec![expected_uuid]);
     assert!(ensured.changes.blocks.is_empty());
     assert!(ensured.changes.history_changed);
-    assert_eq!(counters(&fixture.connection).await, (1, 0, 1, 1, 1, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 0, 1, 1, 1, fixture.initial_version + 1)
+    );
     let again = fixture.store.ensure_journal(date()).await.unwrap();
     assert_eq!(again.value, ensured.value);
     assert!(again.changes.is_empty());
@@ -122,7 +131,10 @@ async fn concurrent_ensure_calls_publish_only_one_journal_creation() {
         usize::from(first.commit_version.is_some()) + usize::from(second.commit_version.is_some()),
         1
     );
-    assert_eq!(counters(&fixture.connection).await, (1, 0, 1, 1, 1, 1));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 0, 1, 1, 1, fixture.initial_version + 1)
+    );
     assert_eq!(fixture.notices.lock().unwrap().len(), 1);
 }
 
@@ -150,7 +162,10 @@ async fn concurrent_capture_uses_one_page_ordered_roots_and_one_history_action_p
             .unwrap(),
         entries
     );
-    assert_eq!(counters(&fixture.connection).await, (1, 2, 3, 3, 2, 2));
+    assert_eq!(
+        counters(&fixture.connection).await,
+        (1, 2, 3, 3, 2, fixture.initial_version + 2)
+    );
     assert!(first.changes.history_changed && second.changes.history_changed);
     assert_eq!(first.changes.blocks.len(), 1);
     assert_eq!(second.changes.blocks.len(), 1);
