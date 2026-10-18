@@ -259,6 +259,18 @@
   Общий core: 392 passed / 4 ignored; frontend: 684/684; общий all-target Clippy пяти crates
   и `vp check` проходят. Bulk import/bootstrap, sync configuration и raw ink ещё переносятся.
 
+- SQLite runtime теперь ограничивает принятые outstanding jobs до 64 на соединение,
+  включая выполняемый job. Ожидание допуска асинхронное и отменяемое; после приёма permit
+  принадлежит job, поэтому отмена ожидающего не теряет запись. `admission_ms` измеряется
+  отдельно; прежние queue/execution/worker_total сохраняют смысл и не включают admission.
+  `Connection::close()` закрывает допуск, дренирует принятые задачи, закрывает SQLite и
+  подтверждает join; клоны получают один результат. Отмена close waiter, отмена opener
+  и last-handle Drop запускают ту же независимую cleanup, без ожидания в Tokio blocking pool.
+  Дополнительная регрессия воспроизвела остановку worker при panic в Drop недоставленного
+  результата. Внешняя граница whole-job unwind теперь сохраняет следующие принятые записи;
+  typed errors и inner panic handling сохранены. Прошли все 27 SQLite tests и core all-target
+  Clippy; сам lifecycle ещё не подключён к общему shutdown/restore и координации raw ink jobs.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

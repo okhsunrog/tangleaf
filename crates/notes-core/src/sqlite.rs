@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
+use tokio::sync::{Semaphore, watch};
 
 pub mod policy;
 
@@ -13,20 +15,89 @@ enum WorkerMessage {
     Close,
 }
 
+// Bound accepted outstanding work, including the job currently executing.
+// This is a resource limit, not a claim about the optimal throughput: at most
+// 63 jobs queue behind the running job. Callers waiting for admission hold no
+// connection or blocking-pool thread and may still cancel without doing SQL.
+const MAX_ACCEPTED_JOBS: usize = 64;
+
+type CloseOutcome = std::result::Result<(), Arc<str>>;
+
+struct AdmissionGate {
+    sender: Option<mpsc::Sender<WorkerMessage>>,
+    thread: Option<JoinHandle<CloseOutcome>>,
+}
+
 struct Worker {
-    sender: mpsc::Sender<WorkerMessage>,
+    admission: Arc<Semaphore>,
+    gate: Mutex<AdmissionGate>,
+    closed: watch::Sender<Option<CloseOutcome>>,
+    thread_id: ThreadId,
+}
+
+impl Worker {
+    fn begin_close(&self) {
+        // Closing the semaphore wakes unaccepted callers; the gate orders the
+        // last accepted send before Close, including callers that acquired a
+        // permit just before the semaphore was closed.
+        self.admission.close();
+        let thread = {
+            let mut gate = self.gate.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(sender) = gate.sender.take() {
+                let _ = sender.send(WorkerMessage::Close);
+            }
+            gate.thread.take()
+        };
+        let Some(thread) = thread else {
+            return;
+        };
+        // Never join from a runtime or SQLite thread. The reaper owns only the
+        // JoinHandle and completion sender, so it cannot keep Worker alive in
+        // an Arc cycle. Dropping any close waiter cannot interrupt this work.
+        let closed = self.closed.clone();
+        let spawn = std::thread::Builder::new()
+            .name("tangleaf-sqlite-close".into())
+            .spawn(move || {
+                let outcome = thread.join().unwrap_or_else(|payload| {
+                    Err(format!("SQLite worker panicked: {}", panic_message(&*payload)).into())
+                });
+                closed.send_replace(Some(outcome));
+            });
+        if let Err(error) = spawn {
+            // Close was already sent. The detached worker can still drain and
+            // close, but without a reaper we cannot promise that it was joined.
+            self.closed.send_replace(Some(Err(format!(
+                "spawning SQLite close thread failed; worker join unconfirmed: {error}"
+            )
+            .into())));
+        }
+    }
+
+    async fn wait_closed(&self) -> Result<()> {
+        let mut closed = self.closed.subscribe();
+        loop {
+            let outcome = closed.borrow_and_update().clone();
+            if let Some(outcome) = outcome {
+                return outcome.map_err(|error| anyhow!("{error}"));
+            }
+            closed
+                .changed()
+                .await
+                .context("SQLite close completion channel stopped")?;
+        }
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.sender.send(WorkerMessage::Close);
+        self.begin_close();
     }
 }
 
 /// Cloneable asynchronous handle backed by one dedicated SQLite thread.
 ///
-/// Calls wait in the connection's channel instead of occupying Tokio blocking
-/// pool threads while another query owns the connection. Closures may return
+/// Calls asynchronously wait for bounded admission and then in the connection's
+/// channel, without occupying Tokio blocking-pool threads. Closures may return
 /// either `rusqlite::Error` or a typed domain error; both remain available in
 /// the returned `anyhow::Error` chain.
 #[derive(Clone)]
@@ -77,34 +148,96 @@ impl Connection {
     async fn open_with(
         opener: impl FnOnce() -> Result<rusqlite::Connection> + Send + 'static,
     ) -> Result<Self> {
+        Self::open_with_capacity(opener, MAX_ACCEPTED_JOBS).await
+    }
+
+    async fn open_with_capacity(
+        opener: impl FnOnce() -> Result<rusqlite::Connection> + Send + 'static,
+        capacity: usize,
+    ) -> Result<Self> {
+        let (connection, opened_rx) = Self::start_worker(opener, capacity)?;
+        // Own the shutdown guard before waiting for the opener. Cancellation,
+        // an opener error, or an opener panic must all reap the spawned thread.
+        opened_rx
+            .await
+            .context("SQLite worker stopped while opening")??;
+        Ok(connection)
+    }
+
+    fn start_worker(
+        opener: impl FnOnce() -> Result<rusqlite::Connection> + Send + 'static,
+        capacity: usize,
+    ) -> Result<(Self, tokio::sync::oneshot::Receiver<Result<()>>)> {
+        assert!(capacity > 0, "SQLite admission capacity must be positive");
         let (sender, receiver) = mpsc::channel::<WorkerMessage>();
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("tangleaf-sqlite".into())
             .spawn(move || match opener() {
                 Ok(mut connection) => {
                     install_statement_profile(&mut connection);
-                    if opened_tx.send(Ok(())).is_err() {
-                        return;
-                    }
-                    while let Ok(message) = receiver.recv() {
-                        match message {
-                            WorkerMessage::Call(job) => job(&mut connection),
-                            WorkerMessage::Close => return,
+                    if opened_tx.send(Ok(())).is_ok() {
+                        while let Ok(message) = receiver.recv() {
+                            match message {
+                                WorkerMessage::Call(job) => {
+                                    // The inner handler returns typed function
+                                    // failures to the waiter. Destructors of an
+                                    // undelivered result or closure captures can
+                                    // still panic outside that handler; keep
+                                    // draining work already accepted after it.
+                                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        job(&mut connection)
+                                    }))
+                                    .is_err()
+                                    {
+                                        tracing::error!(
+                                            "SQLite job panicked outside its result handler; worker continues"
+                                        );
+                                    }
+                                }
+                                WorkerMessage::Close => break,
+                            }
                         }
                     }
+                    close_database(connection)
                 }
                 Err(error) => {
                     let _ = opened_tx.send(Err(error));
+                    Ok(())
                 }
             })
             .context("spawning SQLite worker thread")?;
-        opened_rx
-            .await
-            .context("SQLite worker stopped while opening")??;
-        Ok(Self {
-            worker: Arc::new(Worker { sender }),
-        })
+        let thread_id = thread.thread().id();
+        let (closed, _) = watch::channel(None);
+        Ok((
+            Self {
+                worker: Arc::new(Worker {
+                    admission: Arc::new(Semaphore::new(capacity)),
+                    gate: Mutex::new(AdmissionGate {
+                        sender: Some(sender),
+                        thread: Some(thread),
+                    }),
+                    closed,
+                    thread_id,
+                }),
+            },
+            opened_rx,
+        ))
+    }
+
+    /// Stop admission, drain every accepted job, close SQLite, and join the
+    /// dedicated thread. All clones observe the same result. Once this future
+    /// is polled, dropping it does not cancel shutdown. Retained clones cannot
+    /// submit new work after shutdown starts. Last-handle Drop also starts the
+    /// same cleanup, but explicit close lets the caller observe its completion.
+    pub async fn close(&self) -> Result<()> {
+        if std::thread::current().id() == self.worker.thread_id {
+            return Err(anyhow!(
+                "cannot await SQLite close from its own worker thread"
+            ));
+        }
+        self.worker.begin_close();
+        self.worker.wait_closed().await
     }
 
     /// Not `async fn`: `#[track_caller]` is a no-op on those, and the caller's location is what
@@ -144,32 +277,65 @@ impl Connection {
         // tracing context, including for SQLite's statement-profile callback.
         let span = tracing::Span::current();
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        let queued_at = Instant::now();
-        self.worker
-            .sender
-            .send(WorkerMessage::Call(Box::new(move |connection| {
-                let started = Instant::now();
-                tracing::dispatcher::with_default(&dispatch, || {
-                    let _entered = span.enter();
-                    // One bad job must not unwind the worker thread. A panic
-                    // mid-transaction still rolls back when the transaction is
-                    // dropped. Dropping the receiving future does not cancel
-                    // an accepted job or skip its diagnostic events.
-                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        function(connection).map_err(Into::into)
-                    }))
-                    .unwrap_or_else(|payload| {
-                        Err(anyhow!("SQLite job panicked: {}", panic_message(&*payload)))
+        let requested_at = Instant::now();
+        let permit = self
+            .worker
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("SQLite connection is closing or closed"))?;
+        {
+            let gate = self
+                .worker
+                .gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let sender = gate
+                .sender
+                .as_ref()
+                .ok_or_else(|| anyhow!("SQLite connection is closing or closed"))?;
+            let queued_at = Instant::now();
+            sender
+                .send(WorkerMessage::Call(Box::new(move |connection| {
+                    let started = Instant::now();
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        let _entered = span.enter();
+                        // One bad job must not unwind the worker thread. A panic
+                        // mid-transaction still rolls back when the transaction is
+                        // dropped. Dropping the receiving future does not cancel
+                        // an accepted job or skip its diagnostic events.
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                function(connection).map_err(Into::into)
+                            }))
+                            .unwrap_or_else(|payload| {
+                                Err(anyhow!("SQLite job panicked: {}", panic_message(&*payload)))
+                            });
+                        CallTimings::new(requested_at, queued_at, started, Instant::now())
+                            .report(caller);
+                        let _ = result_tx.send(outcome);
                     });
-                    CallTimings::new(queued_at, started, Instant::now()).report(caller);
-                    let _ = result_tx.send(outcome);
-                });
-            })))
-            .map_err(|_| anyhow!("SQLite connection worker has stopped"))?;
+                    // Acceptance transfers admission to the job, not its waiter.
+                    // Preserve accepted writes even if the receiving future drops.
+                    drop(permit);
+                })))
+                .map_err(|_| anyhow!("SQLite connection worker has stopped"))?;
+        }
         result_rx
             .await
             .context("SQLite connection worker dropped a call")?
     }
+}
+
+fn close_database(connection: rusqlite::Connection) -> CloseOutcome {
+    connection.close().map_err(|(connection, error)| {
+        let message = format!("closing SQLite connection failed: {error}");
+        // Even an explicit close failure must release the owned connection
+        // before reporting thread completion.
+        drop(connection);
+        message.into()
+    })
 }
 
 /// Report calls that either wait in the worker queue or occupy the connection
@@ -177,14 +343,16 @@ impl Connection {
 const SLOW_CALL: Duration = Duration::from_millis(500);
 
 struct CallTimings {
+    admission: Duration,
     queue: Duration,
     execution: Duration,
     worker_total: Duration,
 }
 
 impl CallTimings {
-    fn new(queued_at: Instant, started: Instant, finished: Instant) -> Self {
+    fn new(requested_at: Instant, queued_at: Instant, started: Instant, finished: Instant) -> Self {
         Self {
+            admission: queued_at.duration_since(requested_at),
             queue: started.duration_since(queued_at),
             execution: finished.duration_since(started),
             worker_total: finished.duration_since(queued_at),
@@ -192,21 +360,31 @@ impl CallTimings {
     }
 
     fn report(&self, caller: &'static std::panic::Location<'static>) {
+        // Admission is the cancellable semaphore/gate wait before acceptance.
         // Queue time includes channel submission and worker scheduling, not a
         // SQLite lock wait. Execution includes the closure, panic handling and
         // tracing-context entry; any SQLite busy/lock wait happens here. Total
         // ends before logging/result delivery and excludes the awaiting Tokio
         // task's scheduling delay, IPC and UI work.
+        let admission_ms = self.admission.as_secs_f64() * 1_000.0;
         let queue_ms = self.queue.as_secs_f64() * 1_000.0;
         let execution_ms = self.execution.as_secs_f64() * 1_000.0;
         let worker_total_ms = self.worker_total.as_secs_f64() * 1_000.0;
         tracing::debug!(
             caller = %caller,
+            admission_ms,
             queue_ms,
             execution_ms,
             worker_total_ms,
             "database call completed"
         );
+        if self.admission >= SLOW_CALL {
+            tracing::warn!(
+                caller = %caller,
+                admission_ms,
+                "database call waited for admission"
+            );
+        }
         if self.queue >= SLOW_CALL {
             tracing::warn!(
                 caller = %caller,
@@ -273,6 +451,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
     use std::collections::BTreeMap;
     use std::fmt::Debug;
     use std::task::{Poll, Waker};
@@ -439,18 +618,29 @@ mod tests {
     }
 
     #[test]
-    fn timings_separate_queue_and_execution_and_warn_independently() {
+    fn timings_separate_admission_queue_and_execution_and_warn_independently() {
         let events = CapturedEvents::default();
         let dispatch = events.dispatch();
         let base = Instant::now();
         let cases = [
-            (Duration::from_millis(70), Duration::from_millis(20)),
-            (SLOW_CALL, Duration::from_millis(10)),
-            (Duration::from_millis(10), SLOW_CALL),
-            (SLOW_CALL, SLOW_CALL),
+            (
+                Duration::ZERO,
+                Duration::from_millis(70),
+                Duration::from_millis(20),
+            ),
+            (SLOW_CALL, Duration::ZERO, Duration::from_millis(10)),
+            (Duration::ZERO, SLOW_CALL, Duration::from_millis(10)),
+            (Duration::ZERO, Duration::from_millis(10), SLOW_CALL),
+            (SLOW_CALL, SLOW_CALL, SLOW_CALL),
         ];
-        for (queue, execution) in cases {
-            let timings = CallTimings::new(base, base + queue, base + queue + execution);
+        for (admission, queue, execution) in cases {
+            let timings = CallTimings::new(
+                base,
+                base + admission,
+                base + admission + queue,
+                base + admission + queue + execution,
+            );
+            assert_eq!(timings.admission, admission);
             assert_eq!(timings.queue, queue);
             assert_eq!(timings.execution, execution);
             assert_eq!(timings.worker_total, queue + execution);
@@ -464,7 +654,11 @@ mod tests {
             .filter(|event| event.level == tracing::Level::DEBUG)
             .collect();
         assert_eq!(completions.len(), cases.len());
-        for (event, (queue, execution)) in completions.iter().zip(cases) {
+        for (event, (admission, queue, execution)) in completions.iter().zip(cases) {
+            assert_eq!(
+                event.milliseconds("admission_ms"),
+                admission.as_secs_f64() * 1_000.0
+            );
             assert_eq!(
                 event.milliseconds("queue_ms"),
                 queue.as_secs_f64() * 1_000.0
@@ -478,6 +672,13 @@ mod tests {
                 (queue + execution).as_secs_f64() * 1_000.0
             );
         }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message_contains("waited for admission"))
+                .count(),
+            2
+        );
         assert_eq!(
             events
                 .iter()
@@ -674,4 +875,59 @@ mod tests {
             .expect_err("domain failure");
         assert!(error.downcast_ref::<DomainFailure>().is_some());
     }
+    #[tokio::test]
+    async fn admission_wait_is_separate_from_time_in_the_worker() {
+        let connection =
+            Connection::open_with_capacity(|| Ok(rusqlite::Connection::open_in_memory()?), 1)
+                .await
+                .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut first = Box::pin(connection.call(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            Ok(())
+        }));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        entered_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+        let events = CapturedEvents::default();
+        let mut waiting = Box::pin(tracing::instrument::WithSubscriber::with_subscriber(
+            connection.call(|_| Ok(())),
+            events.dispatch(),
+        ));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        let admission_after = Instant::now();
+        let released_before = Instant::now();
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        // Polling once more proves this caller was reawakened after admission.
+        waiting.await.unwrap();
+        let events = events.snapshot();
+        let completed = events
+            .iter()
+            .find(|event| event.message_contains("database call completed"))
+            .unwrap();
+        let known_wait = released_before
+            .duration_since(admission_after)
+            .as_secs_f64()
+            * 1_000.0;
+        assert!(completed.milliseconds("admission_ms") >= known_wait);
+        let total_parts =
+            completed.milliseconds("queue_ms") + completed.milliseconds("execution_ms");
+        assert!((completed.milliseconds("worker_total_ms") - total_parts).abs() < 0.000_001);
+        connection.close().await.unwrap();
+    }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
