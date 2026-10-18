@@ -3,6 +3,7 @@
 //! optional synchronized read/sync bursts; it does not simulate the UI, network or power loss.
 
 use notes_core::db::{self, BlockContent};
+use notes_core::store::NotesStore;
 use notes_core::{
     BlockCreate, BlockMove, BlockSetMarkdown, BlockStyle, Connection, CoreError, Hlc, Op, OpKind,
     OrderKey, ReplicaRole,
@@ -232,7 +233,12 @@ struct Measurement {
     after: Counts,
 }
 
-async fn measure(connection: &Connection, scenario: Scenario, workload: Workload) -> Measurement {
+async fn measure(
+    connection: &Connection,
+    reader: &Connection,
+    scenario: Scenario,
+    workload: Workload,
+) -> Measurement {
     let (mut current, mut remote) = fixture(connection, workload.remote_blocks).await;
     let (busy, _, _) = checkpoint(connection, true).await;
     assert_eq!(
@@ -290,7 +296,7 @@ async fn measure(connection: &Connection, scenario: Scenario, workload: Workload
         };
         let read = async {
             if scenario == Scenario::Mixed {
-                let document = db::get_page_document(connection, remote.page)
+                let document = db::get_page_document(reader, remote.page)
                     .await
                     .expect("read background page")
                     .expect("background page exists");
@@ -299,7 +305,7 @@ async fn measure(connection: &Connection, scenario: Scenario, workload: Workload
         };
         let search = async {
             if scenario == Scenario::Mixed {
-                let hits = db::search_fts(connection, SEARCH_TOKEN.into(), 20)
+                let hits = db::search_fts(reader, SEARCH_TOKEN.into(), 20)
                     .await
                     .expect("search fixture text");
                 assert!(!hits.is_empty(), "fixture remains searchable");
@@ -460,10 +466,12 @@ async fn storage_workload_preserves_revisions_replication_and_outbox() {
         for scenario in [Scenario::Quiet, Scenario::Mixed] {
             let directory = tempfile::tempdir().expect("temporary directory");
             let path = directory.path().join("workload.db");
-            let connection = db::open(&path).await.expect("open fixture");
-            configure_policy(&connection, synchronous).await;
+            let store = NotesStore::open(&path).await.expect("open fixture");
+            let connection = store.write_connection();
+            configure_policy(connection, synchronous).await;
             let result = measure(
-                &connection,
+                connection,
+                store.read_connection(),
                 scenario,
                 Workload {
                     saves: 3,
@@ -478,7 +486,7 @@ async fn storage_workload_preserves_revisions_replication_and_outbox() {
                 result.remote_batches,
                 if scenario == Scenario::Mixed { 2 } else { 0 }
             );
-            let (busy, _, _) = checkpoint(&connection, false).await;
+            let (busy, _, _) = checkpoint(connection, false).await;
             assert_eq!(busy, 0);
             connection
                 .call(|database| {
@@ -495,6 +503,7 @@ async fn storage_workload_preserves_revisions_replication_and_outbox() {
                 })
                 .await
                 .expect("fixture integrity");
+            store.close().await.expect("close fixture workers");
         }
     }
 }
@@ -571,13 +580,15 @@ async fn benchmark_storage_workload_on_database_copies() {
                 source
                     .execute("VACUUM INTO ?1", [path.to_str().expect("copy path")])
                     .expect("copy stable snapshot");
-                let connection = db::open(&path).await.expect("open disposable copy");
+                let store = NotesStore::open(&path).await.expect("open disposable copy");
+                let connection = store.write_connection();
                 let (actual, journal, autocheckpoint) =
-                    configure_policy(&connection, synchronous).await;
-                let measured = measure(&connection, scenario, workload).await;
+                    configure_policy(connection, synchronous).await;
+                let measured =
+                    measure(connection, store.read_connection(), scenario, workload).await;
                 let wal_before_checkpoint = wal_bytes(&path);
                 let checkpoint_started = Instant::now();
-                let (busy, frames, checkpointed) = checkpoint(&connection, false).await;
+                let (busy, frames, checkpointed) = checkpoint(connection, false).await;
                 let checkpoint_ms = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
                 for (sample, elapsed) in measured.samples_ms.iter().enumerate() {
                     let order = if scenario == Scenario::Quiet {
@@ -594,7 +605,7 @@ async fn benchmark_storage_workload_on_database_copies() {
                     );
                 }
                 println!(
-                    "run scenario={} mode={mode} run={run} synchronous={actual} journal_mode={journal} wal_autocheckpoint={autocheckpoint} saves={} idle_ms={} remote_blocks={} remote_every={} remote_batches={} remote_operations={} document_reads={} searches={} applied_delta={} outbox_delta={} wal_bytes={wal_before_checkpoint} checkpoint_busy={busy} checkpoint_frames={frames} checkpointed_frames={checkpointed} checkpoint_ms={checkpoint_ms:.3}",
+                    "run scenario={} mode={mode} run={run} read_workers=1 synchronous={actual} journal_mode={journal} wal_autocheckpoint={autocheckpoint} saves={} idle_ms={} remote_blocks={} remote_every={} remote_batches={} remote_operations={} document_reads={} searches={} applied_delta={} outbox_delta={} wal_bytes={wal_before_checkpoint} checkpoint_busy={busy} checkpoint_frames={frames} checkpointed_frames={checkpointed} checkpoint_ms={checkpoint_ms:.3}",
                     scenario.name(),
                     workload.saves,
                     workload.idle.as_millis(),
@@ -608,6 +619,7 @@ async fn benchmark_storage_workload_on_database_copies() {
                     measured.after.outbox - measured.before.outbox
                 );
                 measurements.push((scenario, mode, measured.samples_ms));
+                store.close().await.expect("close disposable workers");
             }
         }
     }
