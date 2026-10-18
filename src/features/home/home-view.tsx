@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { FilePlus2, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,12 +6,24 @@ import { useCompactLayout } from "@/app/use-compact-layout";
 import { JournalEntry } from "@/features/journal/journal-entry";
 import { formatJournalDate, todayJournalDate } from "@/features/journal/journal-date";
 import { DocumentReadingSurface, pageDocumentToPersisted } from "@/features/document/document-page";
+import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import { useWorkspaceController } from "@/features/workspace/workspace-controller";
 import { dispositionFromShiftKey, type PaneId } from "@/features/workspace/workspace-model";
 import { getPageDocument, listJournals, type JournalDate, type Page } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 
 export function HomeView({ paneId }: { paneId: PaneId }) {
+  const root = useRef<HTMLElement>(null);
+  const navigationRequest = useWorkspaceStore(
+    (state) => state.panes[paneId]?.navigationRequest ?? 0,
+  );
+  useEffect(() => {
+    const scroll = root.current?.closest<HTMLElement>("[data-workspace-scroll]");
+    if (scroll) scroll.scrollTop = 0;
+    root.current
+      ?.querySelector<HTMLElement>("[contenteditable=true]")
+      ?.focus({ preventScroll: true });
+  }, [navigationRequest]);
   const [today, setToday] = useState(todayJournalDate);
   const controller = useWorkspaceController();
   const compact = useCompactLayout();
@@ -34,7 +46,10 @@ export function HomeView({ paneId }: { paneId: PaneId }) {
         : undefined,
   });
   return (
-    <article className="journal-stream mx-auto max-w-[48rem] px-6 pt-7 pb-20 sm:px-12 sm:pt-10">
+    <article
+      ref={root}
+      className="journal-stream mx-auto max-w-[48rem] px-6 pt-7 pb-20 sm:px-12 sm:pt-10"
+    >
       {compact && (
         <nav aria-label="Notes" className="mb-7 flex gap-2">
           <Button variant="ghost" size="sm" onClick={() => controller.openAllNotes()}>

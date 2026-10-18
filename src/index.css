@@ -616,10 +616,6 @@ html::before {
     box-shadow: none;
   }
 
-  .journal-earlier .document-reading-surface {
-    padding-bottom: 0;
-  }
-
   .app-titlebar .tangleaf-wordmark {
     font-size: 20px;
   }
@@ -1343,4 +1339,8 @@ html::before {
 
 .journal-stream .cm-editor .cm-content {
   padding-bottom: 2rem;
+}
+
+.journal-earlier .document-reading-surface {
+  padding-bottom: 0;
 }
