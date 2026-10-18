@@ -45,14 +45,11 @@ pub async fn create_note(
     state: State<'_, AppState>,
     title: Option<String>,
 ) -> CommandResult<db::CreateNoteResult> {
-    let applied = db::create_note_with_ops(&state.conn, title)
+    let committed = observed_store(&app, &state)
+        .create_note(title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -62,14 +59,11 @@ pub async fn create_page(
     state: State<'_, AppState>,
     title: String,
 ) -> CommandResult<db::Page> {
-    let applied = db::create_page_with_ops(&state.conn, title)
+    let committed = observed_store(&app, &state)
+        .create_page(title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    if !applied.operations.is_empty() {
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]
@@ -185,11 +179,11 @@ pub async fn get_or_create_page_by_title(
     state: State<'_, AppState>,
     title: String,
 ) -> CommandResult<db::Page> {
-    let applied = db::get_or_create_page_by_title_with_ops(&state.conn, title)
+    let committed = observed_store(&app, &state)
+        .get_or_create_page_by_title(title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    Ok(applied.value)
+    Ok(committed.value)
 }
 
 #[tauri::command]

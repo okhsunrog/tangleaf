@@ -161,6 +161,11 @@
   14 block-command тестов, 22 history/archive и 11 document проходят. Проверены оба порядка
   create/delete-parent, FIFO appends, no-op/invalid input и rollback истории; общий Clippy
   будет повторён после интеграции рукописного retention.
+- Создание страницы/get-or-create и заметки выполняется одной Store-командой. Два
+  конкурентных вызова с одним именем теперь возвращают одну страницу; reuse alias не пишет.
+  Семантика initial block, отдельных untitled notes, истории и handwritten creation сохранена.
+  7 новых creation-тестов, 9 прежних page/note, 152 core unit и 2 Tauri-теста прошли.
+  Fixture commit assertions привязаны к начальному counter, поскольку создание тоже учитывается.
 
 ## Решение и масштаб
 
