@@ -380,19 +380,10 @@ impl Tangleaf {
         let user = caller(&context)?;
         let markdown = args.markdown;
         user.write(|conn| async move {
-            let page = db::create_page(&conn, title).await?;
-            if !markdown.trim().is_empty() {
-                db::create_block(
-                    &conn,
-                    page.uuid,
-                    None,
-                    None,
-                    BlockStyle::Paragraph,
-                    markdown,
-                )
-                .await?;
-            }
-            Ok(page)
+            Ok(notes_core::store::NotesStore::new(conn)
+                .create_page_with_markdown(title, markdown)
+                .await?
+                .value)
         })
         .await
         .map(|value| Json(value.into()))

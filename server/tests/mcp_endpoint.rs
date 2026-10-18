@@ -131,6 +131,86 @@ async fn rejects_callers_without_the_servers_token() {
     );
 }
 
+#[tokio::test]
+async fn named_capture_rolls_back_as_a_unit_then_appends_to_the_same_page() {
+    let harness = common::start_server().await;
+    let user = harness.state.registry.authenticate(common::TOKEN).unwrap();
+    let client = connect(&harness, common::TOKEN).await.unwrap();
+    let before_seq = user.oplog.latest_seq().await.unwrap();
+    user.notes
+        .call(|database| {
+            database.execute_batch(
+                "CREATE TEMP TRIGGER reject_mcp_capture BEFORE INSERT ON blocks BEGIN
+         SELECT RAISE(ABORT, 'injected MCP paragraph failure'); END;",
+            )
+        })
+        .await
+        .unwrap();
+    let rejected = client
+        .call_tool(
+            CallToolRequestParams::new("create_note").with_arguments(arguments(
+                serde_json::json!({ "title": "Atomic capture", "markdown": "rejected" }),
+            )),
+        )
+        .await;
+    assert!(match rejected {
+        Ok(result) => result.is_error == Some(true),
+        Err(rmcp::ServiceError::McpError(_)) => true,
+        Err(error) => panic!("unexpected MCP transport error: {error}"),
+    });
+    assert!(
+        notes_core::db::get_page_by_title(&user.notes, "Atomic capture".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(user.oplog.latest_seq().await.unwrap(), before_seq);
+    user.notes
+        .call(|database| database.execute_batch("DROP TRIGGER reject_mcp_capture"))
+        .await
+        .unwrap();
+
+    let first = call(
+        &client,
+        "create_note",
+        serde_json::json!({ "title": " Atomic capture ", "markdown": "first" }),
+    )
+    .await;
+    let second = call(
+        &client,
+        "create_note",
+        serde_json::json!({ "title": "ATOMIC CAPTURE", "markdown": " second\n" }),
+    )
+    .await;
+    assert_eq!(first["uuid"], second["uuid"]);
+    assert_eq!(first["title"], "Atomic capture");
+    let operations = harness
+        .sync_transport()
+        .ops_since(before_seq, 256)
+        .await
+        .unwrap();
+    assert_eq!(operations.len(), 3);
+    assert!(matches!(
+        &operations[0].envelope.kind,
+        notes_core::OpKind::PageCreate(_)
+    ));
+    assert!(
+        matches!(&operations[1].envelope.kind, notes_core::OpKind::BlockCreate(create) if create.markdown == "first")
+    );
+    assert!(
+        matches!(&operations[2].envelope.kind, notes_core::OpKind::BlockCreate(create) if create.markdown == " second\n")
+    );
+    let history_count: i64 = user
+        .notes
+        .call(|database| {
+            database.query_row("SELECT COUNT(*) FROM history_undo", [], |row| row.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(history_count, 2);
+    client.cancel().await.unwrap();
+}
+
 /// Editing is guarded by revisions, and the guard is the whole point: an
 /// assistant working from text it read a minute ago must not silently overwrite
 /// what the user typed on their phone in between.

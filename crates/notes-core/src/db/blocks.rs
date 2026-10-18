@@ -289,6 +289,22 @@ fn sibling_placement(
     Ok((keys, moves))
 }
 
+pub(super) fn append_root_placement(
+    transaction: &rusqlite::Transaction<'_>,
+    page_uuid: uuid::Uuid,
+) -> crate::CoreResult<(OrderKey, Vec<OpKind>)> {
+    let (mut keys, moves) = sibling_placement(
+        transaction,
+        page_uuid,
+        None,
+        SiblingInsertion::End,
+        None,
+        1,
+        crate::CoreError::invalid("invalid root append position"),
+    )?;
+    Ok((keys.remove(0), moves))
+}
+
 pub async fn create_block(
     conn: &Connection,
     page_uuid: uuid::Uuid,

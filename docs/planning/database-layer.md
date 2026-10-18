@@ -235,6 +235,16 @@
   unit и 22 server integration; фактические PRAGMA проверены через каждый путь и reopen.
   Общий all-target Clippy core/AI/server/Tauri проходит.
 
+- Серверный named capture стал отдельной атомарной командой: ensure page по title/alias
+  и append Markdown выполняются одной ordered Apply group, с одним history action и итоговым
+  Page до commit. Shared root allocator сохраняет sparse append и exhausted-key fallback.
+  Это отдельная семантика от frontend create-note с начальным пустым блоком. GraphWriter
+  и MCP используют новую команду внутри прежнего `UserState::write`: outbox/oplog publication
+  перед ответом сохранена; атомарность между разными SQLite файлами этим не обещается.
+  Прошли 7 capture-store, 7 creation-store, 5 server-authored и 4 MCP endpoint теста:
+  concurrent captures сохраняют точные параграфы/sequence, ошибка BlockCreate не оставляет
+  пустую страницу, history/outbox/HLC или продвижение серверного oplog.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

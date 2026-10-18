@@ -217,6 +217,67 @@ impl crate::store::NotesStore {
         self.create_page(title).await
     }
 
+    /// Ensure a named page and append a nonblank Markdown paragraph atomically.
+    /// Existing titles and aliases resolve to their current owner.
+    pub async fn create_page_with_markdown(
+        &self,
+        title: String,
+        markdown: String,
+    ) -> Result<crate::store::Committed<Page>> {
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return Err(crate::CoreError::invalid("title is required").into());
+        }
+        self.write(move |write| -> crate::CoreResult<Page> {
+            let existing =
+                page_by_normalized_title(write.sql(), &crate::model::normalize_title(&title))?;
+            if markdown.trim().is_empty()
+                && let Some(page) = existing
+            {
+                return Ok(page);
+            }
+            let page_uuid = existing
+                .as_ref()
+                .map_or_else(uuid::Uuid::now_v7, |page| page.uuid);
+            let now = chrono::Utc::now().timestamp();
+            let mut kinds = Vec::new();
+            if existing.is_none() {
+                kinds.push(OpKind::PageCreate(PageCreate {
+                    uuid: page_uuid,
+                    kind: PageKind::Note,
+                    title: Some(title),
+                    layout: PageLayout::Outline,
+                    created_at: now,
+                }));
+            }
+            if !markdown.trim().is_empty() {
+                let (order_key, moves) =
+                    super::blocks::append_root_placement(write.sql(), page_uuid)?;
+                kinds.push(OpKind::BlockCreate(BlockCreate {
+                    uuid: uuid::Uuid::now_v7(),
+                    page_uuid,
+                    parent_uuid: None,
+                    order_key,
+                    style: BlockStyle::Paragraph,
+                    markdown,
+                    created_at: now,
+                }));
+                kinds.extend(moves);
+            }
+            write.apply_action(
+                "capture note",
+                kinds,
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(write.sql().query_row(
+                &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1"),
+                [page_uuid],
+                row_to_page,
+            )?)
+        })
+        .await
+    }
+
     pub async fn rename_page_if_revision(
         &self,
         uuid: uuid::Uuid,
