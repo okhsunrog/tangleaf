@@ -2530,6 +2530,43 @@ struct StructureRow {
     updated_at: i64,
 }
 
+/// The resolver consumes raw intentions but only borrows the materialized
+/// baseline. Full and component loaders can share these rules without cloning
+/// every intention or coupling resolution to SQL.
+struct StructureInput<'a> {
+    blocks: &'a HashMap<uuid::Uuid, StructureRow>,
+    live_pages: &'a HashSet<uuid::Uuid>,
+    intents: HashMap<uuid::Uuid, StructureIntent>,
+}
+
+fn resolve_structure(input: StructureInput<'_>) -> HashMap<uuid::Uuid, StructureIntent> {
+    let StructureInput {
+        blocks,
+        live_pages,
+        mut intents,
+    } = input;
+    // An unavailable destination preserves the materialized fallback. Do not
+    // synthesize a new placement for an absent block or unusable intention.
+    intents
+        .retain(|uuid, intent| blocks.contains_key(uuid) && live_pages.contains(&intent.page_uuid));
+    let pages_by_block = intents
+        .iter()
+        .map(|(uuid, intent)| (*uuid, intent.page_uuid))
+        .collect::<HashMap<_, _>>();
+    for intent in intents.values_mut() {
+        if intent.parent_uuid.is_some_and(|parent| {
+            blocks.get(&parent).is_none_or(|parent_row| {
+                pages_by_block.get(&parent) != Some(&intent.page_uuid)
+                    || intent.hlc.as_str() < parent_row.existence_hlc.as_str()
+            })
+        }) {
+            intent.parent_uuid = None;
+        }
+    }
+    break_structure_cycles(&mut intents);
+    intents
+}
+
 fn reconcile_structure(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
     reconcile_structure_tracked(transaction, None)
 }
@@ -2568,7 +2605,7 @@ fn reconcile_structure_tracked(
             .collect::<rusqlite::Result<HashSet<_>>>()?
     };
     let mut intents_read = 0usize;
-    let mut intents = {
+    let intents = {
         let mut statement = transaction.prepare(
             "SELECT block_uuid, page_uuid, parent_uuid, order_key, hlc
                FROM block_structure_lww",
@@ -2586,34 +2623,15 @@ fn reconcile_structure_tracked(
                 ))
             })?
             .inspect(|_| intents_read += 1)
-            .filter_map(|result| match result {
-                Ok((uuid, intent))
-                    if existing.contains_key(&uuid) && pages.contains(&intent.page_uuid) =>
-                {
-                    Some(Ok((uuid, intent)))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
             .collect::<rusqlite::Result<HashMap<_, _>>>()?
     };
     let read = started.elapsed();
     let resolving = std::time::Instant::now();
-    let pages_by_block = intents
-        .iter()
-        .map(|(uuid, intent)| (*uuid, intent.page_uuid))
-        .collect::<HashMap<_, _>>();
-    for intent in intents.values_mut() {
-        if intent.parent_uuid.is_some_and(|parent| {
-            existing.get(&parent).is_none_or(|parent_row| {
-                pages_by_block.get(&parent) != Some(&intent.page_uuid)
-                    || intent.hlc.as_str() < parent_row.existence_hlc.as_str()
-            })
-        }) {
-            intent.parent_uuid = None;
-        }
-    }
-    break_structure_cycles(&mut intents);
+    let intents = resolve_structure(StructureInput {
+        blocks: &existing,
+        live_pages: &pages,
+        intents,
+    });
     let resolve = resolving.elapsed();
     let materializing = std::time::Instant::now();
     let mut blocks_written = 0usize;
@@ -3408,6 +3426,216 @@ mod tests {
             parse_refs(&markdown),
             (vec!["Embedded".into(), "Visible".into()], vec![])
         );
+    }
+
+    fn structure_row(page_uuid: uuid::Uuid, existence_hlc: &str) -> StructureRow {
+        StructureRow {
+            existence_hlc: existence_hlc.into(),
+            page_uuid,
+            parent_uuid: None,
+            order_key: OrderKey::first(),
+            structure_hlc: None,
+            updated_at: 0,
+        }
+    }
+
+    fn structure_intent(
+        page_uuid: uuid::Uuid,
+        parent_uuid: Option<uuid::Uuid>,
+        hlc: &str,
+    ) -> StructureIntent {
+        StructureIntent {
+            page_uuid,
+            parent_uuid,
+            order_key: OrderKey::first(),
+            hlc: hlc.into(),
+        }
+    }
+
+    #[test]
+    fn structure_resolver_filters_unavailable_intents_without_replacing_fallbacks() {
+        let page = uuid::Uuid::from_u128(1);
+        let missing_page = uuid::Uuid::from_u128(2);
+        let live = uuid::Uuid::from_u128(3);
+        let fallback = uuid::Uuid::from_u128(4);
+        let missing_block = uuid::Uuid::from_u128(5);
+        let waiting_child = uuid::Uuid::from_u128(6);
+        let without_intent = uuid::Uuid::from_u128(7);
+        let mut fallback_row = structure_row(page, "1");
+        fallback_row.parent_uuid = Some(live);
+        let blocks = HashMap::from([
+            (live, structure_row(page, "1")),
+            (fallback, fallback_row),
+            (waiting_child, structure_row(page, "1")),
+            (without_intent, structure_row(page, "1")),
+        ]);
+        let live_pages = HashSet::from([page]);
+        let resolved = resolve_structure(StructureInput {
+            blocks: &blocks,
+            live_pages: &live_pages,
+            intents: HashMap::from([
+                (live, structure_intent(page, None, "2")),
+                (fallback, structure_intent(missing_page, None, "2")),
+                (missing_block, structure_intent(page, None, "2")),
+                (
+                    waiting_child,
+                    structure_intent(page, Some(missing_block), "2"),
+                ),
+            ]),
+        });
+
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains_key(&live));
+        assert_eq!(resolved[&waiting_child].parent_uuid, None);
+        assert!(!resolved.contains_key(&fallback));
+        assert!(!resolved.contains_key(&missing_block));
+        assert!(!resolved.contains_key(&without_intent));
+        // The baseline is borrowed; unavailable intentions do not erase the
+        // previous valid placement or manufacture an update for the writer.
+        assert_eq!(blocks[&fallback].page_uuid, page);
+        assert_eq!(blocks[&fallback].parent_uuid, Some(live));
+    }
+
+    #[test]
+    fn structure_resolver_validates_parent_intended_page_instead_of_materialized_page() {
+        let page = uuid::Uuid::from_u128(1);
+        let other_page = uuid::Uuid::from_u128(2);
+        let leaving_parent = uuid::Uuid::from_u128(3);
+        let arriving_parent = uuid::Uuid::from_u128(4);
+        let detached_child = uuid::Uuid::from_u128(5);
+        let attached_child = uuid::Uuid::from_u128(6);
+        let blocks = HashMap::from([
+            (leaving_parent, structure_row(page, "1")),
+            (arriving_parent, structure_row(other_page, "1")),
+            (detached_child, structure_row(page, "1")),
+            (attached_child, structure_row(page, "1")),
+        ]);
+        let live_pages = HashSet::from([page, other_page]);
+        let resolved = resolve_structure(StructureInput {
+            blocks: &blocks,
+            live_pages: &live_pages,
+            intents: HashMap::from([
+                (leaving_parent, structure_intent(other_page, None, "2")),
+                (arriving_parent, structure_intent(page, None, "2")),
+                (
+                    detached_child,
+                    structure_intent(page, Some(leaving_parent), "3"),
+                ),
+                (
+                    attached_child,
+                    structure_intent(page, Some(arriving_parent), "3"),
+                ),
+            ]),
+        });
+
+        assert_eq!(resolved[&detached_child].parent_uuid, None);
+        assert_eq!(resolved[&attached_child].parent_uuid, Some(arriving_parent));
+    }
+
+    #[test]
+    fn structure_resolver_does_not_attach_to_a_parent_without_a_live_intention() {
+        let page = uuid::Uuid::from_u128(1);
+        let missing_page = uuid::Uuid::from_u128(2);
+        let parent = uuid::Uuid::from_u128(3);
+        let child = uuid::Uuid::from_u128(4);
+        let blocks = HashMap::from([
+            (parent, structure_row(page, "1")),
+            (child, structure_row(page, "1")),
+        ]);
+        let live_pages = HashSet::from([page]);
+        for parent_intent in [None, Some(structure_intent(missing_page, None, "2"))] {
+            let mut intents = HashMap::from([(child, structure_intent(page, Some(parent), "3"))]);
+            if let Some(parent_intent) = parent_intent {
+                intents.insert(parent, parent_intent);
+            }
+            let resolved = resolve_structure(StructureInput {
+                blocks: &blocks,
+                live_pages: &live_pages,
+                intents,
+            });
+            assert_eq!(resolved[&child].parent_uuid, None);
+            assert!(!resolved.contains_key(&parent));
+        }
+    }
+
+    #[test]
+    fn structure_resolver_parent_existence_floor_accepts_equality_and_newer_intents() {
+        let page = uuid::Uuid::from_u128(1);
+        let parent = uuid::Uuid::from_u128(2);
+        let older_child = uuid::Uuid::from_u128(3);
+        let equal_child = uuid::Uuid::from_u128(4);
+        let newer_child = uuid::Uuid::from_u128(5);
+        let blocks = HashMap::from([
+            (parent, structure_row(page, "20")),
+            (older_child, structure_row(page, "1")),
+            (equal_child, structure_row(page, "1")),
+            (newer_child, structure_row(page, "1")),
+        ]);
+        let live_pages = HashSet::from([page]);
+        let resolved = resolve_structure(StructureInput {
+            blocks: &blocks,
+            live_pages: &live_pages,
+            intents: HashMap::from([
+                (parent, structure_intent(page, None, "20")),
+                (older_child, structure_intent(page, Some(parent), "10")),
+                (equal_child, structure_intent(page, Some(parent), "20")),
+                (newer_child, structure_intent(page, Some(parent), "30")),
+            ]),
+        });
+
+        assert_eq!(resolved[&older_child].parent_uuid, None);
+        assert_eq!(resolved[&equal_child].parent_uuid, Some(parent));
+        assert_eq!(resolved[&newer_child].parent_uuid, Some(parent));
+    }
+
+    #[test]
+    fn structure_resolver_validates_parent_generation_before_breaking_cycles() {
+        let page = uuid::Uuid::from_u128(1);
+        let first = uuid::Uuid::from_u128(2);
+        let second = uuid::Uuid::from_u128(3);
+        let blocks = HashMap::from([
+            (first, structure_row(page, "1")),
+            (second, structure_row(page, "2")),
+        ]);
+        let live_pages = HashSet::from([page]);
+        let resolved = resolve_structure(StructureInput {
+            blocks: &blocks,
+            live_pages: &live_pages,
+            intents: HashMap::from([
+                (first, structure_intent(page, Some(second), "1")),
+                (second, structure_intent(page, Some(first), "3")),
+            ]),
+        });
+
+        assert_eq!(resolved[&first].parent_uuid, None);
+        assert_eq!(resolved[&second].parent_uuid, Some(first));
+    }
+
+    #[test]
+    fn structure_resolver_breaks_equal_clock_cycles_by_uuid_only_inside_the_cycle() {
+        let page = uuid::Uuid::from_u128(1);
+        let first = uuid::Uuid::from_u128(2);
+        let second = uuid::Uuid::from_u128(3);
+        let branch = uuid::Uuid::from_u128(4);
+        let blocks = HashMap::from([
+            (first, structure_row(page, "1")),
+            (second, structure_row(page, "1")),
+            (branch, structure_row(page, "1")),
+        ]);
+        let live_pages = HashSet::from([page]);
+        let resolved = resolve_structure(StructureInput {
+            blocks: &blocks,
+            live_pages: &live_pages,
+            intents: HashMap::from([
+                (first, structure_intent(page, Some(second), "7")),
+                (second, structure_intent(page, Some(first), "7")),
+                (branch, structure_intent(page, Some(first), "9")),
+            ]),
+        });
+
+        assert_eq!(resolved[&first].parent_uuid, Some(second));
+        assert_eq!(resolved[&second].parent_uuid, None);
+        assert_eq!(resolved[&branch].parent_uuid, Some(first));
     }
 
     #[test]
