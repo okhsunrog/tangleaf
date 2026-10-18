@@ -20,13 +20,16 @@ pub async fn get_page_by_title(conn: &Connection, title: String) -> Result<Optio
     }
     let normalized_title = crate::model::normalize_title(&title);
     conn.call(move |database| {
-        let Some(page_uuid) = operation::resolve_page_alias(database, &normalized_title)? else {
-            return Ok(None);
-        };
+        let transaction = database.transaction()?;
         let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid = ?1");
-        database
-            .query_row(&sql, [page_uuid], row_to_page)
-            .optional()
+        let page = match operation::resolve_page_alias(&transaction, &normalized_title)? {
+            Some(page_uuid) => transaction
+                .query_row(&sql, [page_uuid], row_to_page)
+                .optional()?,
+            None => None,
+        };
+        transaction.commit()?;
+        Ok(page)
     })
     .await
 }
@@ -41,24 +44,35 @@ pub async fn list_pages_filtered(
     limit: u32,
 ) -> Result<Vec<Page>> {
     conn.call(move |database| {
-        let predicate = match filter {
-            // Handwritten notes live alongside text notes in every list; only journals are apart.
-            PageListFilter::Notes => "WHERE page_identity.page_kind IN ('note', 'handwriting')",
-            PageListFilter::Journals => "WHERE page_identity.page_kind = 'journal'",
-            PageListFilter::All => "",
-        };
-        let sql = format!(
-            "SELECT {PAGE_COLUMNS} FROM pages
-               JOIN page_identities AS page_identity ON page_identity.page_uuid = pages.uuid
-               {predicate}
-              ORDER BY pages.updated_at DESC, pages.uuid LIMIT ?1"
-        );
-        database
-            .prepare(&sql)?
-            .query_map([limit], row_to_page)?
-            .collect()
+        let transaction = database.transaction()?;
+        let pages = list_pages_in_transaction(&transaction, filter, limit)?;
+        transaction.commit()?;
+        Ok(pages)
     })
     .await
+}
+
+pub(super) fn list_pages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    filter: PageListFilter,
+    limit: u32,
+) -> rusqlite::Result<Vec<Page>> {
+    let predicate = match filter {
+        // Handwritten notes live alongside text notes in every list; only journals are apart.
+        PageListFilter::Notes => "WHERE page_identity.page_kind IN ('note', 'handwriting')",
+        PageListFilter::Journals => "WHERE page_identity.page_kind = 'journal'",
+        PageListFilter::All => "",
+    };
+    let sql = format!(
+        "SELECT {PAGE_COLUMNS} FROM pages
+           JOIN page_identities AS page_identity ON page_identity.page_uuid = pages.uuid
+           {predicate}
+          ORDER BY pages.updated_at DESC, pages.uuid LIMIT ?1"
+    );
+    transaction
+        .prepare_cached(&sql)?
+        .query_map([limit], row_to_page)?
+        .collect()
 }
 
 pub async fn create_page(conn: &Connection, title: String) -> Result<Page> {

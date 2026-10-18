@@ -111,6 +111,13 @@
   подготовка токенов остаётся вне worker. Два теста через публичные функции выполняют
   настоящий WAL commit между title/body и между FTS/substring попытками: выдача сохраняет
   исходный snapshot, следующее чтение видит новое состояние. Ranking и interleave сохранены.
+- `neighbors`, backlinks, ancestors, subtree и оба graph snapshot собираются внутри одного
+  read snapshot без поэлементной гидратации. Соседи используют индексированный BFS;
+  focused edges ограничены выбранными source UUID. При 1k/10k посторонних блоков число
+  запросов и возвращённых SQL-строк одинаково. Общий граф сохраняет scope Notes/Handwriting;
+  alias-дубликаты focused edges сохранены. Список страниц переиспользует один SQL helper,
+  lookup alias→page тоже атомарен. 12 новых тестов (legacy oracle, depth, WAL, scope, aliases),
+  27 прежних consumer-тестов и общий Clippy проходят; один benchmark пропущен штатно.
 
 ## Решение и масштаб
 
