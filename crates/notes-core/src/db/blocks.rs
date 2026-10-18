@@ -34,24 +34,39 @@ pub async fn get_blocks(conn: &Connection, uuids: Vec<uuid::Uuid>) -> Result<Vec
         return Ok(Vec::new());
     }
     conn.call(move |database| {
-        let placeholders = std::iter::repeat_n("?", uuids.len())
+        let transaction = database.transaction()?;
+        let by_uuid = read_blocks_by_uuid(&transaction, &uuids)?;
+        let blocks = uuids
+            .into_iter()
+            .filter_map(|uuid| by_uuid.get(&uuid).cloned())
+            .collect();
+        transaction.commit()?;
+        Ok(blocks)
+    })
+    .await
+}
+
+/// Shared hydration for callers that already own a read transaction.
+pub(super) fn read_blocks_by_uuid(
+    transaction: &rusqlite::Transaction<'_>,
+    uuids: &[uuid::Uuid],
+) -> rusqlite::Result<std::collections::HashMap<uuid::Uuid, Block>> {
+    let mut unique = uuids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut by_uuid = std::collections::HashMap::with_capacity(unique.len());
+    for chunk in unique.chunks(UUID_READ_CHUNK_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!("SELECT {BLOCK_COLUMNS} FROM blocks WHERE uuid IN ({placeholders})");
-        let blocks = database
-            .prepare(&sql)?
-            .query_map(rusqlite::params_from_iter(uuids.iter()), row_to_block)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let by_uuid = blocks
-            .into_iter()
-            .map(|block| (block.uuid, block))
-            .collect::<std::collections::HashMap<_, _>>();
-        Ok(uuids
-            .into_iter()
-            .filter_map(|uuid| by_uuid.get(&uuid).cloned())
-            .collect())
-    })
-    .await
+        let mut statement = transaction.prepare_cached(&sql)?;
+        for block in statement.query_map(rusqlite::params_from_iter(chunk.iter()), row_to_block)? {
+            let block = block?;
+            by_uuid.insert(block.uuid, block);
+        }
+    }
+    Ok(by_uuid)
 }
 
 pub async fn list_block_children(

@@ -18,6 +18,8 @@ pub(crate) mod history;
 mod journals;
 mod migrations;
 mod pages;
+#[cfg(test)]
+mod read_tests;
 mod search;
 mod workspace;
 
@@ -221,20 +223,56 @@ pub(crate) const fn blob_hash_bytes(hash: &BlobHash) -> &[u8] {
 }
 
 pub async fn get_content(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<Content>> {
-    if let Some(page) = get_page(conn, uuid).await? {
-        return Ok(Some(Content::Page(page)));
-    }
-    Ok(get_block(conn, uuid).await?.map(Content::Block))
+    Ok(get_contents(conn, vec![uuid]).await?.pop())
 }
 
 pub async fn get_contents(conn: &Connection, uuids: Vec<uuid::Uuid>) -> Result<Vec<Content>> {
-    let mut records = Vec::new();
-    for uuid in uuids {
-        if let Some(record) = get_content(conn, uuid).await? {
-            records.push(record);
+    if uuids.is_empty() {
+        return Ok(Vec::new());
+    }
+    conn.call(move |database| {
+        let transaction = database.transaction()?;
+        let records = get_contents_in_transaction(&transaction, &uuids)?;
+        transaction.commit()?;
+        Ok(records)
+    })
+    .await
+}
+
+const UUID_READ_CHUNK_SIZE: usize = 256;
+
+/// Hydrate a traversal's UUIDs within the traversal's existing read snapshot.
+/// Input order and duplicates survive; absent objects are omitted.
+pub(super) fn get_contents_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    uuids: &[uuid::Uuid],
+) -> rusqlite::Result<Vec<Content>> {
+    let mut unique = uuids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut by_uuid = std::collections::HashMap::with_capacity(unique.len());
+    for chunk in unique.chunks(UUID_READ_CHUNK_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE uuid IN ({placeholders})");
+        let mut statement = transaction.prepare_cached(&sql)?;
+        for page in statement.query_map(rusqlite::params_from_iter(chunk.iter()), row_to_page)? {
+            let page = page?;
+            by_uuid.insert(page.uuid, Content::Page(page));
         }
     }
-    Ok(records)
+    let remaining = unique
+        .into_iter()
+        .filter(|uuid| !by_uuid.contains_key(uuid))
+        .collect::<Vec<_>>();
+    for (uuid, block) in blocks::read_blocks_by_uuid(transaction, &remaining)? {
+        by_uuid.insert(uuid, Content::Block(block));
+    }
+    Ok(uuids
+        .iter()
+        .filter_map(|uuid| by_uuid.get(uuid).cloned())
+        .collect())
 }
 
 #[doc(hidden)]
