@@ -470,6 +470,16 @@
   reopen/replay сохраняет исходные IDs/HLC/content/history, доводит outbox, не создаёт sequence
   gaps или дубликаты операций. Два сценария проходят; production fix не потребовался. Это
   детерминированная модель границ отказа, не power-loss и не idempotency повторного tool call.
+- Late ink download (`8e252b0`) перенесён в наблюдаемую Store-команду: проверка binary graph до
+  writer, установка в одной транзакции, точные handwriting facts после commit. Учтены поздняя
+  доступность head/non-head и несколько владельцев одного root. Повторный download/Apply тихий;
+  dirty/editing draft не заменяется. 55 focused/regression/реальных HTTP tests проходят.
+- Sync runtime (`73a588f`) сохраняет исходный Store с reader от startup до HTTP/WS/exit,
+  вместо compatibility Store поверх одного writer. SyncClient владеет одним Store;
+  snapshot и sendable outbox читаются в одной read-транзакции. Частый status использует
+  counts/первую причину карантина, не декодирует всю очередь. 47 tests проверяют настоящее
+  чтение при занятом writer, held WAL snapshot при remote/local commit, quarantine/order,
+  HTTP/network и прежние snapshot/sync сценарии. Schema, IPC и native input не менялись.
 
 ## Решение и масштаб
 
@@ -1005,8 +1015,10 @@ Tokio wakeup, IPC или UI. Контекст вызывающего span пер
 | Увеличение числа несвязанных страниц                      | Нет пропорционального роста количества прочитанных структурных строк при локальной операции |
 
 Для телефона и BOOX нужны собственные измерения; desktop-цифры не являются их гарантией.
-Первоначальные release-прогоны Split и quiet-save укладываются в соответствующие backend-цели;
-mixed bursts превышают цель обычного сохранения. Release GUI p95 пока не измерен.
+Первоначальные release-прогоны Split и quiet-save укладывались в соответствующие backend-цели;
+старый mixed baseline превышал цель. Текущий backend после разделения очередей/IMMEDIATE:
+FULL autosave p95 8,6/14,1/15,5 мс (quiet/mixed/content), Split 243 p95 100,6 мс.
+Release GUI p95 пока не измерен.
 Если цель не достигается, профиль должен показывать следующий ограничивающий этап. Общий
 таймер SQLite без времени очереди недостаточен для вывода, что «база стала быстрой».
 
