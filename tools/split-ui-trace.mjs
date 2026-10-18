@@ -21,7 +21,7 @@ await (async () => {
   const push = (e) => {
     if (!active) return;
     counts[e.name] = (counts[e.name] ?? 0) + 1;
-    if (entries.length < 20000) entries.push(e);
+    if (entries.length < 20000) entries.push({ ...e, observedAt: now() });
   };
   window.__tangleafUiProfile = push;
   function wrap(object, name, label, detail) {
@@ -56,7 +56,10 @@ await (async () => {
     cm: el.classList?.contains("cm-content") ?? false,
   }));
   wrap(Element.prototype, "scrollIntoView", "dom.scrollIntoView");
-  wrap(Element.prototype, "scrollTo", "dom.scrollTo");
+  wrap(Element.prototype, "scrollTo", "dom.scrollTo", (_element, args) => ({
+    top: typeof args[0] === "object" ? args[0]?.top : args[1],
+    behavior: typeof args[0] === "object" ? args[0]?.behavior : undefined,
+  }));
   const raf = window.requestAnimationFrame;
   const wrappedRaf = function (callback) {
     const id = ++rafOrdinal,
@@ -75,40 +78,49 @@ await (async () => {
     if (window.requestAnimationFrame === wrappedRaf) window.requestAnimationFrame = raf;
   });
   const firsts = {};
+  const eligibilityChanges = [];
+  let previousEligibility = false;
   function observe(reason) {
     if (!active) return;
     const release = window.__tangleafReleaseProbe.result();
+    let eligible = false;
+    let state = { row: false, editor: false };
     if (release.targetUuid) {
       const row = document.querySelector(`[data-block-uuid="${CSS.escape(release.targetUuid)}"]`);
       const editor = row?.querySelector(".cm-content[contenteditable=true]");
+      state = { row: Boolean(row), editor: Boolean(editor) };
       if (row && firsts.row === undefined) firsts.row = now();
       if (editor) {
         if (firsts.editor === undefined) firsts.editor = now();
-        if (editor.contains(document.activeElement) && firsts.focused === undefined)
-          firsts.focused = now();
+        const focused = editor.contains(document.activeElement);
+        if (focused && firsts.focused === undefined) firsts.focused = now();
         const rect = editor.getBoundingClientRect();
-        if (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          rect.bottom > 0 &&
-          rect.top < innerHeight &&
-          firsts.visible === undefined
-        )
-          firsts.visible = now();
+        const visible =
+          rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight;
+        if (visible && firsts.visible === undefined) firsts.visible = now();
         const exact =
           [...editor.querySelectorAll(".cm-line")].map((e) => e.textContent).join("\n") ===
           expectedLastText;
         if (exact && firsts.exact === undefined) firsts.exact = now();
-        if (
-          exact &&
-          firsts.focused !== undefined &&
-          firsts.visible !== undefined &&
-          firsts.eligible === undefined
-        ) {
+        eligible = exact && focused && visible;
+        state = {
+          ...state,
+          focused,
+          visible,
+          exact,
+          top: rect.top,
+          bottom: rect.bottom,
+          scrollTop: row.closest("[data-workspace-scroll]")?.scrollTop,
+        };
+        if (eligible && firsts.eligible === undefined) {
           firsts.eligible = now();
           firsts.eligibleReason = reason;
         }
       }
+    }
+    if (eligible !== previousEligibility) {
+      eligibilityChanges.push({ at: now() - clickAt, eligible, reason, state });
+      previousEligibility = eligible;
     }
     if (release.status === "ready") {
       firsts.probeReadyObserved = now();
@@ -129,6 +141,8 @@ await (async () => {
     )
       return;
     entries.length = 0;
+    eligibilityChanges.length = 0;
+    previousEligibility = false;
     for (const k of Object.keys(firsts)) delete firsts[k];
     for (const k of Object.keys(counts)) delete counts[k];
     clickAt = now();
@@ -147,16 +161,20 @@ await (async () => {
     result() {
       return {
         diagnosticOnly: true,
+        schemaVersion: 2,
         clickAt,
+        timeOrigin: performance.timeOrigin,
         active,
         firsts: Object.fromEntries(
           Object.entries(firsts).map(([k, v]) => [k, typeof v === "number" ? v - clickAt : v]),
         ),
         counts: { ...counts },
+        eligibilityChanges: eligibilityChanges.map((entry) => ({ ...entry })),
         entries: entries.map((e) => ({
           ...e,
           start: e.start - clickAt,
           end: e.end - clickAt,
+          observedAt: e.observedAt - clickAt,
           detail:
             e.detail?.requestedAt !== undefined
               ? {

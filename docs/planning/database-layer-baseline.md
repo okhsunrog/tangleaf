@@ -866,3 +866,10 @@ cargo test --release -p notes-core --test block_split \
 `RUST_LOG` должен быть unset в сравнительном запуске. Для отдельного профиля фаз задать
 `RUST_LOG=notes_core::db::blocks=debug,notes_core::db::history=debug,notes_core::operation=debug`
 и один прогон. `notes_core::sqlite=debug` добавляет все вызовы, включая проверочные чтения benchmark.
+
+## Продолжение: профиль интерфейса Split
+
+После `dab865c` выполнен [отдельный UI-профиль](split-ui-profiling.md) и исправлена
+потеря видимости редактора при синхронном измерении новых virtual rows (`7cbc706`).
+Новая обычная release-серия: по 30 повторов, ready p95 326/479 мс для 109/243 частей;
+максимум 712 мс не исключён. Это последующий срез, исходные результаты выше сохранены.
