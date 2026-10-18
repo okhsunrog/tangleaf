@@ -20,7 +20,9 @@ pub async fn get_journal(
     state: State<'_, AppState>,
     date: notes_core::JournalDate,
 ) -> CommandResult<Option<db::Page>> {
-    db::get_journal(&state.conn, date).await.map_err(err)
+    db::get_journal(state.store.read_connection(), date)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -30,9 +32,13 @@ pub async fn list_journals(
     before_date: Option<notes_core::JournalDate>,
     limit: Option<db::JournalListLimit>,
 ) -> CommandResult<Vec<db::Page>> {
-    db::list_journals(&state.conn, before_date, limit.unwrap_or_default())
-        .await
-        .map_err(err)
+    db::list_journals(
+        state.store.read_connection(),
+        before_date,
+        limit.unwrap_or_default(),
+    )
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]

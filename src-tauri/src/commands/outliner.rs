@@ -7,7 +7,7 @@ pub async fn list_block_children(
     page_uuid: uuid::Uuid,
     parent_uuid: Option<uuid::Uuid>,
 ) -> CommandResult<Vec<db::Block>> {
-    db::list_block_children(&state.conn, page_uuid, parent_uuid)
+    db::list_block_children(state.store.read_connection(), page_uuid, parent_uuid)
         .await
         .map_err(err)
 }
@@ -18,7 +18,9 @@ pub async fn get_block(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<Option<db::Block>> {
-    db::get_block(&state.conn, uuid).await.map_err(err)
+    db::get_block(state.store.read_connection(), uuid)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -187,7 +189,9 @@ pub async fn delete_block(
 #[tauri::command]
 #[specta::specta]
 pub async fn history_status(state: State<'_, AppState>) -> CommandResult<db::HistoryStatus> {
-    db::history_status(&state.conn).await.map_err(err)
+    db::history_status(state.store.read_connection())
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -223,7 +227,7 @@ pub async fn search_pages_by_title(
     query: String,
     limit: u32,
 ) -> CommandResult<Vec<db::Page>> {
-    db::search_pages_by_title(&state.conn, query, limit)
+    db::search_pages_by_title(state.store.read_connection(), query, limit)
         .await
         .map_err(err)
 }
@@ -236,7 +240,7 @@ pub async fn search_blocks_fts(
     limit: u32,
     token_mode: notes_core::SearchTokenMode,
 ) -> CommandResult<Vec<db::Block>> {
-    db::search_blocks_fts(&state.conn, query, limit, token_mode)
+    db::search_blocks_fts(state.store.read_connection(), query, limit, token_mode)
         .await
         .map_err(err)
 }

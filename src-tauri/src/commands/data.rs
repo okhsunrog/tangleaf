@@ -39,7 +39,9 @@ pub async fn export_data(
         "tangleaf-{}.notes",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
-    let archive = db::export_archive(&state.conn).await.map_err(err)?;
+    let archive = db::export_archive(state.store.write_connection())
+        .await
+        .map_err(err)?;
 
     #[cfg(not(target_os = "android"))]
     {
@@ -176,9 +178,14 @@ pub async fn import_data(
             .await
             .map_err(err)?
             .map_err(err)?;
-    write_backup(&app, &state.conn, &state.blob_store, "before-import")
-        .await
-        .map_err(err)?;
+    write_backup(
+        &app,
+        state.store.write_connection(),
+        &state.blob_store,
+        "before-import",
+    )
+    .await
+    .map_err(err)?;
     let StagedPortableArchive {
         archive,
         blob_store: staged_blob_store,
@@ -207,13 +214,16 @@ pub async fn import_data(
             .map_err(|_| err("archive blob publication tracker was poisoned"))?
             .clone();
         let cleanup_store = destination_blob_store.clone();
-        let cleanup_result =
-            db::cleanup_unreferenced_attachment_blobs(&state.conn, candidates, move |blob_hash| {
+        let cleanup_result = db::cleanup_unreferenced_attachment_blobs(
+            state.store.write_connection(),
+            candidates,
+            move |blob_hash| {
                 cleanup_store
                     .remove_verified(blob_hash, super::attachments::MAX_ATTACHMENT_SIZE)?;
                 Ok(())
-            })
-            .await;
+            },
+        )
+        .await;
         let import_error = match cleanup_result {
             Ok(_) => import_error,
             Err(cleanup_error) => import_error.context(format!(
@@ -231,9 +241,14 @@ pub async fn create_backup(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<std::path::PathBuf> {
-    write_backup(&app, &state.conn, &state.blob_store, "manual")
-        .await
-        .map_err(err)
+    write_backup(
+        &app,
+        state.store.write_connection(),
+        &state.blob_store,
+        "manual",
+    )
+    .await
+    .map_err(err)
 }
 
 pub(super) async fn write_backup(

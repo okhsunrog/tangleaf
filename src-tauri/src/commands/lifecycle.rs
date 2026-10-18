@@ -154,7 +154,7 @@ pub async fn retry_rejected_changes(
     state: State<'_, AppState>,
     sync: State<'_, crate::sync::SyncRuntime>,
 ) -> CommandResult<u32> {
-    let released = notes_core::release_quarantined_outbox(&state.conn)
+    let released = notes_core::release_quarantined_outbox(state.store.write_connection())
         .await
         .map_err(err)?;
     sync.request_retry();

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub(crate) mod bulk;
 mod metadata;
+mod runtime;
 
 type CommitObserver = dyn Fn(&CommitNotice) + Send + Sync;
 
@@ -57,10 +58,11 @@ impl<T> Committed<T> {
     }
 }
 
-/// Shares the existing SQLite worker; it does not open another connection.
+/// Owns the writer and, for file-backed runtimes, one independent read worker.
 #[derive(Clone)]
 pub struct NotesStore {
     connection: Connection,
+    reader: Option<Connection>,
     observer: Option<Arc<CommitObserver>>,
     structure_mode: operation::StructureProjectionMode,
 }
@@ -72,6 +74,7 @@ impl NotesStore {
     pub fn new(connection: Connection) -> Self {
         Self {
             connection,
+            reader: None,
             observer: None,
             structure_mode: operation::StructureProjectionMode::Components,
         }

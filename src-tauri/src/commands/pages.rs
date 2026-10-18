@@ -74,7 +74,7 @@ pub async fn list_pages(
     limit: Option<u32>,
 ) -> CommandResult<Vec<db::Page>> {
     db::list_pages_filtered(
-        &state.conn,
+        state.store.read_connection(),
         filter.unwrap_or_default(),
         limit.unwrap_or(200),
     )
@@ -88,7 +88,9 @@ pub async fn get_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<Option<db::Page>> {
-    db::get_page(&state.conn, uuid).await.map_err(err)
+    db::get_page(state.store.read_connection(), uuid)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -97,7 +99,9 @@ pub async fn get_page_document(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<Option<db::PageDocumentSnapshot>> {
-    db::get_page_document(&state.conn, uuid).await.map_err(err)
+    db::get_page_document(state.store.read_connection(), uuid)
+        .await
+        .map_err(err)
 }
 
 /// Complete outline render input fetched behind one typed IPC boundary. The
@@ -109,7 +113,7 @@ pub async fn get_page_render_snapshot(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<Option<PageRenderSnapshot>> {
-    let Some(document) = db::get_page_document(&state.conn, uuid)
+    let Some(document) = db::get_page_document(state.store.read_connection(), uuid)
         .await
         .map_err(err)?
     else {
@@ -149,7 +153,7 @@ pub async fn get_containing_page(
     state: State<'_, AppState>,
     block_uuid: uuid::Uuid,
 ) -> CommandResult<Option<db::Page>> {
-    db::get_containing_page(&state.conn, block_uuid)
+    db::get_containing_page(state.store.read_connection(), block_uuid)
         .await
         .map_err(err)
 }
@@ -160,7 +164,9 @@ pub async fn get_page_by_title(
     state: State<'_, AppState>,
     title: String,
 ) -> CommandResult<Option<db::Page>> {
-    db::get_page_by_title(&state.conn, title).await.map_err(err)
+    db::get_page_by_title(state.store.read_connection(), title)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -184,9 +190,14 @@ pub async fn delete_page(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<bool> {
-    super::data::write_backup(&app, &state.conn, &state.blob_store, "before-delete")
-        .await
-        .map_err(err)?;
+    super::data::write_backup(
+        &app,
+        state.store.write_connection(),
+        &state.blob_store,
+        "before-delete",
+    )
+    .await
+    .map_err(err)?;
     let committed = observed_store(&app, &state)
         .delete_page(uuid)
         .await
@@ -201,7 +212,9 @@ pub async fn neighbors(
     uuid: uuid::Uuid,
     depth: u32,
 ) -> CommandResult<Vec<db::Content>> {
-    db::neighbors(&state.conn, uuid, depth).await.map_err(err)
+    db::neighbors(state.store.read_connection(), uuid, depth)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -210,7 +223,9 @@ pub async fn find_backlinks(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<Vec<db::Content>> {
-    db::find_backlinks(&state.conn, uuid).await.map_err(err)
+    db::find_backlinks(state.store.read_connection(), uuid)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -219,7 +234,7 @@ pub async fn graph_snapshot(
     state: State<'_, AppState>,
     focus_uuid: Option<uuid::Uuid>,
 ) -> CommandResult<db::GraphSnapshot> {
-    db::graph_snapshot(&state.conn, focus_uuid)
+    db::graph_snapshot(state.store.read_connection(), focus_uuid)
         .await
         .map_err(err)
 }

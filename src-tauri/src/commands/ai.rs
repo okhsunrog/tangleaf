@@ -19,7 +19,9 @@ pub async fn search_notes(
 ) -> CommandResult<Vec<SearchHit>> {
     let limit = validate_search_request(&query, limit)?;
     match mode {
-        SearchMode::Fts => db::search_fts(&state.conn, query, limit).await.map_err(err),
+        SearchMode::Fts => db::search_fts(state.store.read_connection(), query, limit)
+            .await
+            .map_err(err),
         SearchMode::Semantic => remote_search(&state, query, limit, rerank.unwrap_or(true)).await,
     }
 }

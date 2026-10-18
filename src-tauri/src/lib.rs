@@ -5,7 +5,6 @@ mod commands;
 mod settings;
 mod sync;
 
-use notes_core::db;
 use std::sync::{Arc, RwLock};
 use tauri::Manager;
 use tauri_specta::Event;
@@ -258,11 +257,11 @@ pub fn run() {
                 };
 
             tauri::async_runtime::spawn(async move {
-                match db::open(&db_path).await {
-                    Ok(conn) => {
+                match notes_core::store::NotesStore::open(&db_path).await {
+                    Ok(store) => {
+                        let conn = store.write_connection().clone();
                         handle.manage(commands::AppState {
-                            conn: conn.clone(),
-                            store: notes_core::store::NotesStore::new(conn.clone()),
+                            store,
                             blob_store: blob_store.clone(),
                             image_cache,
                             preview_jobs: Arc::new(attachment_protocol::PreviewJobs::default()),

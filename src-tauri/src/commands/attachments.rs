@@ -92,7 +92,7 @@ pub async fn list_attachments(
     state: State<'_, AppState>,
     location: notes_core::AttachmentOwner,
 ) -> CommandResult<Vec<db::Attachment>> {
-    db::list_attachments(&state.conn, location)
+    db::list_attachments(state.store.read_connection(), location)
         .await
         .map_err(err)
 }
@@ -121,7 +121,7 @@ pub async fn open_attachment(
     state: State<'_, AppState>,
     uuid: uuid::Uuid,
 ) -> CommandResult<()> {
-    let attachment = db::get_attachment(&state.conn, uuid)
+    let attachment = db::get_attachment(state.store.read_connection(), uuid)
         .await
         .map_err(err)?
         .ok_or_else(|| CommandError::new(CommandErrorCode::NotFound, "attachment not found"))?;
@@ -152,7 +152,7 @@ pub async fn delete_attachment(
 ) -> CommandResult<bool> {
     super::data::write_backup(
         &app,
-        &state.conn,
+        state.store.write_connection(),
         &state.blob_store,
         "before-attachment-delete",
     )

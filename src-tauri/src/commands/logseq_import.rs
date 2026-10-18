@@ -459,13 +459,16 @@ pub async fn prepare_logseq_import(
         let source_root = source_root.into_path().map_err(err)?;
         send_indeterminate_import_progress(&on_progress, LogseqImportStage::Scanning);
 
-        let existing_receipt =
-            notes_core::external_import_receipt(&state.conn, ExternalImportFormat::Logseq)
+        let existing_receipt = notes_core::external_import_receipt(
+            state.store.read_connection(),
+            ExternalImportFormat::Logseq,
+        )
+        .await
+        .map_err(err)?;
+        let destination_empty =
+            notes_core::external_import_destination_is_empty(state.store.read_connection())
                 .await
                 .map_err(err)?;
-        let destination_empty = notes_core::external_import_destination_is_empty(&state.conn)
-            .await
-            .map_err(err)?;
         let identity = if let Some(receipt) = existing_receipt.as_ref() {
             IdentityContext {
                 workspace_uuid: receipt.identity.workspace_uuid,
@@ -473,7 +476,9 @@ pub async fn prepare_logseq_import(
             }
         } else {
             IdentityContext {
-                workspace_uuid: db::workspace_uuid(&state.conn).await.map_err(err)?,
+                workspace_uuid: db::workspace_uuid(state.store.read_connection())
+                    .await
+                    .map_err(err)?,
                 import_namespace_uuid: uuid::Uuid::now_v7(),
             }
         };
@@ -587,10 +592,12 @@ pub async fn commit_logseq_import(
                 "the Logseq dry run contains blockers and cannot be committed",
             ));
         }
-        let current_receipt =
-            notes_core::external_import_receipt(&state.conn, ExternalImportFormat::Logseq)
-                .await
-                .map_err(err)?;
+        let current_receipt = notes_core::external_import_receipt(
+            state.store.read_connection(),
+            ExternalImportFormat::Logseq,
+        )
+        .await
+        .map_err(err)?;
         if let Some(receipt) = &current_receipt {
             let provenance = &session.prepared.provenance;
             if receipt.manifest_digest.as_bytes() != provenance.source_manifest.sha256().as_bytes()
@@ -603,7 +610,7 @@ pub async fn commit_logseq_import(
                     "the committed Logseq import receipt no longer matches this dry run",
                 ));
             }
-        } else if !notes_core::external_import_destination_is_empty(&state.conn)
+        } else if !notes_core::external_import_destination_is_empty(state.store.read_connection())
             .await
             .map_err(err)?
         {
@@ -659,9 +666,14 @@ pub async fn commit_logseq_import(
         .map_err(map_commit_plan_error)?;
 
         if first_import {
-            super::data::write_backup(&app, &state.conn, &state.blob_store, "before-logseq-import")
-                .await
-                .map_err(err)?;
+            super::data::write_backup(
+                &app,
+                state.store.write_connection(),
+                &state.blob_store,
+                "before-logseq-import",
+            )
+            .await
+            .map_err(err)?;
         }
 
         let published = std::sync::Arc::new(Mutex::new(Vec::<(BlobHash, u64)>::new()));
@@ -681,7 +693,7 @@ pub async fn commit_logseq_import(
         .map_err(err)?;
         if let Err(install_error) = install_result {
             return Err(cleanup_failed_import(
-                &state.conn,
+                state.store.write_connection(),
                 &state.blob_store,
                 &published,
                 install_error,
@@ -697,7 +709,7 @@ pub async fn commit_logseq_import(
             Ok(committed) => committed.value,
             Err(error) => {
                 return Err(cleanup_failed_import(
-                    &state.conn,
+                    state.store.write_connection(),
                     &state.blob_store,
                     &published,
                     error,

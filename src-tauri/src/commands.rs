@@ -103,7 +103,6 @@ impl std::fmt::Display for CommandError {
 impl std::error::Error for CommandError {}
 
 pub struct AppState {
-    pub conn: Connection,
     pub store: notes_core::store::NotesStore,
     pub blob_store: notes_blob::BlobStore,
     pub image_cache: notes_blob::BlobStore,

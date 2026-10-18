@@ -950,14 +950,21 @@ pub(crate) async fn finish_before_exit(app: &AppHandle) {
         };
         let transport = HttpTransport::new(url, token)?;
         loop {
-            let pending = notes_core::pending_outbox(&state.conn, SYNC_BATCH_SIZE).await?;
+            let pending =
+                notes_core::pending_outbox(state.store.write_connection(), SYNC_BATCH_SIZE).await?;
             if pending.is_empty() {
                 return Ok(());
             }
-            upload_operation_blobs(&state.conn, &transport, &state.blob_store, &pending).await?;
+            upload_operation_blobs(
+                state.store.write_connection(),
+                &transport,
+                &state.blob_store,
+                &pending,
+            )
+            .await?;
             let accepted = transport.push(pending).await?;
             notes_core::acknowledge_server_ops(
-                &state.conn,
+                state.store.write_connection(),
                 accepted.iter().map(|o| (o.envelope.op_id, o.seq)).collect(),
             )
             .await?;

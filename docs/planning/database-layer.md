@@ -1,6 +1,7 @@
 # Слой хранения Tangleaf: проект и план перехода
 
-Дата: 18 октября 2026. Статус: переход к этапу 4; проверки этапов 0 и 3 продолжаются.
+Дата: 18 октября 2026. Статус: основные входы этапа 4 перенесены; идёт runtime этапа 5,
+проверки этапов 0 и 3 продолжаются.
 Исходный аудит выполнен на `28c8c46`, включая оптимизацию Split из `8ad0e47`.
 
 ## Ход реализации
@@ -308,6 +309,19 @@
   Tauri lib — 44 passed / 1 ignored. При проверке обнаружена отдельная прежняя проблема:
   сохранённые pending InkPublish после удаления страницы могут потерять тела старых версий.
   Следующий integrity cut закрепит владение этими данными за outbox и проверит отправку после reopen.
+
+- `NotesStore::open` владеет writer и одним независимым READ_ONLY/query_only reader,
+  открытым после миграций. Совместимый `new(Connection)` сохраняет один handle, в том числе
+  для in-memory путей. AppState больше не хранит второй raw connection; DTO документов,
+  списков, журнала, блоков, поиска и графа идут через reader. Attachment preview paths
+  остаются writer: nominal read там реально записывает cache metadata. Backup/sync infra
+  пока используют явный writer accessor, до отдельного lifecycle/backup cut.
+  Store close прекращает допуск и дренирует/join оба worker, даже при ошибке одного или
+  отмене ожидающего. Проверены OS read-only/TEMP запреты, immediate read-after-commit,
+  одновременный pinned WAL snapshot и запись, освобождение checkpoint, клоны, отмена close
+  и реальная SQLITE_BUSY ошибка закрытия reader при принятой записи writer. Прошли 6 runtime
+  integration и 1 cleanup unit, targeted Clippy и 44 Tauri lib tests (1 ignored).
+  Этот close пока не является общим shutdown: raw ink jobs и sync должны завершаться раньше.
 
 ## Решение и масштаб
 

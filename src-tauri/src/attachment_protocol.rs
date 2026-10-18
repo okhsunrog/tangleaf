@@ -146,7 +146,7 @@ pub(crate) async fn resolve_descriptors(
         "at most {MAX_DESCRIPTOR_BATCH} attachment images can be resolved at once"
     );
     let attachment_uuids = attachment_uuids.into_iter().collect::<BTreeSet<_>>();
-    let connection = state.conn.clone();
+    let connection = state.store.write_connection().clone();
     let blob_store = state.blob_store.clone();
     let images: Vec<AuthorizedImage> = stream::iter(attachment_uuids)
         .map(|attachment_uuid| {
@@ -185,7 +185,7 @@ fn warm_preview_cache(state: &AppState, images: Vec<AuthorizedImage>) {
     if warm.is_empty() {
         return;
     }
-    let connection = state.conn.clone();
+    let connection = state.store.write_connection().clone();
     let blob_store = state.blob_store.clone();
     let image_cache = state.image_cache.clone();
     let jobs = state.preview_jobs.clone();
@@ -449,7 +449,7 @@ async fn protocol_response<R: Runtime>(
             return empty_response(tauri::http::StatusCode::SERVICE_UNAVAILABLE);
         };
         (
-            state.conn.clone(),
+            state.store.write_connection().clone(),
             state.blob_store.clone(),
             state.image_cache.clone(),
             state.preview_jobs.clone(),
