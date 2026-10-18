@@ -233,8 +233,8 @@ function PaneFrame({
       data-pane-id={paneId}
       data-active={active || undefined}
       className={cn(
-        "flex h-full min-h-0 flex-col bg-canvas transition-shadow",
-        active && !sheet && "ring-1 ring-inset ring-primary/15",
+        "flex h-full min-h-0 flex-col bg-transparent transition-shadow",
+        active && !sheet && !primary && "ring-1 ring-inset ring-primary/15",
         compact && !compactVisible && "pointer-events-none invisible",
       )}
       onPointerDown={() => {
@@ -242,7 +242,7 @@ function PaneFrame({
       }}
     >
       {!sheet && (!compact || pane.content.kind !== PaneContentKind.Home) && (
-        <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/50 surface-card px-2">
+        <div className="flex h-10 shrink-0 items-center gap-1 px-4">
           {compact && backToHome ? (
             <Button
               type="button"
@@ -283,7 +283,7 @@ function PaneFrame({
               </Button>
             </>
           )}
-          <span className="ml-1 truncate text-[10px] eink:text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          <span className="ml-1 truncate text-xs font-medium text-muted-foreground">
             {paneLabel(pane.content, primary)}
           </span>
           {!primary && (
@@ -467,18 +467,18 @@ function PaneError({ message, onBack }: { message: string; onBack?: () => void }
 }
 
 function paneLabel(content: PaneContent, primary: boolean) {
-  const location = primary ? "Primary" : "Beside";
+  const location = primary ? "" : "Beside · ";
   switch (content.kind) {
     case PaneContentKind.Home:
-      return `${location} · Dashboard`;
+      return `${location}Journal`;
     case PaneContentKind.AllNotes:
-      return `${location} · All notes`;
+      return `${location}All notes`;
     case PaneContentKind.Page:
-      return `${location} · ${content.presentation === PagePresentation.Reading ? "Reading" : "Page"}`;
+      return `${location}${content.presentation === PagePresentation.Reading ? "Reading" : "Page"}`;
     case PaneContentKind.Graph:
-      return `${location} · Graph`;
+      return `${location}Graph`;
     case PaneContentKind.JournalDay:
-      return `${location} · Journal`;
+      return `${location}Journal`;
   }
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, type ReactNode } from "react";
+import { useCallback, useEffect, useReducer, useRef, type ReactNode } from "react";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { dismissBackOverlay } from "@/lib/back-overlays";
 import { ArrowLeft, Bot, ChevronLeft, X } from "lucide-react";
@@ -99,7 +99,7 @@ export function AppLayout({
   }, [assistantVisible, compactRegion]);
 
   const openHome = useCallback(() => dispatchCompactNavigation({ type: "open_home" }), []);
-  const returnToDashboard = useCallback(() => {
+  const returnToJournal = useCallback(() => {
     onOpenHome();
     openHome();
   }, [onOpenHome, openHome]);
@@ -163,7 +163,7 @@ export function AppLayout({
 
       notes.expand();
       center.expand();
-      notes.resize("21%");
+      notes.resize("220px");
       if (assistantVisible) {
         dock.expand();
         dock.resize(assistantVisibility === DockVisibility.Rail ? "48px" : `${assistantWidth}px`);
@@ -183,8 +183,11 @@ export function AppLayout({
     workbenchRef,
   ]);
 
+  const previousAssistantVisible = useRef(assistantVisible);
   useEffect(() => {
-    if (assistantVisible) return;
+    const wasVisible = previousAssistantVisible.current;
+    previousAssistantVisible.current = assistantVisible;
+    if (assistantVisible || !wasVisible) return;
     let focusFrame = 0;
     const layoutFrame = requestAnimationFrame(() => {
       focusFrame = requestAnimationFrame(() => {
@@ -203,22 +206,22 @@ export function AppLayout({
 
   return (
     <CompactBackToHomeContext.Provider
-      value={compact && compactRegion === CompactRegion.Editor ? returnToDashboard : null}
+      value={compact && compactRegion === CompactRegion.Editor ? returnToJournal : null}
     >
       <div className="app-shell flex h-full flex-col overflow-hidden text-foreground">
         {!sheet && (
           <header
             data-tauri-drag-region
-            className="relative z-20 flex h-12 shrink-0 items-center justify-between px-3"
+            className="app-titlebar relative z-20 flex h-14 shrink-0 items-center justify-between px-4"
           >
             <div className="flex items-center gap-2">
               {headerLeading}
               <button
                 type="button"
-                aria-label="Open dashboard"
+                aria-label="Open journal"
                 className="group -ml-1 flex items-center gap-2.5 rounded-xl px-2 py-1 text-left outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 onClick={() => {
-                  returnToDashboard();
+                  returnToJournal();
                 }}
               >
                 <TangleafBrand />
@@ -230,9 +233,9 @@ export function AppLayout({
 
         <div
           className={cn(
-            "workspace-frame relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-popover",
-            compact && "mx-0 mb-0 rounded-none border-x-0 border-b-0 shadow-none",
-            sheet && "border-t-0",
+            "workspace-frame relative mx-3 mb-3 min-h-0 flex-1 overflow-hidden",
+            compact && "workspace-compact mx-0 mb-0",
+            sheet && "workspace-sheet",
           )}
         >
           <Group orientation="horizontal" className="h-full min-h-0" disabled={compact}>
@@ -241,16 +244,16 @@ export function AppLayout({
               panelRef={sidebarRef}
               // Compact starts collapsed: the effect below collapses it only after the first
               // paint, which used to show the three-column desktop layout for a frame on start.
-              defaultSize={compact ? 0 : "21%"}
-              minSize={compact ? 0 : "16%"}
-              maxSize={compact ? "100%" : "30%"}
+              defaultSize={compact ? 0 : "220px"}
+              minSize={compact ? 0 : "180px"}
+              maxSize={compact ? "100%" : "25%"}
               collapsible
               collapsedSize={0}
             >
               <aside
                 aria-hidden={compact ? true : undefined}
                 inert={compact ? true : undefined}
-                className="sidebar-surface h-full overflow-y-auto p-3"
+                className="sidebar-surface h-full overflow-y-auto py-2 pr-3 pl-1"
               >
                 {sidebar}
               </aside>
@@ -258,7 +261,7 @@ export function AppLayout({
 
             <Separator
               className={cn(
-                "group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2",
+                "workspace-gutter group relative w-3 bg-transparent after:absolute after:inset-y-4 after:left-1/2 after:w-px hover:after:bg-primary/30",
                 compact && "hidden",
               )}
             />
@@ -282,7 +285,7 @@ export function AppLayout({
 
             <Separator
               className={cn(
-                "group relative w-px bg-border/70 transition hover:bg-primary/40 after:absolute after:inset-y-0 after:-left-1 after:w-2",
+                "workspace-gutter group relative w-3 bg-transparent after:absolute after:inset-y-4 after:left-1/2 after:w-px hover:after:bg-primary/30",
                 (!assistantVisible || compact || assistantVisibility === DockVisibility.Rail) &&
                   "hidden",
               )}

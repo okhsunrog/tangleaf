@@ -57,13 +57,19 @@ export function SyncStatusIndicator({ status, onOpenSettings }: Props) {
       <PopoverTrigger
         aria-label={`Sync status: ${presentation.label}`}
         className={cn(
-          "mr-1 flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs font-medium transition-colors outline-none hover:brightness-95 focus-visible:ring-[3px] focus-visible:ring-ring/50",
-          toneClasses[presentation.tone],
+          "mr-1 flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50",
+          presentation.tone === "success"
+            ? "text-muted-foreground"
+            : toneClasses[presentation.tone],
         )}
       >
-        <Icon
-          className={cn("size-3.5", presentation.animated && "animate-spin eink:animate-none")}
-        />
+        {presentation.tone === "success" ? (
+          <span className="size-1.5 rounded-full bg-primary" />
+        ) : (
+          <Icon
+            className={cn("size-3.5", presentation.animated && "animate-spin eink:animate-none")}
+          />
+        )}
         <span className="hidden lg:inline">{presentation.label}</span>
         {status.pendingOperations > 0 && (
           <span className="tabular-nums" aria-label={`${status.pendingOperations} pending changes`}>

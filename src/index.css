@@ -16,7 +16,7 @@
   --app-viewport-background:
     radial-gradient(
       circle at 15% -20%,
-      color-mix(in oklch, var(--primary) calc(var(--surface-gradient-strength) * 13%), transparent),
+      color-mix(in oklch, var(--primary) calc(var(--surface-gradient-strength) * 18%), transparent),
       transparent 38%
     ),
     var(--background);
@@ -570,11 +570,11 @@ html::before {
   }
 
   .workspace-frame {
-    background: var(--canvas);
+    background: transparent;
   }
 
   .sidebar-surface {
-    background: var(--sidebar);
+    background: transparent;
   }
 
   .canvas-surface {
@@ -588,11 +588,52 @@ html::before {
         ),
         transparent 30%
       ),
-      var(--canvas);
+      color-mix(in oklch, var(--canvas) 94%, transparent);
+    border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+    border-radius: 20px;
+    box-shadow:
+      inset 0 1px
+        color-mix(
+          in oklch,
+          var(--primary) calc(var(--surface-gradient-strength) * 12%),
+          transparent
+        ),
+      var(--panel-shadow);
   }
 
   .inspector-surface {
-    background: var(--inspector);
+    background: color-mix(in oklch, var(--card) calc(var(--surface-glass) * 100%), transparent);
+    border: 1px solid color-mix(in oklch, var(--border) 65%, transparent);
+    border-radius: 20px;
+    box-shadow: var(--panel-shadow);
+  }
+
+  .workspace-compact .canvas-surface,
+  .workspace-compact .inspector-surface,
+  .workspace-sheet .canvas-surface {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .journal-earlier .document-reading-surface {
+    padding-bottom: 0;
+  }
+
+  .app-titlebar .tangleaf-wordmark {
+    font-size: 20px;
+  }
+  .app-titlebar .tangleaf-brand > svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  [data-display="eink"] .canvas-surface,
+  [data-display="eink"] .inspector-surface {
+    background: var(--canvas);
+    border-color: var(--border);
+    box-shadow: none;
+    border-radius: var(--radius);
   }
 
   .brand-button {
@@ -1291,4 +1332,14 @@ html::before {
   font-size: 1rem;
   line-height: 1.75;
   padding-block: 0.25rem 4rem;
+}
+
+/* CodeMirror injects unlayered themes; keep the journal sizing at the same cascade level. */
+.journal-stream .cm-editor.cm-editor,
+.journal-stream .cm-editor .cm-content {
+  min-height: 12rem;
+}
+
+.journal-stream .cm-editor .cm-content {
+  padding-bottom: 2rem;
 }

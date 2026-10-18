@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import {
-  CalendarDays,
-  Check,
-  Clock3,
-  FileText,
-  ListTree,
-  Search,
-  Star,
-  Trash2,
-} from "lucide-react";
+import { Check, Clock3, FileText, ListTree, Search, Star, Trash2 } from "lucide-react";
 import { PageBacklinks } from "./page-backlinks";
 import { usePageFind } from "./page-find";
 import { Button } from "@/components/ui/button";
@@ -331,11 +322,7 @@ export function PageView({
       <div className="group flex items-start gap-3">
         {journalDate ? (
           <div className="min-w-0 flex-1">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-[0.12em] text-primary uppercase">
-              <CalendarDays className="size-3.5" />
-              Journal · {journalDate}
-            </div>
-            <h1 className="text-[2.6rem] leading-tight font-semibold tracking-[-0.045em]">
+            <h1 className="text-2xl leading-tight font-semibold tracking-tight">
               {pageDisplayTitle(page)}
             </h1>
           </div>

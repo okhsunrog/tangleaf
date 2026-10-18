@@ -18,6 +18,7 @@ import { PageIcon } from "./page-icon";
 import { usePageNavigationStore } from "./page-navigation-store";
 
 type Props = {
+  homeActive?: boolean;
   selectedUuid: string | null;
   activeJournalDate: JournalDate | null;
   onSelect: (page: Page, disposition?: OpenDisposition) => void;
@@ -30,6 +31,7 @@ type Props = {
 };
 
 export function PagesList({
+  homeActive = false,
   selectedUuid,
   activeJournalDate,
   onSelect,
@@ -86,7 +88,7 @@ export function PagesList({
     onSelect(page, dispositionFromShiftKey(shiftKey));
 
   return (
-    <div className="flex h-full min-h-[22rem] flex-col gap-2.5">
+    <div className="flex h-full min-h-[22rem] flex-col gap-4">
       <NewNoteButton
         fullWidth
         onClick={() => void create()}
@@ -113,7 +115,7 @@ export function PagesList({
         busy={journalBusy}
         onOpen={onSelect}
       />
-      <JournalQuickCapture busy={journalBusy} onCapture={onQuickCapture} />
+      {!homeActive && <JournalQuickCapture busy={journalBusy} onCapture={onQuickCapture} />}
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pt-1 pr-0.5">
         {favoritePages.length === 0 ? (

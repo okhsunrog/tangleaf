@@ -340,6 +340,7 @@ function App() {
         }
         sidebar={
           <PagesList
+            homeActive={activePane.content.kind === PaneContentKind.Home}
             selectedUuid={workspace.activePageUuid}
             activeJournalDate={
               workspace.pendingJournalDate ??

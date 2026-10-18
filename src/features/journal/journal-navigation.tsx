@@ -63,10 +63,10 @@ export function JournalNavigation({ activeDate, busy, onOpenDate }: Props) {
       <div className="grid grid-cols-[1fr_auto] gap-1.5">
         <Button
           type="button"
-          variant={activeDate === today ? "secondary" : "outline"}
+          variant={activeDate === today ? "secondary" : "ghost"}
           disabled={busy}
           onClick={(event) => void onOpenDate(today, dispositionFromShiftKey(event.shiftKey))}
-          className="h-9 justify-start rounded-lg border-border/60 surface-card-soft px-2 shadow-none"
+          className="h-9 justify-start rounded-xl px-2 shadow-none"
         >
           <span className="flex size-6 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <CalendarDays className="size-3.5" />
