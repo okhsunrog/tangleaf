@@ -14,6 +14,62 @@ pub const MAX_GRAPH_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ROOT_BYTES: u64 = 16 * 1024 * 1024;
 pub type Blobs = BTreeMap<BlobHash, Vec<u8>>;
 
+/// A fully decoded graph, prepared before reserving the SQLite writer. Only
+/// this module can construct the plan used by the observed Store command.
+pub(crate) struct PreparedInkGraph {
+    root_hash: BlobHash,
+    snapshot: Snapshot,
+}
+
+impl PreparedInkGraph {
+    pub(crate) fn prepare(root_hash: BlobHash, blobs: Blobs) -> CommandResult<Self> {
+        Ok(Self {
+            root_hash,
+            snapshot: snapshot(root_hash, &blobs)?,
+        })
+    }
+
+    pub(crate) fn apply_in_transaction(
+        self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> CommandResult<(crate::ChangeSet, bool)> {
+        // Status covers head availability and draft adoption. Compare every
+        // matching version too: downloading a non-head can enable its preview
+        // without changing the current heads or draft.
+        let before = version_roots(transaction, self.root_hash)?;
+        let mut tracker = crate::changes::ChangeTracker::default();
+        for (_, page) in before.keys() {
+            tracker.handwriting(transaction, *page)?;
+        }
+        let initial_changes = transaction.total_changes();
+        stage(transaction, self.root_hash, &self.snapshot)?;
+        let mut changes = tracker.finish(transaction)?;
+        let after = version_roots(transaction, self.root_hash)?;
+        for ((version, page), root) in before {
+            if after.get(&(version, page)) != Some(&root) {
+                changes.handwriting_pages.push(page);
+                changes.affected_pages.push(page);
+            }
+        }
+        changes.handwriting_pages.sort_unstable();
+        changes.handwriting_pages.dedup();
+        changes.affected_pages.sort_unstable();
+        changes.affected_pages.dedup();
+        Ok((changes, transaction.total_changes() != initial_changes))
+    }
+}
+
+type VersionRoots = BTreeMap<(uuid::Uuid, uuid::Uuid), Option<Vec<u8>>>;
+
+fn version_roots(connection: &Connection, root_hash: BlobHash) -> rusqlite::Result<VersionRoots> {
+    connection
+        .prepare("SELECT version_uuid,page_uuid,root_id FROM ink_versions WHERE root_hash=?1")?
+        .query_map([root_hash.as_bytes().as_slice()], |row| {
+            Ok(((row.get(0)?, row.get(1)?), row.get(2)?))
+        })?
+        .collect()
+}
+
 /// Parse a root without decoding point columns. The closure excludes the root itself.
 pub fn required_blobs(root_hash: BlobHash, root: &[u8]) -> CommandResult<BTreeMap<BlobHash, u64>> {
     if root.len() as u64 > MAX_ROOT_BYTES || BlobHash::digest(root) != root_hash {
@@ -107,12 +163,13 @@ pub(super) fn stage(
 ) -> CommandResult<()> {
     storage::history::persist(conn, snapshot)?;
     conn.execute(
-        "INSERT OR IGNORE INTO ink_staged_roots VALUES(?1,?2)",
+        "INSERT OR IGNORE INTO ink_staged_roots
+         SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM ink_versions WHERE root_hash=?1)",
         params![root_hash.as_bytes().as_slice(), snapshot.root.id.as_slice()],
     )?;
     // A snapshot may already carry the publication while its blobs download later.
     conn.execute(
-        "UPDATE ink_versions SET root_id=?2 WHERE root_hash=?1",
+        "UPDATE ink_versions SET root_id=?2 WHERE root_hash=?1 AND root_id IS NOT ?2",
         params![root_hash.as_bytes().as_slice(), snapshot.root.id.as_slice()],
     )?;
     let pages = conn
@@ -144,14 +201,10 @@ pub async fn stage_graph(
     root_hash: BlobHash,
     blobs: Blobs,
 ) -> anyhow::Result<()> {
-    let snapshot = tokio::task::spawn_blocking(move || snapshot(root_hash, &blobs)).await??;
-    conn.call_domain(move |database| -> CommandResult<_> {
-        let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        stage(&tx, root_hash, &snapshot)?;
-        tx.commit()?;
-        Ok(())
-    })
-    .await
+    crate::store::NotesStore::new(conn.clone())
+        .stage_ink_graph(root_hash, blobs)
+        .await?;
+    Ok(())
 }
 pub(crate) fn export_root(conn: &Connection, root: Id) -> CommandResult<Blobs> {
     let bytes: Vec<u8> = conn.query_row(

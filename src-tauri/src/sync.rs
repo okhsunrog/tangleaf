@@ -99,7 +99,7 @@ fn is_permanent_failure(error: &anyhow::Error) -> bool {
 }
 
 struct DesktopTransport<'a> {
-    connection: &'a Connection,
+    store: notes_core::store::NotesStore,
     http: &'a HttpTransport,
     blob_store: &'a BlobStore,
 }
@@ -115,18 +115,19 @@ impl SyncTransport for DesktopTransport<'_> {
     }
 
     async fn prepare_push(&mut self, operations: &[notes_core::Op]) -> Result<()> {
-        upload_operation_blobs(self.connection, self.http, self.blob_store, operations).await
+        upload_operation_blobs(
+            self.store.read_connection(),
+            self.http,
+            self.blob_store,
+            operations,
+        )
+        .await
     }
 
     async fn prepare_pull(&mut self, operations: &[SequencedOp]) -> Result<()> {
         for operation in operations {
-            download_operation_blob(
-                self.connection,
-                self.http,
-                self.blob_store,
-                &operation.envelope,
-            )
-            .await?;
+            download_operation_blob(&self.store, self.http, self.blob_store, &operation.envelope)
+                .await?;
         }
         Ok(())
     }
@@ -592,7 +593,7 @@ async fn initialize_replica(
             transport.bootstrap(local.clone()).await?;
         }
         (false, true) => {
-            download_snapshot_blobs(connection, transport, blob_store, &server).await?;
+            download_snapshot_blobs(app, connection, transport, blob_store, &server).await?;
             notes_core::store::NotesStore::new(connection.clone())
                 .with_commit_observer(crate::commands::commit_publisher(app))
                 .bootstrap_sync_snapshot(server.clone())
@@ -605,7 +606,7 @@ async fn initialize_replica(
             {
                 return Err(SyncSessionError::WorkspaceConflict.into());
             }
-            download_snapshot_blobs(connection, transport, blob_store, &server).await?;
+            download_snapshot_blobs(app, connection, transport, blob_store, &server).await?;
         }
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
@@ -675,7 +676,8 @@ async fn synchronize_http(
     blob_store: &BlobStore,
 ) -> Result<()> {
     let mut transport = DesktopTransport {
-        connection,
+        store: notes_core::store::NotesStore::new(connection.clone())
+            .with_commit_observer(crate::commands::commit_publisher(app)),
         http: transport,
         blob_store,
     };
@@ -728,17 +730,16 @@ async fn apply_server_operations(
     blob_store: &BlobStore,
     operations: Vec<SequencedOp>,
 ) -> Result<()> {
+    let store = notes_core::store::NotesStore::new(connection.clone())
+        .with_commit_observer(crate::commands::commit_publisher(app));
     for operation in &operations {
-        download_operation_blob(connection, transport, blob_store, &operation.envelope).await?;
+        download_operation_blob(&store, transport, blob_store, &operation.envelope).await?;
     }
     let sequenced = operations
         .iter()
         .map(|operation| (operation.seq, operation.envelope.clone()))
         .collect();
-    notes_core::store::NotesStore::new(connection.clone())
-        .with_commit_observer(crate::commands::commit_publisher(app))
-        .apply_sequenced_batch(sequenced)
-        .await?;
+    store.apply_sequenced_batch(sequenced).await?;
     Ok(())
 }
 
@@ -760,14 +761,14 @@ async fn upload_operation_blobs(
 }
 
 async fn download_operation_blob(
-    connection: &Connection,
+    store: &notes_core::store::NotesStore,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     operation: &notes_core::Op,
 ) -> Result<()> {
     if let notes_core::OpKind::InkPublish(p) = &operation.kind {
         transport
-            .download_ink_graph(connection, p.root_hash)
+            .download_ink_graph_to_store(store, p.root_hash)
             .await?;
     }
     if let notes_core::OpKind::AttachmentAdd(attachment) = &operation.kind {
@@ -801,14 +802,17 @@ async fn upload_snapshot_blobs(
 }
 
 async fn download_snapshot_blobs(
+    app: &AppHandle,
     connection: &Connection,
     transport: &HttpTransport,
     blob_store: &BlobStore,
     snapshot: &SyncSnapshot,
 ) -> Result<()> {
+    let store = notes_core::store::NotesStore::new(connection.clone())
+        .with_commit_observer(crate::commands::commit_publisher(app));
     for version in &snapshot.ink_versions {
         transport
-            .download_ink_graph(connection, version.publication.root_hash)
+            .download_ink_graph_to_store(&store, version.publication.root_hash)
             .await?;
     }
     for attachment in snapshot

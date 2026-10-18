@@ -93,6 +93,21 @@ impl HttpTransport {
         connection: &notes_core::Connection,
         root_hash: BlobHash,
     ) -> Result<usize> {
+        self.download_ink_graph_to_store(
+            &notes_core::store::NotesStore::new(connection.clone()),
+            root_hash,
+        )
+        .await
+    }
+
+    /// Preserve the host's commit observer when downloaded bodies make an
+    /// already-known handwriting version available or adopt its draft.
+    pub async fn download_ink_graph_to_store(
+        &self,
+        store: &notes_core::store::NotesStore,
+        root_hash: BlobHash,
+    ) -> Result<usize> {
+        let connection = store.read_connection();
         if transfer::has_graph(connection, root_hash).await? {
             return Ok(0);
         }
@@ -124,7 +139,7 @@ impl HttpTransport {
             downloaded += batch.len();
             blobs.extend(self.download_ink_blobs(batch).await?);
         }
-        transfer::stage_graph(connection, root_hash, blobs).await?;
+        store.stage_ink_graph(root_hash, blobs).await?;
         Ok(downloaded)
     }
 }

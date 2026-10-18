@@ -2,6 +2,7 @@ use futures::{SinkExt, StreamExt};
 use notes_core::{OpKind, db, ink::*};
 use notes_server::{ServerConfig, config::UserConfig};
 use notes_sync::HttpTransport;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 const TOKEN: &str = "ink-owner-token-with-at-least-thirty-two-characters";
 const OTHER: &str = "ink-other-token-with-at-least-thirty-two-characters";
@@ -221,11 +222,59 @@ async fn binary_ink_sync_deduplicates_and_resolves_offline_branches_over_http() 
         .await
         .unwrap();
     assert!(Store::new(&np, id).read().is_err());
+    assert!(
+        Store::new(&np, id)
+            .status()
+            .unwrap()
+            .heads
+            .iter()
+            .all(|head| !head.available)
+    );
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let observed = notices.clone();
+    let observed_store = notes_core::store::NotesStore::new(new.clone())
+        .with_commit_observer(move |notice| observed.lock().unwrap().push(notice.clone()));
+    let mut installed_roots = std::collections::BTreeSet::new();
+    let mut expected_changes = Vec::new();
     for v in &snapshot.ink_versions {
-        http.download_ink_graph(&new, v.publication.root_hash)
+        http.download_ink_graph_to_store(&observed_store, v.publication.root_hash)
             .await
             .unwrap();
+        if installed_roots.insert(v.publication.root_hash) {
+            // The same immutable drawing can belong to several notes. Its
+            // installation enables precisely those versions' owner pages.
+            let pages = snapshot
+                .ink_versions
+                .iter()
+                .filter(|version| version.publication.root_hash == v.publication.root_hash)
+                .map(|version| version.publication.page_uuid)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            expected_changes.push(notes_core::ChangeSet {
+                handwriting_pages: pages.clone(),
+                affected_pages: pages,
+                ..Default::default()
+            });
+        }
     }
+    {
+        let notices = notices.lock().unwrap();
+        assert_eq!(notices.len(), expected_changes.len());
+        for (notice, expected) in notices.iter().zip(&expected_changes) {
+            assert_eq!(&notice.changes, expected);
+            assert!(!notice.workspace_replaced);
+        }
+    }
+    for v in &snapshot.ink_versions {
+        assert_eq!(
+            http.download_ink_graph_to_store(&observed_store, v.publication.root_hash)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(notices.lock().unwrap().len(), expected_changes.len());
     assert_eq!(Store::new(&np, id).versions().unwrap().len(), 1);
     assert_eq!(
         serde_json::to_value(Store::new(&np, id).read().unwrap().draft).unwrap(),

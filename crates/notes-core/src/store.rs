@@ -15,6 +15,7 @@ pub use backup::{
     required_attachment_blobs, validate_recovery_content,
 };
 pub(crate) mod bulk;
+mod ink;
 mod metadata;
 mod runtime;
 
