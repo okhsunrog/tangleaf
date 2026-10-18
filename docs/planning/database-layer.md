@@ -373,6 +373,15 @@
   Сам SQLite primitive ещё не является полным backup: manifest/копирование файлов под lease
   и проверяемый restore реализуются следующим отдельным шагом.
 
+- Настоящий смешанный workload воспроизвёл SQLITE_BUSY при конкуренции Store и native ink:
+  DEFERRED транзакция уже прочитала snapshot, после чужого commit её нельзя было повысить
+  до writer, несмотря на busy_timeout. Обе Store write boundaries теперь получают IMMEDIATE
+  reservation до guards/planning; reader backup/query транзакции остаются read-only DEFERRED.
+  `write_lock_ms` отдельно измеряет получение reservation, входит в transaction/execution time.
+  Детерминированная регрессия проверяет конкурирующий файловый writer во время planning и
+  его доступ после commit. Store suite — 27 passed / 1 ignored; CONTENT и прежний workload
+  прошли пять повторов без скрытых retries, со сверкой ink/blobs/outbox/cursor после reopen.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
@@ -854,7 +863,9 @@ Tokio wakeup, IPC или UI. Контекст вызывающего span пер
 `notes_core::db::blocks`, `notes_core::db::history` и `notes_core::operation` показывают
 этапы команды и вложенных проекций. Время проекций уже входит в `apply_ms`, его нельзя
 прибавлять повторно. `materialize_ms` включает проверку неизменённых строк и выполнение
-обновлений, а не только SQL-запись. FTS, ожидание write-lock и UI-этапы пока отдельно не выделены.
+обновлений, а не только SQL-запись. Store `write_lock_ms` включает получение IMMEDIATE reservation
+до snapshot/planning и уже входит в transaction/execution; native ink lock waits, FTS и UI-этапы
+пока не имеют общего отдельного измерения.
 
 Игнорируемый `benchmark_split_on_database_copy` в `tests/block_split.rs` получает
 `TANGLEAF_BENCH_DATABASE`, `TANGLEAF_BENCH_BLOCK` и JSON-массив частей в `TANGLEAF_BENCH_PARTS`.

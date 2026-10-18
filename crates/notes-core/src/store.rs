@@ -10,12 +10,19 @@ use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
 mod backup;
-pub use backup::DatabaseBackup;
+pub use backup::{DatabaseBackup, inspect_database_backup, required_attachment_blobs};
 pub(crate) mod bulk;
 mod metadata;
 mod runtime;
 
 type CommitObserver = dyn Fn(&CommitNotice) + Send + Sync;
+
+fn begin_write(database: &mut rusqlite::Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    // Reserve the writer before reading guards or planning changes. A deferred
+    // WAL snapshot cannot upgrade after another writer (including native ink)
+    // commits; busy_timeout can wait here, before that snapshot exists.
+    database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+}
 
 /// Facts captured inside a successful transaction, published after its commit.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
@@ -143,9 +150,8 @@ impl NotesStore {
         self.connection
             .call_domain(move |database| -> anyhow::Result<Committed<T>> {
                 let started = std::time::Instant::now();
-                // Preserve the existing deferred lock policy during migration.
-                // Changing writer acquisition is a separate concurrency change.
-                let sql = database.transaction()?;
+                let sql = begin_write(database)?;
+                let write_lock = started.elapsed();
                 if structure_mode == operation::StructureProjectionMode::Components {
                     operation::require_initialized_structure_projection(&sql)?;
                 }
@@ -218,6 +224,7 @@ impl NotesStore {
                     structure_vertices_visited = projection_stats.structure_vertices_visited,
                     structure_seed_rows_read = projection_stats.structure_seed_rows_read,
                     commit_ms = commit.as_secs_f64() * 1000.0,
+                    write_lock_ms = write_lock.as_secs_f64() * 1000.0,
                     transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
                     "store transaction completed"
                 );
@@ -482,6 +489,66 @@ mod tests {
             .call(|db| db.query_row("SELECT version FROM store_state", [], |row| row.get(0)))
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn another_file_writer_cannot_invalidate_a_planned_store_write() {
+        let (directory, connection, block) = fixture().await;
+        let path = directory.path().join("notes.db");
+        let store = NotesStore::new(connection.clone());
+        let committed = store
+            .write(move |write| -> anyhow::Result<bool> {
+                // The structural/revision reads have started. A deferred WAL
+                // transaction lets this peer commit, then cannot upgrade its
+                // own old snapshot even when busy_timeout is nonzero.
+                let peer = rusqlite::Connection::open(path)?;
+                crate::sqlite::policy::configure_existing_wal_writer(
+                    &peer,
+                    crate::sqlite::policy::WriterDurability::Full,
+                )?;
+                peer.busy_timeout(std::time::Duration::ZERO)?;
+                let peer_was_busy = match peer.execute(
+                    "INSERT INTO sync_meta(key,value) VALUES('planning-peer','during')",
+                    [],
+                ) {
+                    Ok(_) => false,
+                    Err(error)
+                        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) =>
+                    {
+                        true
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                write.apply_local(
+                    vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
+                        uuid: block.uuid,
+                        markdown: "Planned and committed".into(),
+                    })],
+                    ProjectionPolicy::Immediate,
+                )?;
+                Ok(peer_was_busy)
+            })
+            .await
+            .unwrap();
+        assert!(committed.value);
+        assert_eq!(
+            db::get_block(&connection, block.uuid)
+                .await
+                .unwrap()
+                .unwrap()
+                .markdown,
+            "Planned and committed"
+        );
+        // Reservation ends at commit; the same peer write is then accepted.
+        let peer = rusqlite::Connection::open(directory.path().join("notes.db")).unwrap();
+        assert_eq!(
+            peer.execute(
+                "INSERT INTO sync_meta(key,value) VALUES('planning-peer','after')",
+                [],
+            )
+            .unwrap(),
+            1
+        );
     }
 
     async fn state(connection: &Connection) -> serde_json::Value {

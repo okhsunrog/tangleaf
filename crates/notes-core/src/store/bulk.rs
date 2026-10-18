@@ -1,7 +1,7 @@
 //! Closed set of prepared bulk mutations. Ordinary commands retain their one
 //! ordered Apply batch; only these plans own replacement-specific SQL stages.
 
-use super::{CommitNotice, Committed, NotesStore, publish_commit};
+use super::{CommitNotice, Committed, NotesStore, begin_write, publish_commit};
 use crate::CoreError;
 use crate::changes::ChangeSet;
 use crate::external_import::{ExternalImportOutcome, PreparedExternalImport};
@@ -63,7 +63,8 @@ impl NotesStore {
         self.connection
             .call_domain(move |database| -> anyhow::Result<_> {
                 let started = std::time::Instant::now();
-                let sql = database.transaction()?;
+                let sql = begin_write(database)?;
+                let write_lock = started.elapsed();
                 operation::require_initialized_structure_projection(&sql)?;
                 let before = sql.total_changes();
                 let BulkMutation { value, wrote } = plan.execute(&sql)?;
@@ -112,6 +113,7 @@ impl NotesStore {
                     workspace_epoch,
                     workspace_replaced = wrote,
                     commit_ms = commit.as_secs_f64() * 1000.0,
+                    write_lock_ms = write_lock.as_secs_f64() * 1000.0,
                     transaction_ms = started.elapsed().as_secs_f64() * 1000.0,
                     "bulk store transaction completed"
                 );
