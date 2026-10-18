@@ -18,6 +18,7 @@ import { PagePresentation } from "@/features/pages/page-presentation";
 import { isAndroid } from "@/app/sheet-mode";
 import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib/api";
 import { queryKeys, refreshQueries } from "@/lib/query";
+import { profileUiMethods, uiProfilePoint, uiProfileSpan } from "@/lib/ui-profile";
 import { BlockNode } from "./block-node";
 import { OutlinerProvider, useOutliner } from "./outliner-store";
 
@@ -110,7 +111,12 @@ function VirtualOutline({
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
   const [scrollMargin, setScrollMargin] = useState(0);
   const rows = useMemo(
-    () => flattenBlocks(blocks, store.layout === "outline" ? store.isCollapsed : () => false),
+    () =>
+      uiProfileSpan(
+        "outliner.flatten",
+        () => flattenBlocks(blocks, store.layout === "outline" ? store.isCollapsed : () => false),
+        { blocks: blocks.length },
+      ),
     [blocks, store.isCollapsed, store.layout],
   );
 
@@ -136,10 +142,16 @@ function VirtualOutline({
   }, [page.uuid]);
 
   useLayoutEffect(() => {
-    const grouped = groupChildren(blocks, page.uuid);
-    for (const [containerUuid, children] of grouped) {
-      queryClient.setQueryData(queryKeys.children(containerUuid), children);
-    }
+    uiProfileSpan(
+      "outliner.publish-children",
+      () => {
+        const grouped = groupChildren(blocks, page.uuid);
+        for (const [containerUuid, children] of grouped) {
+          queryClient.setQueryData(queryKeys.children(containerUuid), children);
+        }
+      },
+      { blocks: blocks.length },
+    );
   }, [blocks, page.uuid, queryClient]);
 
   // Preserve Android's device-tested native fling behavior. Desktop can window
@@ -190,6 +202,18 @@ function VirtualOutline({
     scrollMargin,
   });
   const virtualItems = virtualizer.getVirtualItems();
+  useLayoutEffect(
+    () =>
+      profileUiMethods(virtualizer, "virtualizer", [
+        "measureElement",
+        "scrollToIndex",
+        "scrollToOffset",
+      ]),
+    [virtualizer],
+  );
+  useLayoutEffect(() => {
+    uiProfilePoint("outliner.commit", { blocks: blocks.length, editingUuid: store.editingUuid });
+  });
   // A hidden pane (or the frame before its first measurement) has no visible
   // range. Keep its pinned editor alive even then; its position is measured
   // when the pane becomes visible again.

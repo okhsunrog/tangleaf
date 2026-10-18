@@ -19,6 +19,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      ...(process.env.VITE_PROFILE_UI === "1" ? { "react-dom/client": "react-dom/profiling" } : {}),
     },
   },
 

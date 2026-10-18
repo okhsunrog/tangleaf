@@ -16,6 +16,7 @@ import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
 import { createAppQueryClient, listenForDomainEvents } from "@/lib/query";
+import { UI_PROFILE_ENABLED, onUiProfileRender } from "@/lib/ui-profile";
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
@@ -30,7 +31,7 @@ installTextFocusSuppression();
 const pageSessions = new PageSessionRegistry();
 registerLifecycleFlush(pageSessions);
 
-root.render(
+const application = (
   <React.StrictMode>
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <QueryClientProvider client={queryClient}>
@@ -50,7 +51,17 @@ root.render(
         </AppearanceProvider>
       </QueryClientProvider>
     </ThemeProvider>
-  </React.StrictMode>,
+  </React.StrictMode>
+);
+
+root.render(
+  UI_PROFILE_ENABLED ? (
+    <React.Profiler id="app" onRender={onUiProfileRender}>
+      {application}
+    </React.Profiler>
+  ) : (
+    application
+  ),
 );
 
 /**

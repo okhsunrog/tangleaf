@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { notifyError, notifyInfo } from "@/lib/notify";
+import { uiProfilePoint, uiProfileSpan } from "@/lib/ui-profile";
 import {
   CommandFailure,
   deleteBlock,
@@ -543,6 +544,7 @@ export function BlockNode({
    * the long-block info-icon nudge. If the content has no blank-line breaks,
    * we surface guidance instead of silently doing nothing. */
   const onSplitCurrent = async () => {
+    uiProfilePoint("split.handler", { blockUuid: block.uuid });
     const source = editing ? draftRef.current : effectiveMarkdown;
     const paragraphs = source
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
@@ -559,11 +561,14 @@ export function BlockNode({
         paragraphs.map(blockContent),
         splitExpectedRevision(),
       );
-      sessions.discardBlock(block.pageUuid, block.uuid);
+      uiProfilePoint("split.ack", { blockUuid: block.uuid });
+      uiProfileSpan("split.discard-draft", () => sessions.discardBlock(block.pageUuid, block.uuid));
       draftRef.current = paragraphs[0];
       setDraftLen(paragraphs[0].length);
       await invalidateChildren(containerUuid);
+      uiProfilePoint("split.children-refreshed");
       store.setEditing(lastOrderedBlock(changed)?.uuid ?? block.uuid);
+      uiProfilePoint("split.focus-request", { blockUuid: lastOrderedBlock(changed)?.uuid });
     } catch (err) {
       console.error("split failed", err);
       setSaveState("error");

@@ -14,6 +14,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { markdownFormatting } from "@/features/editor/markdown-formatting";
 import { minimalExternalDocumentChange } from "@/features/editor/minimal-document-change";
 import { resolveDocumentHistoryKey } from "@/features/document/document-editor-model";
+import { profileUiMethods, uiProfileSpan, uiProfilePoint } from "@/lib/ui-profile";
 
 const externalUpdate = Annotation.define<boolean>();
 import {
@@ -220,27 +221,40 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
     // extensions would retain handlers belonging to a destroyed React component.
     extensionsRef.current = extensions;
     const retained = blockUuid ? stateCache?.get(blockUuid) : undefined;
-    const state =
-      retained?.doc.toString() === initialRef.current
-        ? retained.update({ effects: StateEffect.reconfigure.of(extensions) }).state
-        : EditorState.create({
-            doc: initialRef.current,
-            selection: autoFocusRef.current ? { anchor: initialRef.current.length } : undefined,
-            extensions,
-          });
+    const state = uiProfileSpan(
+      "codemirror.state",
+      () =>
+        retained?.doc.toString() === initialRef.current
+          ? retained.update({ effects: StateEffect.reconfigure.of(extensions) }).state
+          : EditorState.create({
+              doc: initialRef.current,
+              selection: autoFocusRef.current ? { anchor: initialRef.current.length } : undefined,
+              extensions,
+            }),
+      { blockUuid },
+    );
 
-    const view = new EditorView({ state, parent });
+    const view = uiProfileSpan("codemirror.create", () => new EditorView({ state, parent }), {
+      blockUuid,
+    });
+    const restoreProfile = profileUiMethods(view, "codemirror", [
+      "measure",
+      "update",
+      "requestMeasure",
+    ]);
     viewRef.current = view;
     if (initialPointer) {
       const anchor = view.posAtCoords(initialPointer);
       if (anchor !== null) view.dispatch({ selection: { anchor } });
     }
-    if (autoFocusRef.current) view.focus();
+    if (autoFocusRef.current) uiProfileSpan("codemirror.focus", () => view.focus(), { blockUuid });
+    uiProfilePoint("codemirror.mounted", { blockUuid });
 
     return () => {
       if (blockUuid) stateCache?.set(blockUuid, view.state);
       viewRef.current = null;
       view.destroy();
+      restoreProfile();
     };
   }, []);
 
