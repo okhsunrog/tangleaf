@@ -368,8 +368,13 @@ fn report_startup_error(
 #[cfg(not(target_os = "android"))]
 fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_filter())
         .init();
+}
+
+fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
 #[cfg(target_os = "android")]
@@ -381,7 +386,7 @@ fn init_tracing() {
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_target(true)
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_filter())
         .with_writer(writer)
         .init();
 }

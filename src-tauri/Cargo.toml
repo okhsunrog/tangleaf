@@ -38,7 +38,7 @@ tauri-specta = { git = "https://github.com/specta-rs/tauri-specta", rev = "40a7b
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid.workspace = true
 url.workspace = true
 chrono.workspace = true
