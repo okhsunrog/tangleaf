@@ -78,12 +78,11 @@ pub(crate) async fn open_in_memory() -> Result<Connection> {
 }
 
 async fn initialize_connection(conn: Connection) -> Result<Connection> {
-    conn.call(|database| -> rusqlite::Result<()> {
-        database.pragma_update(None, "journal_mode", "WAL")?;
-        database.pragma_update(None, "synchronous", "NORMAL")?;
-        database.pragma_update(None, "foreign_keys", "ON")?;
-        database.pragma_update(None, "temp_store", "MEMORY")?;
-        Ok(())
+    conn.call_domain(|database| {
+        crate::sqlite::policy::configure_writer(
+            database,
+            crate::sqlite::policy::WriterDurability::Normal,
+        )
     })
     .await?;
     migrations::migrate(&conn).await?;

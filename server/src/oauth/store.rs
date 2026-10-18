@@ -60,13 +60,12 @@ fn now() -> i64 {
 
 impl OAuthStore {
     pub async fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)
-            .await
-            .with_context(|| format!("opening the OAuth store at {}", path.display()))?;
+        let connection =
+            Connection::open_writer(path, notes_core::sqlite::policy::WriterDurability::Full)
+                .await
+                .with_context(|| format!("opening the OAuth store at {}", path.display()))?;
         connection
             .call(|database| {
-                database.pragma_update(None, "journal_mode", "WAL")?;
-                database.pragma_update(None, "synchronous", "FULL")?;
                 database.execute_batch(
                     "CREATE TABLE IF NOT EXISTS clients (
                        client_id TEXT PRIMARY KEY,
@@ -280,5 +279,36 @@ impl OAuthStore {
             })
             .await
             .context("revoking a token")
+    }
+}
+
+#[cfg(test)]
+mod connection_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn actual_oauth_open_uses_full_and_shared_connection_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.db");
+        for _ in 0..2 {
+            let store = OAuthStore::open(&path).await.unwrap();
+            let actual = store
+                .connection
+                .call(|raw| {
+                    Ok((
+                        raw.pragma_query_value(None, "journal_mode", |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                        raw.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?,
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(actual, ("wal".into(), 2, 1, 2, 5000, 0));
+        }
     }
 }

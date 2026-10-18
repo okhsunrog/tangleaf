@@ -225,14 +225,14 @@ impl AiStore {
         }
         let initialize_control = !path.as_ref().exists();
         register_sqlite_vec();
-        let connection = Connection::open(path.as_ref())
-            .await
-            .context("opening server AI database")?;
+        let connection = Connection::open_writer(
+            path.as_ref(),
+            notes_core::sqlite::policy::WriterDurability::Normal,
+        )
+        .await
+        .context("opening server AI database")?;
         connection
             .call(|database| {
-                database.pragma_update(None, "journal_mode", "WAL")?;
-                database.pragma_update(None, "synchronous", "NORMAL")?;
-                database.pragma_update(None, "foreign_keys", "ON")?;
                 migrations()
                     .to_latest(database)
                     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -1808,6 +1808,32 @@ pub fn embedding_identity_fingerprint(endpoint: &str, model: &str, dimensions: u
 mod tests {
     use super::*;
     use notes_core::{BlockStyle, PageLayout};
+
+    #[tokio::test]
+    async fn actual_ai_store_open_uses_normal_and_shared_connection_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ai.db");
+        for _ in 0..2 {
+            let store = AiStore::open(&path, "policy-test".into(), 4).await.unwrap();
+            let actual = store
+                .connection
+                .call(|raw| {
+                    Ok((
+                        raw.pragma_query_value(None, "journal_mode", |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                        raw.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?,
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(actual, ("wal".into(), 1, 1, 2, 5000, 0));
+        }
+    }
 
     fn composition_fixture(body: &str) -> CompositionInput {
         CompositionInput {

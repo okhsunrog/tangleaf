@@ -21,10 +21,11 @@ pub(super) fn open(store: &Store) -> CommandResult<Connection> {
     let conn =
         Connection::open_with_flags(&store.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(err)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(err)?;
-    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
-        .map_err(err)?;
+    crate::sqlite::policy::configure_existing_wal_writer(
+        &conn,
+        crate::sqlite::policy::WriterDurability::Full,
+    )
+    .map_err(err)?;
     ensure_document(&conn, store.document)?;
     conn.execute(
         "INSERT OR IGNORE INTO ink_documents(page_uuid) VALUES(?1)",
@@ -33,6 +34,7 @@ pub(super) fn open(store: &Store) -> CommandResult<Connection> {
     .map_err(err)?;
     Ok(conn)
 }
+
 pub(super) fn ensure_document(conn: &Connection, document: uuid::Uuid) -> CommandResult<()> {
     let kind: Option<String> = conn.query_row("SELECT i.content_type FROM pages p JOIN page_identities i ON i.page_uuid=p.uuid WHERE p.uuid=?1", [document], |r|r.get(0)).optional().map_err(err)?;
     match kind.as_deref() {
@@ -702,4 +704,61 @@ pub(super) fn patch(
             .map_err(err)?;
     }
     Ok(revision)
+}
+
+#[cfg(test)]
+mod connection_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_ink_open_keeps_full_without_changing_the_main_writer_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.db");
+        let writer = crate::db::open(&path).await.unwrap();
+        let page = crate::db::create_handwritten_note_with_ops(&writer, None)
+            .await
+            .unwrap()
+            .value;
+        let store = Store::new(path, page.uuid);
+        for _ in 0..2 {
+            let native = open(&store).unwrap();
+            let actual = (
+                native
+                    .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                    .unwrap(),
+                native
+                    .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                native
+                    .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                native
+                    .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                native
+                    .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                native
+                    .pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+            );
+            assert_eq!(actual, ("wal".into(), 2, 1, 2, 5000, 0));
+            assert_eq!(
+                writer
+                    .call(|raw| raw
+                        .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0)))
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn native_ink_open_does_not_create_a_missing_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.db");
+        assert!(open(&Store::new(path.clone(), uuid::Uuid::now_v7())).is_err());
+        assert!(!path.exists());
+    }
 }

@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+pub mod policy;
+
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send + 'static>;
 
 enum WorkerMessage {
@@ -35,15 +37,45 @@ pub struct Connection {
 impl Connection {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_owned();
-        Self::open_with(move || rusqlite::Connection::open(path)).await
+        Self::open_with(move || Ok(rusqlite::Connection::open(path)?)).await
+    }
+
+    pub async fn open_writer(
+        path: impl AsRef<Path>,
+        durability: policy::WriterDurability,
+    ) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        Self::open_with(move || {
+            let connection = rusqlite::Connection::open(path)?;
+            policy::configure_writer(&connection, durability)?;
+            Ok(connection)
+        })
+        .await
+    }
+
+    /// Open an existing database without creating it, migrating it, or changing
+    /// its persistent journal mode. The worker and statement profiling are the
+    /// same as for writers; query_only additionally forbids temporary writes.
+    pub async fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        Self::open_with(move || {
+            let connection = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            policy::configure_read_only(&connection)?;
+            Ok(connection)
+        })
+        .await
     }
 
     pub(crate) async fn open_in_memory() -> Result<Self> {
-        Self::open_with(rusqlite::Connection::open_in_memory).await
+        Self::open_with(|| Ok(rusqlite::Connection::open_in_memory()?)).await
     }
 
     async fn open_with(
-        opener: impl FnOnce() -> rusqlite::Result<rusqlite::Connection> + Send + 'static,
+        opener: impl FnOnce() -> Result<rusqlite::Connection> + Send + 'static,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel::<WorkerMessage>();
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();

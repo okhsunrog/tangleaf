@@ -17,11 +17,11 @@ pub struct AppendOutcome {
 
 impl Oplog {
     pub async fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path).await?;
+        let connection =
+            Connection::open_writer(path, notes_core::sqlite::policy::WriterDurability::Full)
+                .await?;
         connection
             .call(|database| {
-                database.pragma_update(None, "journal_mode", "WAL")?;
-                database.pragma_update(None, "synchronous", "FULL")?;
                 database.execute_batch(
                     "CREATE TABLE IF NOT EXISTS oplog (
                        seq INTEGER PRIMARY KEY CHECK (seq > 0),
@@ -174,6 +174,32 @@ mod tests {
     use super::*;
     use notes_core::{Hlc, Op, OpKind, PageLayout, operation::FORMAT_VERSION};
     use notes_sync::PageCreate;
+
+    #[tokio::test]
+    async fn actual_oplog_open_uses_full_and_shared_connection_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oplog.db");
+        for _ in 0..2 {
+            let store = Oplog::open(&path).await.unwrap();
+            let actual = store
+                .connection
+                .call(|raw| {
+                    Ok((
+                        raw.pragma_query_value(None, "journal_mode", |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                        raw.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?,
+                        raw.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?,
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(actual, ("wal".into(), 2, 1, 2, 5000, 0));
+        }
+    }
 
     fn operation(index: u128) -> Op {
         let device_id = uuid::Uuid::from_u128(1);

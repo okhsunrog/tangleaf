@@ -224,6 +224,17 @@
   16 ChangeSet-тестов и 56 query/search/workspace-тестов проходят; `vp check` и общий
   core/AI/server/Tauri all-target Clippy чистые. Raw/native ink writers ещё вне Store counter.
 
+- Общая SQLite connection policy теперь владеет WAL, explicit WriterDurability, foreign keys,
+  temp store и busy timeout. Все 6 production writer opening paths используют её:
+  main/AI остаются NORMAL, ink/oplog/OAuth/blob ownership остаются FULL. Native ink проверяет
+  существующий WAL без повторной смены persistent journal mode. Настройки одного соединения
+  не меняют durability другого. Это консолидация гарантий, не решение о переходе на FULL.
+  Добавлен opener с настоящими READ_ONLY flags и query_only: он не создаёт файл/схему,
+  не запускает миграции, не меняет journal mode и видит новые WAL commits. Reader ещё не
+  подключён к DTO-запросам. Прошли 15 SQLite tests, 2 native opening tests, 55 AI, 35 server
+  unit и 22 server integration; фактические PRAGMA проверены через каждый путь и reopen.
+  Общий all-target Clippy core/AI/server/Tauri проходит.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением
