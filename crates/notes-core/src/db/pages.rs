@@ -420,6 +420,7 @@ impl crate::store::NotesStore {
     }
 }
 
+#[derive(Debug)]
 pub struct DeletedPage {
     pub page_uuid: uuid::Uuid,
     pub block_uuids: Vec<uuid::Uuid>,
@@ -428,18 +429,29 @@ pub struct DeletedPage {
 }
 
 pub async fn delete_page(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<DeletedPage>> {
-    conn.call_domain(move |database| -> crate::CoreResult<Option<DeletedPage>> {
-        let transaction = database.transaction()?;
-        let page_exists = transaction
-            .query_row("SELECT 1 FROM pages WHERE uuid = ?1", [uuid], |_| Ok(()))
-            .optional()?
-            .is_some();
-        if !page_exists {
-            return Ok(None);
-        }
-        let blocks = {
-            let sql = format!(
-                "WITH RECURSIVE tree(uuid, depth) AS (
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .delete_page(uuid)
+        .await?
+        .value)
+}
+
+impl crate::store::NotesStore {
+    pub async fn delete_page(
+        &self,
+        uuid: uuid::Uuid,
+    ) -> Result<crate::store::Committed<Option<DeletedPage>>> {
+        self.write(move |write| -> crate::CoreResult<Option<DeletedPage>> {
+            let transaction = write.sql();
+            let page_exists = transaction
+                .query_row("SELECT 1 FROM pages WHERE uuid = ?1", [uuid], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !page_exists {
+                return Ok(None);
+            }
+            let blocks = {
+                let sql = format!(
+                    "WITH RECURSIVE tree(uuid, depth) AS (
                    SELECT uuid, 0 FROM blocks
                     WHERE page_uuid = ?1 AND parent_uuid IS NULL
                    UNION ALL
@@ -449,52 +461,56 @@ pub async fn delete_page(conn: &Connection, uuid: uuid::Uuid) -> Result<Option<D
                  SELECT {QUALIFIED_BLOCK_COLUMNS}
                    FROM tree JOIN blocks ON blocks.uuid = tree.uuid
                   ORDER BY tree.depth DESC, blocks.order_key, blocks.uuid"
-            );
-            let mut statement = transaction.prepare(&sql)?;
-            statement
-                .query_map([uuid], row_to_block)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let attachments = {
-            let sql = format!(
-                "SELECT {} FROM attachments
+                );
+                let mut statement = transaction.prepare(&sql)?;
+                statement
+                    .query_map([uuid], row_to_block)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let attachments = {
+                let sql = format!(
+                    "SELECT {} FROM attachments
                   WHERE page_uuid = ?1
                      OR block_uuid IN (SELECT uuid FROM blocks WHERE page_uuid = ?1)
                   ORDER BY created_at, uuid",
-                super::attachments::ATTACHMENT_COLUMNS
-            );
-            let mut statement = transaction.prepare(&sql)?;
-            statement
-                .query_map([uuid], super::attachments::row_to_attachment)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut kinds = attachments
-            .iter()
-            .map(|attachment| {
-                OpKind::AttachmentRemove(crate::operation::AttachmentRemove {
-                    owner: attachment.owner,
-                    blob_hash: attachment.blob_hash,
+                    super::attachments::ATTACHMENT_COLUMNS
+                );
+                let mut statement = transaction.prepare(&sql)?;
+                statement
+                    .query_map([uuid], super::attachments::row_to_attachment)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut kinds = attachments
+                .iter()
+                .map(|attachment| {
+                    OpKind::AttachmentRemove(crate::operation::AttachmentRemove {
+                        owner: attachment.owner,
+                        blob_hash: attachment.blob_hash,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        kinds.extend(blocks.iter().map(|block| {
-            OpKind::BlockDelete(BlockDelete {
-                uuid: block.uuid,
-                page_uuid: block.page_uuid,
-            })
-        }));
-        kinds.push(OpKind::PageDelete(PageDelete { uuid }));
-        apply_local_action_in_transaction(&transaction, "delete page", kinds.clone())?;
-        let deleted = DeletedPage {
-            page_uuid: uuid,
-            block_uuids: blocks.into_iter().map(|block| block.uuid).collect(),
-            attachments,
-            operations: kinds,
-        };
-        transaction.commit()?;
-        Ok(Some(deleted))
-    })
-    .await
+                .collect::<Vec<_>>();
+            kinds.extend(blocks.iter().map(|block| {
+                OpKind::BlockDelete(BlockDelete {
+                    uuid: block.uuid,
+                    page_uuid: block.page_uuid,
+                })
+            }));
+            kinds.push(OpKind::PageDelete(PageDelete { uuid }));
+            write.apply_action(
+                "delete page",
+                kinds.clone(),
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            let deleted = DeletedPage {
+                page_uuid: uuid,
+                block_uuids: blocks.into_iter().map(|block| block.uuid).collect(),
+                attachments,
+                operations: kinds,
+            };
+            Ok(Some(deleted))
+        })
+        .await
+    }
 }
 
 pub async fn get_containing_page(

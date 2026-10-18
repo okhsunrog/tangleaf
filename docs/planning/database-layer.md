@@ -207,6 +207,14 @@
   6 новых placement, 21 block-command и 5 Split-тестов проходят (1 benchmark ignored),
   включая exhausted/tied fallback, Undo/Redo, вложенные деревья и replica replay.
 
+- PageDelete завершает перенос обычных local text commands: guards/planning, attachment-
+  и descendant-first операции, history/ink retention и итоговый legacy result теперь в одной
+  Store-транзакции. Backup-before-delete остаётся в host. Оба Tauri handlers (удаление и
+  создание handwritten note) используют ordered observer; ручные ops/history events убраны.
+  Неиспользуемый in-transaction legacy action helper удалён. 51 regression-тест проходит:
+  5 новых delete-store, 22 history/archive, 15 ink recovery и 9 handwriting storage.
+  Проверены quiet absent, оба порядка queued create/delete, точные facts и полный rollback.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

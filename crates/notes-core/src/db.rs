@@ -282,23 +282,6 @@ pub struct AppliedMutation<T> {
     pub operations: Vec<OpKind>,
 }
 
-pub(crate) fn apply_local_action_in_transaction(
-    transaction: &rusqlite::Transaction<'_>,
-    action: &str,
-    kinds: Vec<OpKind>,
-) -> crate::CoreResult<()> {
-    let prepared = history::prepare_action(transaction, &kinds)?;
-    operation::apply_local_kinds_in_transaction(transaction, kinds.clone())?;
-    history::record_prepared_action(
-        transaction,
-        action,
-        kinds,
-        prepared,
-        operation::ProjectionPolicy::Immediate,
-    )?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {

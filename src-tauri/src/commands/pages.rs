@@ -187,12 +187,11 @@ pub async fn delete_page(
     super::data::write_backup(&app, &state.conn, &state.blob_store, "before-delete")
         .await
         .map_err(err)?;
-    let deleted = db::delete_page(&state.conn, uuid).await.map_err(err)?;
-    if let Some(deleted) = &deleted {
-        emit_events_for_ops(&app, &state.conn, &deleted.operations, &[]).await;
-        emit_domain(&app, DomainEvent::HistoryChanged);
-    }
-    Ok(deleted.is_some())
+    let committed = observed_store(&app, &state)
+        .delete_page(uuid)
+        .await
+        .map_err(err)?;
+    Ok(committed.value.is_some())
 }
 
 #[tauri::command]

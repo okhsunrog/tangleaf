@@ -13,11 +13,11 @@ pub async fn create_handwritten_note(
     state: State<'_, AppState>,
     title: Option<String>,
 ) -> CommandResult<db::Page> {
-    let result = db::create_handwritten_note_with_ops(&state.conn, title)
+    let committed = observed_store(&app, &state)
+        .create_handwritten_note(title)
         .await
         .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &result.operations, &[]).await;
-    Ok(result.value)
+    Ok(committed.value)
 }
 #[tauri::command]
 #[specta::specta]
