@@ -1,11 +1,21 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { defaultRangeExtractor, type Range, useVirtualizer } from "@tanstack/react-virtual";
 import { Plus } from "lucide-react";
 import { OutlineSkeleton } from "./outline-skeleton";
 import { useProgressiveRows, ROW_BATCH_SIZE } from "./use-progressive-rows";
 import { type MarkdownOpenHandler, useResolvedAttachmentImages } from "@/features/markdown";
 import { PagePresentation } from "@/features/pages/page-presentation";
+import { isAndroid } from "@/app/sheet-mode";
 import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { BlockNode } from "./block-node";
@@ -26,7 +36,8 @@ type FlatBlock = { block: Block; depth: number; ordinal: number };
 // Verified on-device: 300 fully rendered markdown rows still fling natively-smooth,
 // while the virtualizer's per-scroll re-render is what causes stutter. So only
 // genuinely huge pages pay the virtualization trade-off.
-const NON_VIRTUAL_MAX = 400;
+const ANDROID_NON_VIRTUAL_MAX = 400;
+const DESKTOP_NON_VIRTUAL_MAX = 80;
 
 export function Outliner({
   page,
@@ -131,11 +142,11 @@ function VirtualOutline({
     }
   }, [blocks, page.uuid, queryClient]);
 
-  // Virtualization couples scrolling to React: the virtualizer re-renders on every
-  // scroll event, and that per-frame render pipeline is what makes flings stutter
-  // (verified: the same content rendered statically scrolls natively-smooth).
-  // Render typical pages in full and only virtualize genuinely huge ones.
-  const virtualize = rows.length > NON_VIRTUAL_MAX;
+  // Preserve Android's device-tested native fling behavior. Desktop can window
+  // moderately large lists so Split does not mount every preceding Markdown row
+  // just to focus its final part. Viewport width does not identify a platform.
+  const virtualize =
+    rows.length > (isAndroid() ? ANDROID_NON_VIRTUAL_MAX : DESKTOP_NON_VIRTUAL_MAX);
   const progressiveCount = useProgressiveRows(
     rows.length,
     !virtualize && rows.length > ROW_BATCH_SIZE,
@@ -145,6 +156,18 @@ function VirtualOutline({
   const editingIndex = rows.findIndex((row) => row.block.uuid === store.editingUuid);
   const targetIndex = rows.findIndex((row) => row.block.uuid === targetBlockUuid);
   const visibleCount = Math.max(progressiveCount, editingIndex + 1, targetIndex + 1);
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const indices = new Set(defaultRangeExtractor(range));
+      // An editor owns its pending autosave/flush registration. Scrolling it
+      // outside overscan must not unmount it and abandon a draft. Navigation
+      // targets also mount immediately without rendering the whole prefix.
+      if (editingIndex >= 0) indices.add(editingIndex);
+      if (targetIndex >= 0) indices.add(targetIndex);
+      return [...indices].sort((left, right) => left - right);
+    },
+    [editingIndex, targetIndex],
+  );
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -152,12 +175,28 @@ function VirtualOutline({
     estimateSize: (index) => estimateBlockHeight(rows[index]?.block),
     getItemKey: (index) => rows[index]?.block.uuid ?? index,
     getScrollElement: () => scrollElement,
+    // The scroll element already exists when a live update crosses the
+    // threshold. Seed its size so that transition never renders an empty range
+    // before ResizeObserver runs and unmounts the active editor for one frame.
+    initialRect: {
+      width: scrollElement?.clientWidth ?? 0,
+      height: scrollElement?.clientHeight ?? 0,
+    },
     // Keep enough neighbours for smooth keyboard/trackpad scrolling without
     // eagerly decoding a whole run of image blocks just below the viewport.
     overscan: 4,
+    rangeExtractor,
     scrollMargin,
   });
   const virtualItems = virtualizer.getVirtualItems();
+  // A hidden pane (or the frame before its first measurement) has no visible
+  // range. Keep its pinned editor alive even then; its position is measured
+  // when the pane becomes visible again.
+  const renderedVirtualItems = virtualItems.length
+    ? virtualItems
+    : [...new Set([editingIndex, targetIndex])]
+        .filter((index) => index >= 0)
+        .map((index) => ({ index, start: scrollMargin }));
   const revealed = useRef<{ uuid: string; request: number } | null>(null);
   useLayoutEffect(() => {
     if (!targetBlockUuid || targetIndex < 0 || !scrollElement) return;
@@ -195,7 +234,7 @@ function VirtualOutline({
     store.setEditing(rows[0].block.uuid);
   }, [focusFirstBlockRequest, rows, store]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!virtualize || !store.editingUuid) return;
     const index = rows.findIndex(({ block }) => block.uuid === store.editingUuid);
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
@@ -244,32 +283,25 @@ function VirtualOutline({
         }
       >
         {virtualize
-          ? virtualizer.getVirtualItems().map((item) => {
+          ? renderedVirtualItems.map((item) => {
               const row = rows[item.index];
               if (!row) return null;
               return (
-                <BlockNode
+                <OutlineRow
                   key={row.block.uuid}
                   block={row.block}
                   depth={row.depth}
                   ordinal={row.ordinal}
                   measureRef={virtualizer.measureElement}
                   virtualIndex={item.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    paddingInlineStart: `${row.depth * 1.75}rem`,
-                    transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)`,
-                  }}
+                  virtualStart={item.start - virtualizer.options.scrollMargin}
                 />
               );
             })
           : rows
               .slice(0, visibleCount)
               .map((row) => (
-                <StaticBlockRow
+                <OutlineRow
                   key={row.block.uuid}
                   block={row.block}
                   depth={row.depth}
@@ -293,13 +325,38 @@ function VirtualOutline({
   );
 }
 
-const StaticBlockRow = memo(function StaticBlockRow({ block, depth, ordinal }: FlatBlock) {
+// Both rendering modes keep the same keyed component type so crossing the
+// threshold while editing does not replace the editor and its pending draft.
+const OutlineRow = memo(function OutlineRow({
+  block,
+  depth,
+  ordinal,
+  measureRef,
+  virtualIndex,
+  virtualStart,
+}: FlatBlock &
+  Pick<ComponentProps<typeof BlockNode>, "measureRef" | "virtualIndex"> & {
+    virtualStart?: number;
+  }) {
   return (
     <BlockNode
       block={block}
       depth={depth}
       ordinal={ordinal}
-      style={{ paddingInlineStart: `${depth * 1.75}rem` }}
+      measureRef={measureRef}
+      virtualIndex={virtualIndex}
+      style={
+        virtualStart === undefined
+          ? { paddingInlineStart: `${depth * 1.75}rem` }
+          : {
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              paddingInlineStart: `${depth * 1.75}rem`,
+              transform: `translateY(${virtualStart}px)`,
+            }
+      }
     />
   );
 });
