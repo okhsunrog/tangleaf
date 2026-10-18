@@ -281,6 +281,22 @@
   поскольку текущие Store-команды требуют актуальной схемы. Archive sync-config predicate
   пока требует консолидации с operation policy при переносе archive restore.
 
+- Добавлен закрытый набор подготовленных bulk-команд: внешний импорт и snapshot replacement
+  исполняются в общей Store-транзакции, не ослабляя one-batch контракт обычных команд.
+  V010 хранит локальную `workspace_epoch`; успешная замена атомарно повышает её и commit version,
+  публикует один replacement notice на writer до следующей задачи. ExactNoOp внешнего импорта
+  не делает DML и не меняет counters. Старые неактивные backend query удаляются, активные
+  перечитываются с прежней защитой от устаревших ответов. Bindings перегенерированы.
+  Bootstrap повторно проверяет пустоту внутри транзакции: локальная правка во время загрузки
+  не теряется. Заранее скачанные ink bodies не считаются пользовательской правкой и остаются
+  доступны после импорта. Snapshot sequence проверяется в общем signed SQLite диапазоне
+  ещё при подготовке. Projection-only путь использует отдельную in-memory транзакцию.
+  Прошли 21 external-import, 8 snapshot-store, 4 bulk-boundary, 7 migration и 45 query тестов,
+  63 прежних snapshot/ink/sync регрессии и 8 Tauri sync tests. Общий core-прогон обнаружил
+  только устаревшие fixture version expectations после configure_sync; исправленные три
+  suites прошли 18/18. Общий Clippy и `vp check` чистые. Archive restore переносится следующим
+  отдельным шагом; локальная epoch не заменяет runtime generation при физической замене файла.
+
 ## Решение и масштаб
 
 Предлагается последовательная переработка слоя хранения внутри `notes-core` с сохранением

@@ -245,6 +245,8 @@ async fn subtree_attachments_aliases_and_incoming_links_publish_one_exact_commit
         f.notices.lock().unwrap().as_slice(),
         [CommitNotice {
             commit_version: before.3 + 1,
+            workspace_epoch: deleted.workspace_epoch,
+            workspace_replaced: false,
             changes: deleted.changes.clone()
         }]
     );

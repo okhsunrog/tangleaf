@@ -325,7 +325,7 @@ pub async fn external_import_destination_is_empty(conn: &Connection) -> Result<b
 }
 
 #[derive(Debug)]
-struct ValidatedBatch {
+pub(crate) struct PreparedExternalImport {
     batch: ExternalImportBatch,
     plan_digest: ExternalImportDigest,
     provenance_json: String,
@@ -341,8 +341,8 @@ struct MaterializedPlan<'a> {
     attachments: &'a [ExternalImportAttachment],
 }
 
-impl ValidatedBatch {
-    fn new(batch: ExternalImportBatch) -> CoreResult<Self> {
+impl PreparedExternalImport {
+    pub(crate) fn prepare(batch: ExternalImportBatch) -> CoreResult<Self> {
         validate_batch(&batch)?;
         let plan_json = serde_json::to_vec(&MaterializedPlan {
             pages: &batch.pages,
@@ -448,10 +448,29 @@ pub async fn apply_external_import(
     conn: &Connection,
     batch: ExternalImportBatch,
 ) -> Result<ExternalImportOutcome> {
-    let validated = ValidatedBatch::new(batch)?;
-    conn.call_domain(move |database| -> CoreResult<ExternalImportOutcome> {
-        let transaction = database.transaction()?;
-        let workspace_uuid = crate::db::transaction_workspace_uuid(&transaction)?;
+    Ok(crate::store::NotesStore::new(conn.clone())
+        .apply_external_import(batch)
+        .await?
+        .value)
+}
+
+impl crate::store::NotesStore {
+    pub async fn apply_external_import(
+        &self,
+        batch: ExternalImportBatch,
+    ) -> Result<crate::store::Committed<ExternalImportOutcome>> {
+        self.execute_bulk(PreparedExternalImport::prepare(batch)?)
+            .await
+    }
+}
+
+impl PreparedExternalImport {
+    pub(crate) fn apply_in_transaction(
+        self,
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> CoreResult<crate::store::bulk::BulkMutation<ExternalImportOutcome>> {
+        let validated = self;
+        let workspace_uuid = crate::db::transaction_workspace_uuid(transaction)?;
         let identity = validated.batch.provenance.identity;
         if identity.workspace_uuid != workspace_uuid {
             return Err(CoreError::conflict(format!(
@@ -469,21 +488,19 @@ pub async fn apply_external_import(
             validate_page_identity(workspace_uuid, page.id.uuid(), &kind)?;
         }
 
-        if let Some(receipt) = stored_receipt(
-            &transaction,
-            validated.batch.provenance.format,
-        )? {
-            let exact = receipt.manifest_digest
-                == validated.batch.provenance.manifest_digest
+        if let Some(receipt) = stored_receipt(transaction, validated.batch.provenance.format)? {
+            let exact = receipt.manifest_digest == validated.batch.provenance.manifest_digest
                 && receipt.plan_digest == validated.plan_digest
                 && receipt.planner_version == validated.batch.provenance.planner_version
                 && receipt.identity.workspace_uuid == identity.workspace_uuid
                 && receipt.identity.import_namespace_uuid == identity.import_namespace_uuid
                 && receipt.provenance == validated.batch.provenance.payload;
             if exact {
-                transaction.commit()?;
-                return Ok(ExternalImportOutcome::ExactNoOp {
-                    receipt_uuid: receipt.receipt_uuid,
+                return Ok(crate::store::bulk::BulkMutation {
+                    value: ExternalImportOutcome::ExactNoOp {
+                        receipt_uuid: receipt.receipt_uuid,
+                    },
+                    wrote: false,
                 });
             }
             return Err(CoreError::conflict(
@@ -491,26 +508,33 @@ pub async fn apply_external_import(
             ));
         }
 
-        ensure_workspace_empty(&transaction)?;
+        ensure_workspace_empty(transaction)?;
         let commit_timestamp = chrono::Utc::now().timestamp();
         let kinds = validated.kinds(commit_timestamp);
         for kind in &kinds {
             operation::validate_kind(kind)?;
         }
         let applied = operation::apply_local_kinds_deferred_in_transaction(
-            &transaction, kinds, operation::StructureProjectionMode::Full,
+            transaction,
+            kinds,
+            operation::StructureProjectionMode::Full,
         )?;
         let receipt_uuid = uuid::Uuid::now_v7();
         transaction.execute(
             "INSERT INTO external_import_receipts(
-                receipt_uuid, import_format, manifest_digest, plan_digest,
-                planner_version, identity_workspace_uuid, import_namespace_uuid,
-                provenance_json, imported_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            receipt_uuid, import_format, manifest_digest, plan_digest,
+            planner_version, identity_workspace_uuid, import_namespace_uuid,
+            provenance_json, imported_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 receipt_uuid,
                 validated.batch.provenance.format.as_str(),
-                validated.batch.provenance.manifest_digest.as_bytes().as_slice(),
+                validated
+                    .batch
+                    .provenance
+                    .manifest_digest
+                    .as_bytes()
+                    .as_slice(),
                 validated.plan_digest.as_bytes().as_slice(),
                 validated.batch.provenance.planner_version,
                 identity.workspace_uuid,
@@ -528,10 +552,11 @@ pub async fn apply_external_import(
             operation_count: applied.operations.len() as u64,
             structure_reconciliations: applied.stats.structure_reconciliations,
         };
-        transaction.commit()?;
-        Ok(outcome)
-    })
-    .await
+        Ok(crate::store::bulk::BulkMutation {
+            value: outcome,
+            wrote: true,
+        })
+    }
 }
 
 fn stored_receipt(
@@ -848,6 +873,8 @@ fn insert_alias_owner(
 mod tests {
     use super::*;
     use crate::db;
+    use crate::store::{CommitNotice, NotesStore};
+    use std::sync::{Arc, Mutex};
 
     fn digest(byte: u8) -> ExternalImportDigest {
         ExternalImportDigest::from_bytes([byte; 32])
@@ -906,6 +933,290 @@ mod tests {
         }
     }
 
+    fn observed_store(connection: &Connection) -> (NotesStore, Arc<Mutex<Vec<CommitNotice>>>) {
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let observed = notices.clone();
+        let store = NotesStore::new(connection.clone()).with_commit_observer(move |notice| {
+            observed.lock().unwrap().push(notice.clone());
+        });
+        (store, notices)
+    }
+
+    async fn local_import_state(
+        connection: &Connection,
+    ) -> (i64, i64, i64, i64, i64, i64, Option<String>) {
+        connection
+            .call(|database| {
+                database.query_row(
+                    "SELECT version, workspace_epoch,
+                     (SELECT COUNT(*) FROM external_import_receipts),
+                     (SELECT COUNT(*) FROM applied_ops),
+                     (SELECT COUNT(*) FROM sync_outbox),
+                     (SELECT COUNT(*) FROM local_device),
+                     (SELECT value FROM sync_meta WHERE key = 'last_hlc')
+                     FROM store_state WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bulk_import_publishes_one_replacement_and_exact_retry_performs_no_dml() {
+        let (_file, connection) = database().await;
+        operation::configure_sync(&connection, "https://sync.example")
+            .await
+            .unwrap();
+        let (store, notices) = observed_store(&connection);
+        let input = batch(&connection, 2).await;
+        let baseline = local_import_state(&connection).await;
+        let applied = store.apply_external_import(input.clone()).await.unwrap();
+        let ExternalImportOutcome::Applied { receipt_uuid, .. } = applied.value else {
+            panic!("the first import must apply")
+        };
+        assert_eq!(applied.commit_version, Some(baseline.0 + 1));
+        assert_eq!(applied.workspace_epoch, baseline.1 + 1);
+        assert!(applied.changes.is_empty());
+        {
+            let notices = notices.lock().unwrap();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].commit_version, baseline.0 + 1);
+            assert_eq!(notices[0].workspace_epoch, baseline.1 + 1);
+            assert!(notices[0].workspace_replaced);
+            assert!(notices[0].changes.is_empty());
+        }
+        let before = local_import_state(&connection).await;
+        let snapshot = serde_json::to_value(
+            operation::export_sync_snapshot(&connection, 0)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        connection
+            .call(|database| database.execute_batch("PRAGMA query_only=ON"))
+            .await
+            .unwrap();
+        let repeated = store.apply_external_import(input).await.unwrap();
+        assert_eq!(
+            repeated.value,
+            ExternalImportOutcome::ExactNoOp { receipt_uuid }
+        );
+        assert_eq!(repeated.commit_version, None);
+        assert_eq!(repeated.workspace_epoch, baseline.1 + 1);
+        assert!(repeated.changes.is_empty());
+        assert_eq!(local_import_state(&connection).await, before);
+        assert_eq!(
+            serde_json::to_value(
+                operation::export_sync_snapshot(&connection, 0)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            snapshot
+        );
+        assert_eq!(notices.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_prepared_imports_have_one_receipt_epoch_and_notice() {
+        let (_file, connection) = database().await;
+        operation::configure_sync(&connection, "https://sync.example")
+            .await
+            .unwrap();
+        let input = batch(&connection, 2).await;
+        let first = PreparedExternalImport::prepare(input.clone()).unwrap();
+        let second = PreparedExternalImport::prepare(input.clone()).unwrap();
+        let third = PreparedExternalImport::prepare(input).unwrap();
+        let (store, notices) = observed_store(&connection);
+        let baseline = local_import_state(&connection).await;
+        let (first, second, third) = tokio::join!(
+            store.execute_bulk(first),
+            store.execute_bulk(second),
+            store.execute_bulk(third),
+        );
+        let results = [first.unwrap(), second.unwrap(), third.unwrap()];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.commit_version.is_some())
+                .count(),
+            1
+        );
+        let receipts = results
+            .iter()
+            .map(|result| {
+                assert_eq!(result.workspace_epoch, baseline.1 + 1);
+                match result.value {
+                    ExternalImportOutcome::Applied { receipt_uuid, .. }
+                    | ExternalImportOutcome::ExactNoOp { receipt_uuid } => receipt_uuid,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(receipts.iter().all(|receipt| *receipt == receipts[0]));
+        let state = local_import_state(&connection).await;
+        assert_eq!(
+            (state.0, state.1, state.2, state.3, state.4),
+            (baseline.0 + 1, baseline.1 + 1, 1, 5, 5)
+        );
+        assert_eq!(notices.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_different_prepared_imports_cannot_merge_or_replace_the_winner() {
+        let (_file, connection) = database().await;
+        let mut first = batch(&connection, 1).await;
+        first.pages[0].blocks[0].markdown = "first plan".into();
+        let mut second = batch(&connection, 1).await;
+        second.pages[0].blocks[0].markdown = "second plan".into();
+        let first_page = first.pages[0].id.uuid();
+        let second_page = second.pages[0].id.uuid();
+        let (store, notices) = observed_store(&connection);
+        let (first, second) = tokio::join!(
+            store.execute_bulk(PreparedExternalImport::prepare(first).unwrap()),
+            store.execute_bulk(PreparedExternalImport::prepare(second).unwrap()),
+        );
+        let (winner, loser, expected, absent) = match (first, second) {
+            (Ok(first), Err(second)) => (first, second, (first_page, "first plan"), second_page),
+            (Err(first), Ok(second)) => (second, first, (second_page, "second plan"), first_page),
+            result => panic!("exactly one import must win: {result:?}"),
+        };
+        assert!(
+            loser
+                .to_string()
+                .contains("different manifest, plan, or identity context")
+        );
+        assert_eq!(winner.commit_version, Some(1));
+        assert!(db::get_page(&connection, absent).await.unwrap().is_none());
+        let blocks = db::list_block_children(&connection, expected.0, None)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].markdown, expected.1);
+        assert_eq!(notices.lock().unwrap().len(), 1);
+        assert_eq!(local_import_state(&connection).await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn changed_receipt_context_is_rejected_without_replacement_or_publication() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+        let (store, notices) = observed_store(&connection);
+        store.apply_external_import(input.clone()).await.unwrap();
+        let before = local_import_state(&connection).await;
+        let receipt = external_import_receipt(&connection, ExternalImportFormat::Logseq)
+            .await
+            .unwrap();
+        for difference in ["manifest", "planner", "namespace", "provenance"] {
+            let mut changed = input.clone();
+            match difference {
+                "manifest" => changed.provenance.manifest_digest = digest(8),
+                "planner" => changed.provenance.planner_version += 1,
+                "namespace" => {
+                    changed.provenance.identity.import_namespace_uuid = uuid::Uuid::now_v7()
+                }
+                "provenance" => changed.provenance.payload = serde_json::json!({ "other": true }),
+                _ => unreachable!(),
+            }
+            let error = store.apply_external_import(changed).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("different manifest, plan, or identity context")
+            );
+            assert_eq!(local_import_state(&connection).await, before);
+            assert_eq!(
+                external_import_receipt(&connection, ExternalImportFormat::Logseq)
+                    .await
+                    .unwrap(),
+                receipt
+            );
+            assert_eq!(notices.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_import_rechecks_destination_after_intervening_local_activity() {
+        let (_file, connection) = database().await;
+        let input = batch(&connection, 1).await;
+        let imported_page = input.pages[0].id.uuid();
+        let prepared = PreparedExternalImport::prepare(input).unwrap();
+        let (store, notices) = observed_store(&connection);
+        let local = store
+            .create_page("Intervening local page".into())
+            .await
+            .unwrap();
+        let before = local_import_state(&connection).await;
+        let error = store.execute_bulk(prepared).await.unwrap_err();
+        assert!(error.to_string().contains("requires an empty workspace"));
+        assert_eq!(local_import_state(&connection).await, before);
+        assert!(
+            db::get_page(&connection, imported_page)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db::get_page(&connection, local.value.uuid).await.unwrap(),
+            Some(local.value)
+        );
+        assert_eq!(notices.lock().unwrap().len(), 1);
+        assert!(!notices.lock().unwrap()[0].workspace_replaced);
+    }
+
+    #[tokio::test]
+    async fn late_bulk_epoch_failure_rolls_back_content_receipt_clock_outbox_and_notice() {
+        let (_file, connection) = database().await;
+        operation::configure_sync(&connection, "https://sync.example")
+            .await
+            .unwrap();
+        let input = batch(&connection, 2).await;
+        let (store, notices) = observed_store(&connection);
+        let before = local_import_state(&connection).await;
+        let snapshot = serde_json::to_value(
+            operation::export_sync_snapshot(&connection, 0)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        connection
+            .call(|database| {
+                database.execute_batch(
+            "CREATE TEMP TRIGGER reject_import_epoch BEFORE UPDATE OF workspace_epoch ON store_state
+             BEGIN SELECT RAISE(ABORT, 'bulk epoch failpoint'); END;"
+        )
+            })
+            .await
+            .unwrap();
+        let error = store.apply_external_import(input).await.unwrap_err();
+        assert!(
+            error.to_string().contains("bulk epoch failpoint"),
+            "{error:#}"
+        );
+        assert_eq!(local_import_state(&connection).await, before);
+        assert_eq!(
+            serde_json::to_value(
+                operation::export_sync_snapshot(&connection, 0)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            snapshot
+        );
+        assert!(notices.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn receipt_query_returns_none_before_an_import() {
         let (_file, connection) = database().await;
@@ -939,7 +1250,9 @@ mod tests {
     async fn receipt_query_returns_the_committed_typed_identity_and_digests() {
         let (_file, connection) = database().await;
         let input = batch(&connection, 2).await;
-        let expected_plan_digest = ValidatedBatch::new(input.clone()).unwrap().plan_digest;
+        let expected_plan_digest = PreparedExternalImport::prepare(input.clone())
+            .unwrap()
+            .plan_digest;
         let expected_provenance = input.provenance.clone();
         let outcome = apply_external_import(&connection, input).await.unwrap();
         let receipt_uuid = match outcome {
@@ -1170,7 +1483,9 @@ mod tests {
     async fn attachment_metadata_is_part_of_the_exact_rerun_digest() {
         let (_file, connection) = database().await;
         let input = batch(&connection, 1).await;
-        let original_digest = ValidatedBatch::new(input.clone()).unwrap().plan_digest;
+        let original_digest = PreparedExternalImport::prepare(input.clone())
+            .unwrap()
+            .plan_digest;
         apply_external_import(&connection, input.clone())
             .await
             .unwrap();
@@ -1184,7 +1499,9 @@ mod tests {
         let mut changed = input;
         changed.attachments[0].filename = "renamed.png".into();
         assert_ne!(
-            ValidatedBatch::new(changed.clone()).unwrap().plan_digest,
+            PreparedExternalImport::prepare(changed.clone())
+                .unwrap()
+                .plan_digest,
             original_digest
         );
         let error = apply_external_import(&connection, changed)
@@ -1217,7 +1534,7 @@ mod tests {
             ExternalBlockId::new(uuid::Uuid::now_v7()).unwrap(),
         );
         assert!(
-            ValidatedBatch::new(missing_owner)
+            PreparedExternalImport::prepare(missing_owner)
                 .expect_err("missing owner")
                 .to_string()
                 .contains("does not exist")
@@ -1228,7 +1545,7 @@ mod tests {
             .attachments
             .push(duplicate_key.attachments[0].clone());
         assert!(
-            ValidatedBatch::new(duplicate_key)
+            PreparedExternalImport::prepare(duplicate_key)
                 .expect_err("duplicate owner and hash")
                 .to_string()
                 .contains("duplicate attachment")
@@ -1237,7 +1554,7 @@ mod tests {
         let mut mismatched_uuid = input;
         mismatched_uuid.attachments[0].attachment_uuid = uuid::Uuid::now_v7();
         assert!(
-            ValidatedBatch::new(mismatched_uuid)
+            PreparedExternalImport::prepare(mismatched_uuid)
                 .expect_err("mismatched attachment UUID")
                 .to_string()
                 .contains("does not match")
@@ -1249,7 +1566,7 @@ mod tests {
         second.blob_hash = BlobHash::from_bytes([0x43; 32]);
         duplicate_uuid.attachments.push(second);
         assert!(
-            ValidatedBatch::new(duplicate_uuid)
+            PreparedExternalImport::prepare(duplicate_uuid)
                 .expect_err("duplicate attachment UUID")
                 .to_string()
                 .contains("duplicate attachment UUID")
@@ -1257,13 +1574,13 @@ mod tests {
 
         let mut blank_filename = input.clone();
         blank_filename.attachments[0].filename = " ".into();
-        assert!(ValidatedBatch::new(blank_filename).is_err());
+        assert!(PreparedExternalImport::prepare(blank_filename).is_err());
         let mut blank_mime = input.clone();
         blank_mime.attachments[0].mime = " ".into();
-        assert!(ValidatedBatch::new(blank_mime).is_err());
+        assert!(PreparedExternalImport::prepare(blank_mime).is_err());
         let mut oversized = input;
         oversized.attachments[0].size = u64::MAX;
-        assert!(ValidatedBatch::new(oversized).is_err());
+        assert!(PreparedExternalImport::prepare(oversized).is_err());
     }
 
     #[tokio::test]

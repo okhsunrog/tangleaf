@@ -9,6 +9,45 @@ import {
 import type { ChangeSet, DomainEvent } from "./bindings";
 
 describe("domain event query invalidation", () => {
+  it("retires inactive snapshots and old publication tokens after a committed replacement", async () => {
+    const client = new QueryClient();
+    const key = queryKeys.block("old-block");
+    client.setQueryData(key, { markdown: "old workspace" });
+    client.setQueryData(["layout"], { sidebar: true });
+    const ticket = captureSnapshotPublication(client, key);
+    await applyDomainEvent(client, committed({}, true));
+    expect(client.getQueryData(key)).toBeUndefined();
+    expect(publishQuerySnapshot(client, ticket, { markdown: "late old response" })).toBe(false);
+    expect(client.getQueryData(key)).toBeUndefined();
+    expect(client.getQueryData(["layout"])).toEqual({ sidebar: true });
+  });
+
+  it("replaces an active read without allowing the previous workspace response to return", async () => {
+    const client = new QueryClient();
+    const key = queryKeys.page("page-a");
+    client.setQueryData(key, { title: "Before" });
+    const old = deferred<{ title: string }>();
+    let reads = 0;
+    const observer = new QueryObserver(client, {
+      queryKey: key,
+      queryFn: () => (++reads === 1 ? old.promise : Promise.resolve({ title: "After" })),
+      staleTime: Infinity,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      const pending = observer.refetch();
+      await applyDomainEvent(client, committed({}, true));
+      expect(observer.getCurrentResult().data).toEqual({ title: "After" });
+      old.resolve({ title: "Obsolete" });
+      await pending;
+      expect(observer.getCurrentResult().data).toEqual({ title: "After" });
+      expect(reads).toBe(2);
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
   it("refreshes changed drawing metadata and previews when the page projection stays equal", async () => {
     const client = new QueryClient();
     const affected = [
@@ -732,11 +771,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function committed(changes: Partial<ChangeSet>): DomainEvent {
+function committed(changes: Partial<ChangeSet>, workspaceReplaced = false): DomainEvent {
   return {
     kind: "mutation_committed",
     commit: {
       commitVersion: 1,
+      workspaceEpoch: workspaceReplaced ? 1 : 0,
+      workspaceReplaced,
       changes: {
         changedPages: [],
         deletedPages: [],

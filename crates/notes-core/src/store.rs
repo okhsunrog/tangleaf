@@ -9,6 +9,7 @@ use crate::operation::{
 use crate::{Connection, CoreError, CoreResult};
 use std::sync::Arc;
 
+pub(crate) mod bulk;
 mod metadata;
 
 type CommitObserver = dyn Fn(&CommitNotice) + Send + Sync;
@@ -20,6 +21,12 @@ pub struct CommitNotice {
     /// Local order among NotesStore commits only. Legacy and ink writers have
     /// not migrated yet, so this must not be used as a database-wide revision.
     pub commit_version: i64,
+    /// Local content replacement generation; physical file restore also needs
+    /// a fresh runtime generation. This is not a universal ink revision.
+    #[serde(default)]
+    pub workspace_epoch: i64,
+    #[serde(default)]
+    pub workspace_replaced: bool,
     pub changes: ChangeSet,
 }
 
@@ -29,6 +36,7 @@ pub struct Committed<T> {
     pub changes: ChangeSet,
     /// None for a command that made no write, such as Undo on an empty stack.
     pub commit_version: Option<i64>,
+    pub workspace_epoch: i64,
     pub(crate) operations: Vec<OpKind>,
     #[cfg(test)]
     pub(crate) projection_stats: DeferredApplyStats,
@@ -41,6 +49,7 @@ impl<T> Committed<T> {
             value: map(self.value),
             changes: self.changes,
             commit_version: self.commit_version,
+            workspace_epoch: self.workspace_epoch,
             operations: self.operations,
             #[cfg(test)]
             projection_stats: self.projection_stats,
@@ -156,31 +165,40 @@ impl NotesStore {
                     durable_changed,
                     ..
                 } = transaction;
-                let commit_version = if durable_changed || !changes.is_empty() {
-                    Some(sql.query_row(
+                let (commit_version, workspace_epoch) = if durable_changed || !changes.is_empty() {
+                    let (version, epoch) = sql.query_row(
                         "UPDATE store_state SET version = version + 1
-                         WHERE singleton = 1 RETURNING version",
+                         WHERE singleton = 1 AND version < 9223372036854775807
+                         RETURNING version, workspace_epoch",
                         [],
-                        |row| row.get(0),
-                    )?)
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )?;
+                    (Some(version), epoch)
                 } else {
-                    None
+                    (
+                        None,
+                        sql.query_row(
+                            "SELECT workspace_epoch FROM store_state WHERE singleton=1",
+                            [],
+                            |row| row.get(0),
+                        )?,
+                    )
                 };
                 let committing = std::time::Instant::now();
                 sql.commit()?;
                 let commit = committing.elapsed();
                 // Publish here, before the worker accepts its next command,
                 // rather than after awaiting a response on a Tokio thread.
-                if let (Some(observer), Some(commit_version)) = (observer, commit_version) {
-                    let notice = CommitNotice {
-                        commit_version,
-                        changes: changes.clone(),
-                    };
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(&notice)))
-                        .is_err()
-                    {
-                        tracing::error!(commit_version, "commit observer panicked after commit");
-                    }
+                if let Some(commit_version) = commit_version {
+                    publish_commit(
+                        observer,
+                        CommitNotice {
+                            commit_version,
+                            workspace_epoch,
+                            workspace_replaced: false,
+                            changes: changes.clone(),
+                        },
+                    );
                 }
                 tracing::debug!(
                     operations = operations.len(),
@@ -202,12 +220,25 @@ impl NotesStore {
                     value,
                     changes,
                     commit_version,
+                    workspace_epoch,
                     operations,
                     #[cfg(test)]
                     projection_stats,
                 })
             })
             .await
+    }
+}
+
+fn publish_commit(observer: Option<Arc<CommitObserver>>, notice: CommitNotice) {
+    if let Some(observer) = observer {
+        let version = notice.commit_version;
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(&notice))).is_err() {
+            tracing::error!(
+                commit_version = version,
+                "commit observer panicked after commit"
+            );
+        }
     }
 }
 

@@ -690,8 +690,11 @@ pub async fn commit_logseq_import(
         }
 
         send_import_progress(&on_progress, LogseqImportStage::Committing, 0, 1);
-        let outcome = match notes_core::apply_external_import(&state.conn, batch).await {
-            Ok(outcome) => outcome,
+        let outcome = match observed_store(&app, &state)
+            .apply_external_import(batch)
+            .await
+        {
+            Ok(committed) => committed.value,
             Err(error) => {
                 return Err(cleanup_failed_import(
                     &state.conn,
@@ -712,18 +715,15 @@ pub async fn commit_logseq_import(
                 attachment_count,
                 operation_count,
                 ..
-            } => {
-                emit_domain(&app, DomainEvent::WorkspaceChanged);
-                LogseqImportCommitResult::Applied {
-                    receipt_uuid,
-                    page_count,
-                    block_count,
-                    alias_count,
-                    attachment_count,
-                    operation_count,
-                    open_page_uuid,
-                }
-            }
+            } => LogseqImportCommitResult::Applied {
+                receipt_uuid,
+                page_count,
+                block_count,
+                alias_count,
+                attachment_count,
+                operation_count,
+                open_page_uuid,
+            },
             ExternalImportOutcome::ExactNoOp { receipt_uuid } => {
                 LogseqImportCommitResult::ExactNoOp {
                     receipt_uuid,

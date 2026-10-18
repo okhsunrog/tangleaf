@@ -129,6 +129,11 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
 
   switch (event.kind) {
     case "mutation_committed":
+      if (event.commit.workspaceReplaced) {
+        queryClient.removeQueries({ queryKey: queryKeys.root, type: "inactive" });
+        await invalidate(queryKeys.root);
+        return;
+      }
       await applyCommittedChanges(queryClient, event.commit.changes);
       return;
     case "pages_changed":

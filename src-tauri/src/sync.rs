@@ -587,8 +587,10 @@ async fn initialize_replica(
         }
         (false, true) => {
             download_snapshot_blobs(connection, transport, blob_store, &server).await?;
-            notes_core::import_sync_snapshot(connection, server.clone()).await?;
-            emit_workspace_changed(app);
+            notes_core::store::NotesStore::new(connection.clone())
+                .with_commit_observer(crate::commands::commit_publisher(app))
+                .bootstrap_sync_snapshot(server.clone())
+                .await?;
         }
         (false, false) => {
             if local.workspace_uuid != server.workspace_uuid
@@ -602,7 +604,10 @@ async fn initialize_replica(
         (true, true) => {
             // The server's durable empty workspace is canonical. This prevents
             // successive fresh clients from replacing its Journal namespace.
-            notes_core::import_sync_snapshot(connection, server).await?;
+            notes_core::store::NotesStore::new(connection.clone())
+                .with_commit_observer(crate::commands::commit_publisher(app))
+                .bootstrap_sync_snapshot(server)
+                .await?;
         }
     }
 
@@ -931,10 +936,6 @@ async fn set_connection_detail(
 fn replace_status(app: &AppHandle, status: &Arc<RwLock<SyncStatus>>, next: SyncStatus) {
     *status.write().unwrap_or_else(|error| error.into_inner()) = next;
     crate::commands::emit_domain(app, crate::commands::DomainEvent::SyncStatusChanged);
-}
-
-fn emit_workspace_changed(app: &AppHandle) {
-    crate::commands::emit_domain(app, crate::commands::DomainEvent::WorkspaceChanged);
 }
 
 /// Best-effort upload on orderly exit. The outbox remains authoritative on

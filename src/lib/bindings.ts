@@ -376,6 +376,12 @@ export type CommitNotice = {
 	 *  not migrated yet, so this must not be used as a database-wide revision.
 	 */
 	commitVersion: number,
+	/**
+	 *  Local content replacement generation; physical file restore also needs
+	 *  a fresh runtime generation. This is not a universal ink revision.
+	 */
+	workspaceEpoch?: number,
+	workspaceReplaced?: boolean,
 	changes: ChangeSet,
 };
 
