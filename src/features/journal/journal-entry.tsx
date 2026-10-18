@@ -17,6 +17,7 @@ import { useWorkspaceController } from "@/features/workspace/workspace-controlle
 import { useWorkspaceStore } from "@/features/workspace/workspace-store";
 import type { PaneId } from "@/features/workspace/workspace-model";
 import {
+  CommandFailure,
   ensureJournal,
   getJournal,
   getPageDocument,
@@ -41,20 +42,25 @@ export function JournalEntry({
 }) {
   const journal = useQuery({ queryKey: queryKeys.journal(date), queryFn: () => getJournal(date) });
   const pendingDraft = useDocumentDraftOverlay(`journal-draft:${date}`);
-  const [created, setCreated] = useState<Page | null>(null);
+  const [committed, setCommitted] = useState(false);
+  const onCreated = useCallback(() => setCommitted(true), []);
   // Once typing starts, a background journal refetch must not replace the draft editor.
   const [drafting, setDrafting] = useState(false);
-  const editorSession = useRef<DocumentEditorSession>({ state: null, focused: false }).current;
-  const page = created ?? journal.data;
+  const editorSession = useRef<DocumentEditorSession>({
+    state: null,
+    focused: false,
+    initialCursor: "end",
+  }).current;
+  const page = journal.data;
   if (journal.isPending)
     return <p className="py-8 text-sm text-muted-foreground">Loading journal…</p>;
-  if (journal.error && !created)
+  if (journal.error && !page && !pendingDraft)
     return (
       <p role="alert">
         Could not load journal. <button onClick={() => void journal.refetch()}>Retry</button>
       </p>
     );
-  return page && ((!drafting && !pendingDraft) || created) ? (
+  return page && ((!drafting && !pendingDraft) || committed) ? (
     <ExistingJournal
       page={page}
       paneId={paneId}
@@ -67,8 +73,11 @@ export function JournalEntry({
       paneId={paneId}
       autoFocus={autoFocus}
       editorSession={editorSession}
-      onTyping={() => setDrafting(true)}
-      onCreated={setCreated}
+      onTyping={() => {
+        setDrafting(true);
+        setCommitted(false);
+      }}
+      onCreated={onCreated}
     />
   );
 }
@@ -188,7 +197,28 @@ function FirstEntry({
             client.setQueryData(queryKeys.pageDocument(current.page.uuid), next);
           } catch (error) {
             sessions.failDocumentSave(draftKey, attempt);
-            // Keep the same expected revision on retry: never overwrite concurrent edits.
+            // Use the normal document conflict UI instead of retrying a stale revision forever.
+            if (
+              error instanceof CommandFailure &&
+              error.code === "conflict" &&
+              !composing.current
+            ) {
+              const latest = await getPageDocument(current.page.uuid);
+              if (latest) {
+                const local = sessions.getSnapshot(draftKey).document?.draft ?? attempt.draft;
+                sessions.editDocument(
+                  current.page.uuid,
+                  current.prefix + local,
+                  pageDocumentToPersisted(current.snapshot),
+                );
+                sessions.acceptDocumentSnapshot(current.page.uuid, pageDocumentToPersisted(latest));
+                client.setQueryData(queryKeys.pageDocument(current.page.uuid), latest);
+                client.setQueryData(queryKeys.journal(date), current.page);
+                sessions.discardPage(draftKey);
+                if (mounted.current) onCreated(current.page);
+                return false;
+              }
+            }
             throw error;
           }
           if (sessions.getSnapshot(draftKey).document) continue;

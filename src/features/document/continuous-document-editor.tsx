@@ -25,7 +25,11 @@ import { documentLinkCompletion } from "./document-completion";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
 
-export type DocumentEditorSession = { state: EditorState | null; focused: boolean };
+export type DocumentEditorSession = {
+  state: EditorState | null;
+  focused: boolean;
+  initialCursor?: "end";
+};
 
 type Props = {
   editorSession?: DocumentEditorSession;
@@ -284,7 +288,13 @@ export function ContinuousDocumentEditor({
       keymap.of([...defaultKeymap, ...historyKeymap]),
       documentEditorTheme,
     ];
-    const freshState = EditorState.create({ doc: initialValueRef.current, extensions });
+    const freshState = EditorState.create({
+      doc: initialValueRef.current,
+      selection: {
+        anchor: editorSession?.initialCursor === "end" ? initialValueRef.current.length : 0,
+      },
+      extensions,
+    });
     const cached = editorSession?.state;
     const state =
       cached?.doc.toString() === initialValueRef.current

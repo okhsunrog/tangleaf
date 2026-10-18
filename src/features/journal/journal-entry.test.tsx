@@ -165,3 +165,44 @@ it("keeps a failed first save available for retry", async () => {
     await app.cleanup();
   }
 });
+
+it("offers conflict resolution without overwriting another writer's first entry", async () => {
+  const app = await setup();
+  const { CommandFailure } = await import("@/lib/api");
+  vi.mocked(getPageDocument)
+    .mockResolvedValueOnce(empty)
+    .mockResolvedValueOnce(snapshot("Remote thought"));
+  vi.mocked(replacePageDocument).mockRejectedValueOnce(
+    new CommandFailure({ code: "conflict", message: "Revision changed" }),
+  );
+  try {
+    act(() => app.view().dispatch({ changes: { from: 0, insert: "Local thought" } }));
+    await act(async () => app.sessions.flushAll());
+    expect(app.container.textContent).toContain("Use remote");
+    expect(app.container.textContent).toContain("Keep mine");
+    expect(app.view().state.doc.toString()).toBe("Local thought");
+    expect(replacePageDocument).toHaveBeenCalledTimes(1);
+  } finally {
+    await app.cleanup();
+  }
+});
+
+it("starts at the end of an existing journal and returns to an empty editor after deletion", async () => {
+  const app = await setup();
+  try {
+    await act(async () => {
+      app.client.setQueryData(queryKeys.pageDocument(page.uuid), snapshot("Existing thought"));
+      app.client.setQueryData(queryKeys.journal("2026-10-18"), page);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(app.view().state.selection.main.anchor).toBe("Existing thought".length);
+    await act(async () => {
+      app.client.setQueryData(queryKeys.journal("2026-10-18"), null);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(app.view().state.doc.toString()).toBe("");
+    expect(ensureJournal).not.toHaveBeenCalled();
+  } finally {
+    await app.cleanup();
+  }
+});
