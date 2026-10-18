@@ -138,35 +138,40 @@ export function AppLayout({
   }, [compact, compactRegion, navigateCompactBack, searchOpen]);
 
   useEffect(() => {
-    const notes = sidebarRef.current;
-    const center = workbenchRef.current;
-    const dock = assistantRef.current;
-    if (!notes || !center || !dock) return;
+    // Panel constraints settle after a visibility/breakpoint render. Resizing before
+    // that commit can clamp an opening dock against its previous zero maximum.
+    const frame = requestAnimationFrame(() => {
+      const notes = sidebarRef.current;
+      const center = workbenchRef.current;
+      const dock = assistantRef.current;
+      if (!notes || !center || !dock) return;
 
-    if (compact) {
-      if (compactRegion === CompactRegion.Assistant) {
+      if (compact) {
+        if (compactRegion === CompactRegion.Assistant) {
+          dock.expand();
+          dock.resize("100%");
+          notes.collapse();
+          center.collapse();
+        } else {
+          center.expand();
+          center.resize("100%");
+          notes.collapse();
+          dock.collapse();
+        }
+        return;
+      }
+
+      notes.expand();
+      center.expand();
+      notes.resize("21%");
+      if (assistantVisible) {
         dock.expand();
-        dock.resize("100%");
-        notes.collapse();
-        center.collapse();
+        dock.resize(assistantVisibility === DockVisibility.Rail ? "48px" : `${assistantWidth}px`);
       } else {
-        center.expand();
-        center.resize("100%");
-        notes.collapse();
         dock.collapse();
       }
-      return;
-    }
-
-    notes.expand();
-    center.expand();
-    notes.resize("21%");
-    if (assistantVisible) {
-      dock.expand();
-      dock.resize(assistantVisibility === DockVisibility.Rail ? "48px" : `${assistantWidth}px`);
-    } else {
-      dock.collapse();
-    }
+    });
+    return () => cancelAnimationFrame(frame);
   }, [
     assistantRef,
     assistantVisibility,
