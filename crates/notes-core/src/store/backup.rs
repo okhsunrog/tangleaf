@@ -53,6 +53,46 @@ pub async fn required_attachment_blobs(
     }).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryContentCounts {
+    pub pages: u64,
+    pub blocks: u64,
+}
+
+/// Validate primary row encodings with the same decoders used by normal read
+/// APIs, discarding each decoded row instead of exporting a whole workspace.
+/// Restore preparation runs this on a private initialized staging database.
+pub async fn validate_recovery_content(
+    connection: &crate::Connection,
+) -> Result<RecoveryContentCounts> {
+    connection
+        .call_domain(|database| -> Result<_> {
+            let transaction = database.transaction()?;
+            let mut counts = RecoveryContentCounts {
+                pages: 0,
+                blocks: 0,
+            };
+            for row in transaction
+                .prepare(&format!("SELECT {} FROM pages", crate::db::PAGE_COLUMNS))?
+                .query_map([], crate::db::row_to_page)?
+            {
+                row?;
+                counts.pages += 1;
+            }
+            for row in transaction
+                .prepare(&format!("SELECT {} FROM blocks", crate::db::BLOCK_COLUMNS))?
+                .query_map([], crate::db::row_to_block)?
+            {
+                row?;
+                counts.blocks += 1;
+            }
+            crate::ink::validate_retained_roots(&transaction)?;
+            transaction.commit()?;
+            Ok(counts)
+        })
+        .await
+}
+
 /// Inspect a standalone recovery file without migrating it or changing its
 /// journal mode. Hosts validate file hashes before accepting its manifest.
 pub async fn inspect_database_backup(path: impl AsRef<Path>) -> Result<DatabaseBackup> {

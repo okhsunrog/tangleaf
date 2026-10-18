@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 mod backup;
 pub use backup::{
-    DatabaseBackup, backup_closed_database, inspect_database_backup, required_attachment_blobs,
+    DatabaseBackup, RecoveryContentCounts, backup_closed_database, inspect_database_backup,
+    required_attachment_blobs, validate_recovery_content,
 };
 pub(crate) mod bulk;
 mod metadata;

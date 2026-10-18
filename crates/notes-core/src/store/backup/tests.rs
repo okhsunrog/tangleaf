@@ -527,3 +527,52 @@ async fn a_dropped_offline_capture_waiter_still_finishes_and_joins_its_owned_wor
     captured.close().await.unwrap();
     assert!(temporary_files(directory.path()).is_empty());
 }
+
+#[tokio::test]
+async fn recovery_content_validation_uses_read_model_decoders_for_primary_revisions_and_text() {
+    for malformed in [
+        "UPDATE pages SET title_hlc='not a valid clock'",
+        "UPDATE blocks SET markdown=CAST('not text' AS BLOB)",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = NotesStore::open(directory.path().join("notes.db"))
+            .await
+            .unwrap();
+        let page = store
+            .create_page("Readable page".into())
+            .await
+            .unwrap()
+            .value;
+        store
+            .create_block(
+                page.uuid,
+                None,
+                None,
+                BlockStyle::Bullet,
+                "Readable block".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            validate_recovery_content(store.read_connection())
+                .await
+                .unwrap(),
+            RecoveryContentCounts {
+                pages: 1,
+                blocks: 1
+            }
+        );
+        store
+            .write_connection()
+            .call(move |database| database.execute_batch(malformed))
+            .await
+            .unwrap();
+        assert!(
+            validate_recovery_content(store.read_connection())
+                .await
+                .is_err(),
+            "{malformed}"
+        );
+        store.close().await.unwrap();
+    }
+}

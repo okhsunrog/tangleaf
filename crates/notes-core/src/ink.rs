@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 pub mod archive;
 pub(crate) mod history_retention;
+pub(crate) use history_retention::validate_retained_roots;
 mod input;
 pub(crate) mod outbox_retention;
 mod status;

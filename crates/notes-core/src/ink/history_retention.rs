@@ -92,13 +92,79 @@ fn root_id(bytes: Vec<u8>) -> CommandResult<Id> {
         .map_err(|_| CommandError::invalid("Invalid retained ink root ID"))
 }
 
-fn validate_root(conn: &Connection, id: Id) -> CommandResult<BlobHash> {
+fn retained_root(
+    conn: &Connection,
+    id: Id,
+) -> CommandResult<(ink_format::snapshot::Snapshot, BlobHash)> {
     let root = storage::get_record(conn, id, None)?;
     let bytes = root.encode().map_err(err)?;
     let snapshot = storage::load_root(conn, root)?;
+    Ok((snapshot, BlobHash::digest(&bytes)))
+}
+
+fn validate_root(conn: &Connection, id: Id) -> CommandResult<BlobHash> {
+    let (snapshot, hash) = retained_root(conn, id)?;
     snapshot.validate(&[1, 2, 3, 4]).map_err(err)?;
     storage::validate_adapter(&snapshot)?;
-    Ok(BlobHash::digest(&bytes))
+    Ok(hash)
+}
+
+fn validate_recovery_root(conn: &Connection, id: Id) -> CommandResult<BlobHash> {
+    let (snapshot, hash) = retained_root(conn, id)?;
+    // Apply the transfer decoder's aggregate budget before allocating decoded
+    // columns from a recovery file, including roots outside the current draft.
+    let decoded = snapshot.chunks.values().try_fold(0u64, |total, bytes| {
+        total
+            .checked_add(ink_format::chunk::Chunk::decoded_value_bytes(bytes).map_err(err)? as u64)
+            .ok_or_else(|| CommandError::invalid("Decoded retained handwriting size overflow"))
+    })?;
+    if decoded > 128 * 1024 * 1024 {
+        return Err(CommandError::invalid(
+            "Retained handwriting graph exceeds the supported recovery decoded budget",
+        ));
+    }
+    // This performs complete catalog/DAG/hash validation and the same numeric
+    // and profile conversion as opening the native editor, without any writes.
+    storage::to_draft(&snapshot)?;
+    Ok(hash)
+}
+
+/// Validate the immutable graph of every retained owner without opening a
+/// native writer, changing pins or materializing a currently unavailable root.
+pub(crate) fn validate_retained_roots(conn: &Connection) -> CommandResult<()> {
+    let mut statement = conn.prepare(
+        "SELECT root_id, NULL AS expected_hash FROM ink_history
+         UNION SELECT root_id, NULL FROM ink_documents WHERE root_id IS NOT NULL
+         UNION SELECT root_id, NULL FROM history_ink_roots
+         UNION SELECT root_id, root_hash FROM ink_versions WHERE root_id IS NOT NULL
+         UNION SELECT root_id, root_hash FROM ink_staged_roots
+         UNION SELECT root_id, root_hash FROM ink_outbox_roots WHERE root_id IS NOT NULL
+         ORDER BY root_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut last: Option<(Id, BlobHash)> = None;
+    while let Some(row) = rows.next()? {
+        let root = root_id(row.get(0)?)?;
+        let hash = match last {
+            Some((previous, hash)) if previous == root => hash,
+            _ => {
+                let hash = validate_recovery_root(conn, root)?;
+                last = Some((root, hash));
+                hash
+            }
+        };
+        if let Some(expected) = row.get::<_, Option<Vec<u8>>>(1)? {
+            let expected: [u8; 32] = expected
+                .try_into()
+                .map_err(|_| CommandError::invalid("Invalid retained handwriting root hash"))?;
+            if hash != BlobHash::from_bytes(expected) {
+                return Err(CommandError::invalid(
+                    "Retained handwriting owner hash mismatch",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl RetainedPage {
@@ -370,4 +436,313 @@ pub(crate) fn cleanup(conn: &Connection) -> CommandResult<()> {
         storage::history::collect(conn)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod retained_validation_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        connection: crate::Connection,
+        ink: Store,
+    }
+
+    async fn fixture() -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.db");
+        let connection = crate::db::open(&path).await.unwrap();
+        crate::configure_sync(&connection, "https://retained-validation.invalid")
+            .await
+            .unwrap();
+        let page = crate::db::create_handwritten_note_with_ops(&connection, None)
+            .await
+            .unwrap()
+            .value;
+        Fixture {
+            _directory: directory,
+            connection,
+            ink: Store::new(path, page.uuid),
+        }
+    }
+
+    fn draw(ink: &Store, index: u128) {
+        ink.patch(
+            InkDraftPatch {
+                order: vec![Uuid::from_u128(index)],
+                upserts: vec![InkStroke {
+                    id: Uuid::from_u128(index),
+                    width: 2.0,
+                    points: vec![InkPoint {
+                        x: 10.0 + index as f64,
+                        y: 20.0,
+                        pressure: 0.5,
+                        tilt_x: 0.0,
+                        tilt_y: 0.0,
+                        time: index as f64,
+                    }],
+                }],
+                background: InkBackground::Grid,
+            },
+            ink.read().unwrap().revision,
+        )
+        .unwrap();
+    }
+
+    async fn validate(connection: &crate::Connection) -> anyhow::Result<()> {
+        connection
+            .call_domain(|database| -> CommandResult<()> {
+                database.pragma_update(None, "query_only", "ON")?;
+                let before = database.total_changes();
+                let result = {
+                    let transaction = database.transaction()?;
+                    let result = super::super::validate_retained_roots(&transaction);
+                    transaction.commit()?;
+                    result
+                };
+                assert_eq!(
+                    database.total_changes(),
+                    before,
+                    "validation cannot change owners or content"
+                );
+                database.pragma_update(None, "query_only", "OFF")?;
+                result
+            })
+            .await
+    }
+
+    async fn current_root(connection: &crate::Connection, page: Uuid) -> Vec<u8> {
+        connection
+            .call(move |database| {
+                database.query_row(
+                    "SELECT root_id FROM ink_documents WHERE page_uuid=?1",
+                    [page],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn corrupt_chunk(connection: &crate::Connection, root: Vec<u8>) {
+        connection.call(move |database| {
+            let (id,mut bytes) = database.query_row("SELECT chunks.id,chunks.data FROM ink_chunks chunks
+                JOIN ink_root_refs refs ON refs.kind=1 AND refs.object_id=chunks.id WHERE refs.root_id=?1 LIMIT 1",
+                [root], |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?)))?;
+            *bytes.last_mut().unwrap() ^= 1;
+            database.execute("UPDATE ink_chunks SET data=?2 WHERE id=?1", params![id,bytes])?;
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_validation_checks_noncurrent_native_records_and_chunk_hashes() {
+        for kind in [0, 1] {
+            let fixture = fixture().await;
+            draw(&fixture.ink, 1);
+            let old = current_root(&fixture.connection, fixture.ink.document()).await;
+            draw(&fixture.ink, 2);
+            let current = current_root(&fixture.connection, fixture.ink.document()).await;
+            validate(&fixture.connection).await.unwrap();
+            fixture.connection.call(move |database| {
+                let id: Vec<u8> = database.query_row("SELECT old.object_id FROM ink_root_refs old
+                    WHERE old.root_id=?1 AND old.kind=?3 AND NOT EXISTS(
+                    SELECT 1 FROM ink_root_refs current WHERE current.root_id=?2 AND current.kind=old.kind AND current.object_id=old.object_id) LIMIT 1",
+                    params![old,current,kind], |row| row.get(0))?;
+                let table = if kind == 0 { "ink_records" } else { "ink_chunks" };
+                let mut bytes: Vec<u8> = database.query_row(&format!("SELECT data FROM {table} WHERE id=?1"), [&id], |row| row.get(0))?;
+                *bytes.last_mut().unwrap() ^= 1;
+                database.execute(&format!("UPDATE {table} SET data=?2 WHERE id=?1"), params![id,bytes])?;
+                Ok(())
+            }).await.unwrap();
+            assert_eq!(
+                fixture.ink.read().unwrap().draft.strokes[0].id,
+                Uuid::from_u128(2)
+            );
+            assert!(
+                validate(&fixture.connection).await.is_err(),
+                "noncurrent native owner must still be validated"
+            );
+            fixture.connection.close().await.unwrap();
+        }
+    }
+
+    async fn deleted_fixture(outbox_only: bool) -> (Fixture, Vec<u8>) {
+        let fixture = fixture().await;
+        draw(&fixture.ink, 3);
+        let root = current_root(&fixture.connection, fixture.ink.document()).await;
+        let published = fixture
+            .ink
+            .publish("Retained validation".into())
+            .unwrap()
+            .unwrap();
+        let publication = crate::pending_outbox(&fixture.connection,100).await.unwrap().into_iter()
+            .find(|op| matches!(&op.kind,OpKind::InkPublish(p) if p.version_uuid==published.version_uuid)).unwrap();
+        crate::db::delete_page(&fixture.connection, fixture.ink.document())
+            .await
+            .unwrap();
+        if outbox_only {
+            let archive = crate::db::export_archive(&fixture.connection)
+                .await
+                .unwrap();
+            crate::db::import_archive(&fixture.connection, archive)
+                .await
+                .unwrap();
+        } else {
+            crate::acknowledge_server_op(&fixture.connection, publication.op_id, 1)
+                .await
+                .unwrap();
+        }
+        fixture
+            .connection
+            .call(move |database| {
+                let (documents, native_history, versions, history, outbox) = database.query_row(
+                    "SELECT
+                (SELECT COUNT(*) FROM ink_documents),(SELECT COUNT(*) FROM ink_history),
+                (SELECT COUNT(*) FROM ink_versions),(SELECT COUNT(*) FROM history_ink_roots),
+                (SELECT COUNT(*) FROM ink_outbox_roots)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?;
+                assert_eq!((documents, native_history, versions), (0, 0, 0));
+                if outbox_only {
+                    assert_eq!(history, 0);
+                    assert_eq!(outbox, 1);
+                } else {
+                    assert!(history > 0);
+                    assert_eq!(outbox, 0);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        (fixture, root)
+    }
+
+    #[tokio::test]
+    async fn deleted_history_only_and_outbox_only_roots_are_validated() {
+        for outbox_only in [false, true] {
+            let (fixture, root) = deleted_fixture(outbox_only).await;
+            validate(&fixture.connection).await.unwrap();
+            corrupt_chunk(&fixture.connection, root).await;
+            assert!(validate(&fixture.connection).await.is_err());
+            fixture.connection.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_only_root_is_validated_and_its_expected_hash_is_checked() {
+        let source = fixture().await;
+        draw(&source.ink, 4);
+        let publication = source
+            .ink
+            .publish("Staging validation".into())
+            .unwrap()
+            .unwrap();
+        let graph = transfer::export_graph(&source.connection, publication.root_hash)
+            .await
+            .unwrap();
+        let target = crate::db::open(source._directory.path().join("target.db"))
+            .await
+            .unwrap();
+        transfer::stage_graph(&target, publication.root_hash, graph)
+            .await
+            .unwrap();
+        validate(&target).await.unwrap();
+        target
+            .call(|database| {
+                assert_eq!(
+                    database.query_row("SELECT COUNT(*) FROM ink_versions", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                database.execute("UPDATE ink_staged_roots SET root_hash=?1", [vec![7u8; 32]])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            format!("{:#}", validate(&target).await.unwrap_err()).contains("owner hash mismatch")
+        );
+        target.close().await.unwrap();
+        source.connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_expected_hash_is_checked_even_when_two_owners_share_one_root() {
+        for table in ["ink_versions", "ink_outbox_roots"] {
+            let fixture = fixture().await;
+            draw(&fixture.ink, 5);
+            fixture
+                .ink
+                .publish("Shared validation".into())
+                .unwrap()
+                .unwrap();
+            validate(&fixture.connection).await.unwrap();
+            fixture
+                .connection
+                .call(move |database| {
+                    database
+                        .execute(&format!("UPDATE {table} SET root_hash=?1"), [vec![8u8; 32]])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert!(
+                format!("{:#}", validate(&fixture.connection).await.unwrap_err())
+                    .contains("owner hash mismatch")
+            );
+            fixture.connection.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_version_roots_remain_explicitly_unavailable() {
+        let source = fixture().await;
+        draw(&source.ink, 6);
+        source
+            .ink
+            .publish("Unavailable validation".into())
+            .unwrap()
+            .unwrap();
+        let snapshot = crate::export_sync_snapshot(&source.connection, 0)
+            .await
+            .unwrap();
+        let target = crate::db::open(source._directory.path().join("unavailable.db"))
+            .await
+            .unwrap();
+        crate::import_sync_snapshot(&target, snapshot)
+            .await
+            .unwrap();
+        validate(&target).await.unwrap();
+        target
+            .call(|database| {
+                assert_eq!(
+                    database.query_row(
+                        "SELECT COUNT(*) FROM ink_versions WHERE root_id IS NULL",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+                assert_eq!(
+                    database.query_row("SELECT COUNT(*) FROM ink_records", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        target.close().await.unwrap();
+        source.connection.close().await.unwrap();
+    }
 }
