@@ -57,7 +57,12 @@ import {
   pageToItem,
   type AutocompleteItem,
 } from "./autocomplete-menu";
-import { queryKeys } from "@/lib/query";
+import {
+  captureSnapshotPublication,
+  publishQuerySnapshot,
+  queryKeys,
+  refreshQueries,
+} from "@/lib/query";
 import { cn } from "@/lib/utils";
 import { useBlockDraftOverlay, usePageSessionRegistry } from "@/features/pages/page-session";
 import { BusyIndicator } from "@/components/ui/busy-indicator";
@@ -194,7 +199,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
   const siblings = () => queryClient.getQueryData<Block[]>(queryKeys.children(containerUuid)) ?? [];
 
   const invalidateChildren = (parentUuid?: string) =>
-    queryClient.invalidateQueries({
+    refreshQueries(queryClient, {
       queryKey: parentUuid ? queryKeys.children(parentUuid) : queryKeys.childrenRoot,
     });
 
@@ -209,30 +214,41 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     }
   };
 
+  const captureBlockPublication = useCallback(
+    (current: Block) => ({
+      block: captureSnapshotPublication(queryClient, queryKeys.block(current.uuid)),
+      children: captureSnapshotPublication(
+        queryClient,
+        queryKeys.children(current.parentUuid ?? current.pageUuid),
+      ),
+      render: captureSnapshotPublication(queryClient, queryKeys.pageRender(current.pageUuid)),
+    }),
+    [queryClient],
+  );
+
   const applyBlockSnapshot = useCallback(
-    (updated: Block) => {
-      blockRef.current = updated;
-      queryClient.setQueryData<Block[]>(queryKeys.children(containerUuid), (rows = []) =>
-        replaceCachedBlock(rows, updated),
+    (updated: Block, publication: ReturnType<typeof captureBlockPublication>) => {
+      const accepted = publishQuerySnapshot(queryClient, publication.block, updated);
+      if (accepted) blockRef.current = updated;
+      publishQuerySnapshot<Block[]>(queryClient, publication.children, (rows) =>
+        rows ? replaceCachedBlock(rows, updated) : rows,
       );
-      queryClient.setQueryData(queryKeys.block(updated.uuid), updated);
-      queryClient.setQueryData<PageRenderSnapshot>(
-        queryKeys.pageRender(updated.pageUuid),
-        (snapshot) =>
-          snapshot
-            ? {
-                ...snapshot,
-                document: {
-                  ...snapshot.document,
-                  blocks: snapshot.document.blocks.map((candidate) =>
-                    candidate.uuid === updated.uuid ? updated : candidate,
-                  ),
-                },
-              }
-            : snapshot,
+      publishQuerySnapshot<PageRenderSnapshot>(queryClient, publication.render, (snapshot) =>
+        snapshot
+          ? {
+              ...snapshot,
+              document: {
+                ...snapshot.document,
+                blocks: snapshot.document.blocks.map((candidate) =>
+                  candidate.uuid === updated.uuid ? updated : candidate,
+                ),
+              },
+            }
+          : snapshot,
       );
+      return accepted;
     },
-    [containerUuid, queryClient],
+    [queryClient],
   );
 
   const flush = useCallback(async (): Promise<boolean> => {
@@ -254,12 +270,13 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
         }
         setSaveState("saving");
         try {
+          const publication = captureBlockPublication(current);
           const updated = await setBlockContent(
             current.uuid,
             blockContent(attempt.draft),
             attempt.expectedRevision,
           );
-          applyBlockSnapshot(updated);
+          applyBlockSnapshot(updated, publication);
           sessions.acknowledgeBlockSave(current.pageUuid, current.uuid, attempt, {
             text: updated.markdown,
             revision: updated.markdownRevision,
@@ -271,9 +288,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
           sessions.failBlockSave(current.pageUuid, current.uuid, attempt);
           if (err instanceof CommandFailure && err.code === "conflict") {
             try {
+              const publication = captureBlockPublication(current);
               const latest = await getBlock(current.uuid);
-              if (latest) {
-                applyBlockSnapshot(latest);
+              if (latest && applyBlockSnapshot(latest, publication)) {
                 sessions.acceptBlockSnapshot(current.pageUuid, current.uuid, {
                   text: latest.markdown,
                   revision: latest.markdownRevision,
@@ -295,7 +312,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     } finally {
       if (saveInFlight.current === pending) saveInFlight.current = null;
     }
-  }, [applyBlockSnapshot, sessions]);
+  }, [applyBlockSnapshot, captureBlockPublication, sessions]);
 
   // The window can be destroyed without unmounting anything, and debounced
   // autosave never fires then. A process-level drain reaches this draft here.
@@ -316,8 +333,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     try {
       if (!(await flush())) return;
       const current = blockRef.current;
+      const publication = captureBlockPublication(current);
       const updated = await setBlockStyle(current.uuid, nextStyle);
-      applyBlockSnapshot(updated);
+      applyBlockSnapshot(updated, publication);
       setSaveState("idle");
     } catch (error) {
       console.error("block style update failed", error);
@@ -338,8 +356,9 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     setStyleBusy(true);
     try {
       if (!(await flush())) return;
+      const publication = captureBlockPublication(current);
       const updated = await setTaskState(current.uuid, value);
-      applyBlockSnapshot(updated);
+      applyBlockSnapshot(updated, publication);
       setSaveState("idle");
     } catch (error) {
       console.error("task state update failed", error);
@@ -551,6 +570,10 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     let created: Block | undefined;
     try {
       if (!(await flush())) throw new Error("The original block could not be saved");
+      const publication = captureSnapshotPublication(
+        queryClient,
+        queryKeys.pageRender(block.pageUuid),
+      );
       const changed = await splitBlock(
         block.uuid,
         [before, pending.after].map(blockContent),
@@ -570,20 +593,18 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
       const finalBlocks = changed.map((candidate) =>
         candidate.uuid === finalNext.uuid ? finalNext : candidate,
       );
-      queryClient.setQueryData<PageRenderSnapshot>(
-        queryKeys.pageRender(block.pageUuid),
-        (snapshot) =>
-          snapshot
-            ? {
-                ...snapshot,
-                document: {
-                  ...snapshot.document,
-                  blocks: snapshot.document.blocks.flatMap((candidate) =>
-                    candidate.uuid === block.uuid ? finalBlocks : [candidate],
-                  ),
-                },
-              }
-            : snapshot,
+      publishQuerySnapshot<PageRenderSnapshot>(queryClient, publication, (snapshot) =>
+        snapshot
+          ? {
+              ...snapshot,
+              document: {
+                ...snapshot.document,
+                blocks: snapshot.document.blocks.flatMap((candidate) =>
+                  candidate.uuid === block.uuid ? finalBlocks : [candidate],
+                ),
+              },
+            }
+          : snapshot,
       );
       sessions.discardBlock(block.pageUuid, block.uuid);
       pendingSplit.current = null;
@@ -604,7 +625,7 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
           text: created.markdown,
           revision: created.markdownRevision,
         });
-        await queryClient.invalidateQueries({ queryKey: queryKeys.pageRender(block.pageUuid) });
+        await refreshQueries(queryClient, { queryKey: queryKeys.pageRender(block.pageUuid) });
         if (editingRef.current) store.setEditing(created.uuid);
       } else {
         const restored = `${before}\n${pending.after}`;
@@ -621,11 +642,15 @@ export function BlockNode({ block, depth, ordinal, measureRef, virtualIndex, sty
     if (draftRef.current.length > 0) return false;
     const prev = prevSibling(siblings(), block.uuid);
     try {
+      const publication = captureSnapshotPublication(
+        queryClient,
+        queryKeys.children(containerUuid),
+      );
       const ok = await deleteBlock(block.uuid);
       if (!ok) return false;
       sessions.discardBlock(block.pageUuid, block.uuid);
-      queryClient.setQueryData<Block[]>(queryKeys.children(containerUuid), (rows = []) =>
-        rows.filter((row) => row.uuid !== block.uuid),
+      publishQuerySnapshot<Block[]>(queryClient, publication, (rows) =>
+        rows?.filter((row) => row.uuid !== block.uuid),
       );
       if (prev) store.setEditing(prev.uuid);
       else store.setEditing(null);

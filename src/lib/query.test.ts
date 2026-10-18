@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import { applyDomainEvent, queryKeys } from "./query";
+import {
+  applyDomainEvent,
+  captureSnapshotPublication,
+  publishQuerySnapshot,
+  queryKeys,
+} from "./query";
 import type { ChangeSet, DomainEvent } from "./bindings";
 
 describe("domain event query invalidation", () => {
@@ -388,6 +393,305 @@ describe("domain event query invalidation", () => {
     expect(client.getQueryState(queryKeys.pageRender("page-a"))?.isInvalidated).toBe(true);
   });
 });
+
+describe("backend snapshot freshness", () => {
+  const affectedKeys = [
+    ["block", queryKeys.block("block-a")],
+    ["children", queryKeys.children("page-a")],
+    ["document", queryKeys.pageDocument("page-a")],
+    ["render snapshot", queryKeys.pageRender("page-a")],
+  ] as const;
+  const blockChanged = committed({
+    affectedPages: ["page-a"],
+    blocks: [{ uuid: "block-a", before: placement("page-a"), after: placement("page-a") }],
+  });
+
+  it.each(affectedKeys)(
+    "restarts a pending first %s read after a commit and discards its late result",
+    async (_name, key) => {
+      const pending = observeDeferred(key);
+      try {
+        const oldRead = pending.observer.refetch();
+        expect(pending.reads).toHaveLength(1);
+
+        const updating = applyDomainEvent(pending.client, blockChanged);
+        expect(pending.reads).toHaveLength(2);
+        pending.reads[1].resolve("committed");
+        await updating;
+
+        pending.reads[0].resolve("stale first read");
+        await oldRead;
+        expect(pending.observer.getCurrentResult().data).toBe("committed");
+        expect(pending.observed).not.toContain("stale first read");
+      } finally {
+        pending.dispose();
+      }
+    },
+  );
+
+  it.each(affectedKeys)(
+    "discards an older cached %s refetch after a commit",
+    async (_name, key) => {
+      const pending = observeDeferred(key, "cached");
+      try {
+        const oldRead = pending.observer.refetch();
+        const updating = applyDomainEvent(pending.client, blockChanged);
+        expect(pending.reads).toHaveLength(2);
+        pending.reads[1].resolve("committed");
+        await updating;
+
+        pending.reads[0].resolve("stale refetch");
+        await oldRead;
+        expect(pending.observer.getCurrentResult().data).toBe("committed");
+        expect(pending.observed).not.toContain("stale refetch");
+      } finally {
+        pending.dispose();
+      }
+    },
+  );
+
+  it.each(affectedKeys)(
+    "protects an acknowledged %s snapshot from an older read",
+    async (_name, key) => {
+      const pending = observeDeferred(key, "cached");
+      try {
+        const publication = captureSnapshotPublication(pending.client, key);
+        const oldRead = pending.observer.refetch();
+        expect(publishQuerySnapshot(pending.client, publication, "acknowledged")).toBe(true);
+        pending.reads[0].resolve("pre-save read");
+        await oldRead;
+
+        expect(pending.observer.getCurrentResult().data).toBe("acknowledged");
+        expect(pending.observed).not.toContain("pre-save read");
+      } finally {
+        pending.dispose();
+      }
+    },
+  );
+
+  it("restarts a pending first load when an acknowledgement can only patch an existing snapshot", async () => {
+    const key = queryKeys.pageRender("page-a");
+    const pending = observeDeferred(key);
+    try {
+      const publication = captureSnapshotPublication(pending.client, key);
+      const oldRead = pending.observer.refetch();
+      publishQuerySnapshot<string>(pending.client, publication, (previous) =>
+        previous ? `${previous}: acknowledged block` : previous,
+      );
+      expect(pending.reads).toHaveLength(2);
+      pending.reads[1].resolve("committed document");
+      await pending.observer.refetch();
+      pending.reads[0].resolve("pre-save document");
+      await oldRead;
+
+      expect(pending.observer.getCurrentResult().data).toBe("committed document");
+      expect(pending.observed).not.toContain("pre-save document");
+    } finally {
+      pending.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    "rejects a late command acknowledgement after a newer event (refresh completed: %s)",
+    async (completeRefreshFirst) => {
+      const key = queryKeys.pageDocument("page-a");
+      const pending = observeDeferred(key, "initial");
+      try {
+        const publication = captureSnapshotPublication(pending.client, key);
+        const acknowledgement = deferred<string>();
+        const saving = acknowledgement.promise.then((snapshot) =>
+          publishQuerySnapshot(pending.client, publication, snapshot),
+        );
+        const newerCommit = applyDomainEvent(pending.client, blockChanged);
+        expect(pending.reads).toHaveLength(1);
+        if (completeRefreshFirst) {
+          pending.reads[0].resolve("newer commit");
+          await newerCommit;
+        }
+
+        acknowledgement.resolve("older command result");
+        expect(await saving).toBe(false);
+        if (!completeRefreshFirst) {
+          // Rejecting the old result must not cancel or restart this newer read.
+          expect(pending.client.getQueryState(key)?.fetchStatus).toBe("fetching");
+          pending.reads[0].resolve("newer commit");
+          await newerCommit;
+        } else {
+          // Another acknowledgement can retire the token too; an idle entry
+          // requires an authoritative reread instead of trusting either result.
+          expect(pending.reads).toHaveLength(2);
+          pending.reads[1].resolve("newer commit");
+          await pending.observer.refetch({ cancelRefetch: false });
+        }
+
+        expect(pending.reads).toHaveLength(completeRefreshFirst ? 2 : 1);
+        expect(pending.observer.getCurrentResult().data).toBe("newer commit");
+        expect(pending.observed).not.toContain("older command result");
+      } finally {
+        pending.dispose();
+      }
+    },
+  );
+
+  it("rereads after concurrent acknowledgements captured the same epoch", async () => {
+    const key = queryKeys.block("block-a");
+    const pending = observeDeferred(key, "initial");
+    try {
+      const first = captureSnapshotPublication(pending.client, key);
+      const second = captureSnapshotPublication(pending.client, key);
+      expect(publishQuerySnapshot(pending.client, first, "first acknowledgement")).toBe(true);
+      expect(publishQuerySnapshot(pending.client, second, "newer acknowledgement")).toBe(false);
+      expect(pending.reads).toHaveLength(1);
+      pending.reads[0].resolve("authoritative newer snapshot");
+      await pending.observer.refetch({ cancelRefetch: false });
+
+      expect(pending.observer.getCurrentResult().data).toBe("authoritative newer snapshot");
+    } finally {
+      pending.dispose();
+    }
+  });
+
+  it("rejects an imperative conflict read overtaken by a newer acknowledgement", async () => {
+    const key = queryKeys.block("block-a");
+    const pending = observeDeferred(key, "initial");
+    try {
+      const conflictPublication = captureSnapshotPublication(pending.client, key);
+      const conflictRead = deferred<string>();
+      const refreshingConflict = conflictRead.promise.then((snapshot) =>
+        publishQuerySnapshot(pending.client, conflictPublication, snapshot),
+      );
+      const savePublication = captureSnapshotPublication(pending.client, key);
+      expect(publishQuerySnapshot(pending.client, savePublication, "newer acknowledgement")).toBe(
+        true,
+      );
+      conflictRead.resolve("older conflict response");
+
+      expect(await refreshingConflict).toBe(false);
+      expect(pending.observer.getCurrentResult().data).toBe("newer acknowledgement");
+      expect(pending.observed).not.toContain("older conflict response");
+    } finally {
+      pending.dispose();
+    }
+  });
+
+  it("rejects an old acknowledgement after the same cache key was evicted and recreated", () => {
+    const client = new QueryClient();
+    const key = queryKeys.block("block-a");
+    const publication = captureSnapshotPublication(client, key);
+    client.removeQueries({ queryKey: key, exact: true });
+    client.setQueryData(key, "recreated block");
+
+    expect(publishQuerySnapshot(client, publication, "deleted block acknowledgement")).toBe(false);
+    expect(client.getQueryData(key)).toBe("recreated block");
+    client.clear();
+  });
+
+  it("retires each pending read across successive commits delivered without awaiting refresh", async () => {
+    const pending = observeDeferred(queryKeys.pageDocument("page-a"));
+    try {
+      const oldRead = pending.observer.refetch();
+      const firstCommit = applyDomainEvent(pending.client, blockChanged);
+      const secondCommit = applyDomainEvent(pending.client, blockChanged);
+      expect(pending.reads).toHaveLength(3);
+      pending.reads[2].resolve("second commit");
+      await Promise.all([firstCommit, secondCommit]);
+      pending.reads[1].resolve("first commit");
+      pending.reads[0].resolve("before both commits");
+      await oldRead;
+
+      expect(pending.observer.getCurrentResult().data).toBe("second commit");
+      expect(pending.observed).not.toContain("first commit");
+      expect(pending.observed).not.toContain("before both commits");
+    } finally {
+      pending.dispose();
+    }
+  });
+
+  it("does not resurrect a deleted document when its first read completes after recreation", async () => {
+    const pending = observeDeferred(queryKeys.pageDocument("page-a"));
+    try {
+      const oldRead = pending.observer.refetch();
+      await applyDomainEvent(pending.client, committed({ deletedPages: ["page-a"] }));
+      expect(pending.observer.getCurrentResult().data).toBeNull();
+      expect(pending.reads).toHaveLength(1);
+
+      const recreated = applyDomainEvent(
+        pending.client,
+        committed({ changedPages: ["page-a"], affectedPages: ["page-a"] }),
+      );
+      expect(pending.reads).toHaveLength(2);
+      pending.reads[1].resolve("recreated document");
+      await recreated;
+      pending.reads[0].resolve("deleted document");
+      await oldRead;
+
+      expect(pending.observer.getCurrentResult().data).toBe("recreated document");
+      expect(pending.observed).not.toContain("deleted document");
+    } finally {
+      pending.dispose();
+    }
+  });
+
+  it("restarts a first read for legacy block events too", async () => {
+    const pending = observeDeferred(queryKeys.pageRender("page-a"));
+    try {
+      const oldRead = pending.observer.refetch();
+      const updating = applyDomainEvent(pending.client, {
+        kind: "blocks_changed",
+        block_uuids: ["block-a"],
+        container_uuids: ["page-a"],
+      });
+      expect(pending.reads).toHaveLength(2);
+      pending.reads[1].resolve("after legacy write");
+      await updating;
+      pending.reads[0].resolve("before legacy write");
+      await oldRead;
+
+      expect(pending.observer.getCurrentResult().data).toBe("after legacy write");
+      expect(pending.observed).not.toContain("before legacy write");
+    } finally {
+      pending.dispose();
+    }
+  });
+});
+
+function observeDeferred(key: readonly unknown[], initial?: string) {
+  const client = new QueryClient();
+  const reads: ReturnType<typeof deferred<string>>[] = [];
+  if (initial !== undefined) client.setQueryData(key, initial);
+  const observer = new QueryObserver<string | null>(client, {
+    queryKey: key,
+    // Deliberately ignore AbortSignal, like an IPC request already executing in
+    // SQLite. TanStack must discard a canceled response even if work completes.
+    queryFn: () => {
+      const read = deferred<string>();
+      reads.push(read);
+      return read.promise;
+    },
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+  });
+  const observed: unknown[] = [];
+  const unsubscribe = observer.subscribe((result) => observed.push(result.data));
+  return {
+    client,
+    observer,
+    reads,
+    observed,
+    dispose: () => {
+      unsubscribe();
+      client.clear();
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function committed(changes: Partial<ChangeSet>): DomainEvent {
   return {

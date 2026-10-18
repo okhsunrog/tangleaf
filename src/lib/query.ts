@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, type Query } from "@tanstack/react-query";
 import { events, type ChangeSet, type DomainEvent } from "@/lib/bindings";
 
 const root = ["backend"] as const;
@@ -56,8 +56,75 @@ export function createAppQueryClient() {
   });
 }
 
+type QuerySelection = { queryKey: readonly unknown[]; exact?: boolean };
+type SnapshotPublication = { query: Query; epoch: number };
+const snapshotEpochs = new WeakMap<Query, number>();
+
+export function captureSnapshotPublication(queryClient: QueryClient, queryKey: readonly unknown[]) {
+  const query = queryClient
+    .getQueryCache()
+    .build(queryClient, queryClient.defaultQueryOptions({ queryKey }));
+  return { query, epoch: snapshotEpochs.get(query) ?? 0 } satisfies SnapshotPublication;
+}
+
+function advanceSnapshotEpoch(query: Query) {
+  snapshotEpochs.set(query, (snapshotEpochs.get(query) ?? 0) + 1);
+}
+
+export function refreshQueries(queryClient: QueryClient, selection: QuerySelection) {
+  // invalidateQueries reuses an in-flight first load when it has no cached data.
+  // Retire that read explicitly: its SQLite snapshot may predate the commit.
+  // Cancellation takes effect synchronously. Start the replacement in this same
+  // turn so a subsequent event can cancel it too, without an await between them.
+  for (const query of queryClient.getQueryCache().findAll(selection)) advanceSnapshotEpoch(query);
+  const cancellation = queryClient.cancelQueries(selection);
+  const refresh = queryClient.invalidateQueries(selection);
+  return Promise.all([cancellation, refresh]).then(() => undefined);
+}
+
+export function publishQuerySnapshot<T>(
+  queryClient: QueryClient,
+  publication: SnapshotPublication,
+  snapshot: T | ((previous: T | undefined) => T | undefined),
+) {
+  const queryKey = publication.query.queryKey;
+  const current = queryClient.getQueryCache().find({ queryKey, exact: true });
+  if (current !== publication.query || (snapshotEpochs.get(current) ?? 0) !== publication.epoch) {
+    // An event or another acknowledgement superseded this IPC result. Preserve
+    // the newer read, including a first load still in flight, and never recreate
+    // an entry evicted by deletion merely to publish the older command result.
+    // A different publication may have advanced the epoch without an event.
+    // Neither acknowledgement proves which snapshot is newest, so reread an
+    // idle entry even when its current data was just published successfully.
+    if (current?.state.fetchStatus === "idle") {
+      void queryClient.invalidateQueries({ queryKey, exact: true });
+    }
+    return false;
+  }
+  publishSnapshot(queryClient, current, snapshot);
+  return true;
+}
+
+function publishSnapshot<T>(
+  queryClient: QueryClient,
+  query: Query,
+  snapshot: T | ((previous: T | undefined) => T | undefined),
+) {
+  // Retire earlier reads before publishing a command acknowledgement. An IPC
+  // read need not support AbortSignal: cancellation also discards its result.
+  const queryKey = query.queryKey;
+  advanceSnapshotEpoch(query);
+  void queryClient.cancelQueries({ queryKey, exact: true });
+  const published = queryClient.setQueryData<T>(queryKey, snapshot);
+  // A partial cache patch cannot construct a missing snapshot. Restart a
+  // canceled first load in that case instead of leaving a mounted view pending.
+  if (published === undefined) {
+    void queryClient.invalidateQueries({ queryKey, exact: true });
+  }
+}
+
 export async function applyDomainEvent(queryClient: QueryClient, event: DomainEvent) {
-  const invalidate = (queryKey: readonly unknown[]) => queryClient.invalidateQueries({ queryKey });
+  const invalidate = (queryKey: readonly unknown[]) => refreshQueries(queryClient, { queryKey });
 
   switch (event.kind) {
     case "mutation_committed":
@@ -153,12 +220,11 @@ export async function applyDomainEvent(queryClient: QueryClient, event: DomainEv
 
 async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSet) {
   const invalidate = (queryKey: readonly unknown[]) =>
-    queryClient.invalidateQueries({ queryKey, exact: true });
+    refreshQueries(queryClient, { queryKey, exact: true });
   const invalidateFamily = (queryKey: readonly unknown[]) =>
-    queryClient.invalidateQueries({ queryKey });
+    refreshQueries(queryClient, { queryKey });
   const remove = (queryKey: readonly unknown[]) =>
     queryClient.removeQueries({ queryKey, exact: true });
-  const cancellations: Promise<void>[] = [];
   const clearSnapshot = (queryKey: readonly unknown[], empty: null | []) => {
     const query = queryClient.getQueryCache().find({ queryKey, exact: true });
     if (!query) return;
@@ -168,8 +234,7 @@ async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSe
     }
     // Eviction alone does not update mounted observers. Cancel an older read
     // before publishing absence, and retain it for mounted observers.
-    cancellations.push(queryClient.cancelQueries({ queryKey, exact: true }));
-    queryClient.setQueryData(queryKey, empty);
+    publishSnapshot(queryClient, query, empty);
   };
   const removeInactiveNull = (queryKey: readonly unknown[]) => {
     const query = queryClient.getQueryCache().find({ queryKey, exact: true });
@@ -222,7 +287,6 @@ async function applyCommittedChanges(queryClient: QueryClient, changes: ChangeSe
   for (const uuid of changedBlocks) removeInactiveNull(queryKeys.block(uuid));
 
   const invalidations = [
-    ...cancellations,
     ...[...affectedPages].flatMap((uuid) => [
       invalidate(queryKeys.pageDocument(uuid)),
       invalidate(queryKeys.pageRender(uuid)),

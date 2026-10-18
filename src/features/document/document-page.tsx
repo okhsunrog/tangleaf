@@ -10,7 +10,7 @@ import {
 } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
 import { notifyError } from "@/lib/notify";
-import { queryKeys } from "@/lib/query";
+import { captureSnapshotPublication, publishQuerySnapshot, queryKeys } from "@/lib/query";
 import {
   useDocumentDraftOverlay,
   usePageSessionRegistry,
@@ -178,9 +178,13 @@ function LoadedDocumentPage({
         setSaveState("saving");
         try {
           const units = documentUnitsForSave(attempt.draft, attempt.baseSourceMap);
+          const publication = captureSnapshotPublication(
+            queryClient,
+            queryKeys.pageDocument(pageUuid),
+          );
           const updated = await replacePageDocument(pageUuid, attempt.expectedRevision, units);
           const rebased = pageDocumentToPersisted(updated);
-          queryClient.setQueryData(queryKeys.pageDocument(pageUuid), updated);
+          publishQuerySnapshot(queryClient, publication, updated);
           sessions.acknowledgeDocumentSave(pageUuid, attempt, rebased);
           if (sessions.getSnapshot(pageUuid).document) continue;
           setSaveState("saved");
@@ -189,9 +193,12 @@ function LoadedDocumentPage({
           sessions.failDocumentSave(pageUuid, attempt);
           if (error instanceof CommandFailure && error.code === "conflict") {
             try {
+              const publication = captureSnapshotPublication(
+                queryClient,
+                queryKeys.pageDocument(pageUuid),
+              );
               const latest = await getPageDocument(pageUuid);
-              if (latest) {
-                queryClient.setQueryData(queryKeys.pageDocument(pageUuid), latest);
+              if (latest && publishQuerySnapshot(queryClient, publication, latest)) {
                 sessions.acceptDocumentSnapshot(pageUuid, pageDocumentToPersisted(latest));
               }
             } catch (refreshError) {
