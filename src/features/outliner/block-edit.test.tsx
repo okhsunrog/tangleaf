@@ -150,3 +150,24 @@ it("consumes Undo even with empty block history instead of invoking structural h
     window.removeEventListener("keydown", parentShortcut);
   }
 });
+
+it("does not overwrite a split buffer or reset its caret when the original block refreshes", async () => {
+  const { root, view } = mount();
+  const render = (initial: string) => (
+    <BlockEdit initial={initial} syncExternal={false} onChange={() => {}} onBlur={() => {}} />
+  );
+  await act(async () => root.render(render("")));
+  act(() =>
+    view().dispatch({
+      changes: { from: 0, insert: "Second paragraph" },
+      selection: { anchor: 16 },
+    }),
+  );
+  await act(async () => root.render(render("First paragraph")));
+  expect(view().state.doc.toString()).toBe("Second paragraph");
+  expect(view().state.selection.main.anchor).toBe(16);
+  act(() =>
+    view().dispatch({ changes: { from: view().state.selection.main.head, insert: " continues" } }),
+  );
+  expect(view().state.doc.toString()).toBe("Second paragraph continues");
+});
