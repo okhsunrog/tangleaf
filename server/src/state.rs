@@ -504,3 +504,6 @@ async fn write_snapshot_at(
     tokio::fs::rename(&temporary, &target).await?;
     Ok(snapshot)
 }
+
+#[cfg(test)]
+mod tests;

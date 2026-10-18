@@ -161,6 +161,11 @@ impl Oplog {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) async fn close_for_test(&self) -> Result<()> {
+        self.connection.close().await
+    }
 }
 
 fn json_error(error: serde_json::Error) -> rusqlite::Error {
