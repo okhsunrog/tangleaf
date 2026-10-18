@@ -288,7 +288,7 @@ pub(crate) fn apply_local_kinds_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
 ) -> CoreResult<()> {
-    apply_local_kinds_with_policy(transaction, kinds, false)?;
+    apply_local_kinds_with_policy(transaction, kinds, ProjectionPolicy::Immediate)?;
     Ok(())
 }
 
@@ -297,17 +297,26 @@ pub(crate) struct LocalBatchApply {
     pub stats: DeferredApplyStats,
 }
 
+/// Projection scheduling is an execution policy, independent of a history label.
+/// Both policies finish all projections before returning to the transaction owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectionPolicy {
+    Immediate,
+    Deferred,
+}
+
 pub(crate) fn apply_local_kinds_deferred_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
 ) -> CoreResult<LocalBatchApply> {
-    apply_local_kinds_with_policy(transaction, kinds, true)
+    apply_local_kinds_with_policy(transaction, kinds, ProjectionPolicy::Deferred)
 }
 
-fn apply_local_kinds_with_policy(
+pub(crate) fn apply_local_kinds_with_policy(
     transaction: &rusqlite::Transaction<'_>,
     kinds: Vec<OpKind>,
-    deferred: bool,
+    policy: ProjectionPolicy,
 ) -> CoreResult<LocalBatchApply> {
     // Validate the complete input before even creating the local device row.
     // This keeps the external-import boundary observably mutation-free when
@@ -343,10 +352,9 @@ fn apply_local_kinds_with_policy(
         clock = Some(hlc);
     }
     let publishes = publishes_authored_ops(transaction)?;
-    let mut effects = if deferred {
-        ApplyEffects::deferred()
-    } else {
-        ApplyEffects::immediate()
+    let mut effects = match policy {
+        ProjectionPolicy::Deferred => ApplyEffects::deferred(),
+        ProjectionPolicy::Immediate => ApplyEffects::immediate(),
     };
     for operation in &operations {
         apply_one_with_effects(transaction, operation, &mut effects)?;
