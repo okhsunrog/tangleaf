@@ -289,6 +289,8 @@ pub struct SnapshotAttachment {
     pub size: Option<u64>,
 }
 
+/// Fixture adapter; production commands own their transaction through NotesStore.
+#[cfg(test)]
 pub(crate) async fn apply_local_kinds(conn: &Connection, kinds: Vec<OpKind>) -> Result<()> {
     if kinds.is_empty() {
         return Ok(());

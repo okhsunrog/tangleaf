@@ -73,18 +73,17 @@ pub async fn attach_file(
         (filename, mime, installed)
     };
 
-    let applied = db::create_attachment_with_ops(
-        &state.conn,
-        location,
-        installed.blob.hash,
-        filename,
-        mime,
-        installed.blob.size,
-    )
-    .await
-    .map_err(err)?;
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
-    Ok(Some(applied.value))
+    let committed = observed_store(&app, &state)
+        .create_attachment(
+            location,
+            installed.blob.hash,
+            filename,
+            mime,
+            installed.blob.size,
+        )
+        .await
+        .map_err(err)?;
+    Ok(Some(committed.value))
 }
 
 #[tauri::command]
@@ -159,13 +158,13 @@ pub async fn delete_attachment(
     )
     .await
     .map_err(err)?;
-    let applied = db::delete_attachment_with_ops(&state.conn, uuid)
+    let committed = observed_store(&app, &state)
+        .delete_attachment(uuid)
         .await
         .map_err(err)?;
-    let Some(_attachment) = applied.value else {
+    let Some(_attachment) = committed.value else {
         return Ok(false);
     };
-    emit_events_for_ops(&app, &state.conn, &applied.operations, &[]).await;
     Ok(true)
 }
 

@@ -2,6 +2,10 @@ use super::*;
 use crate::operation::{AttachmentAdd, AttachmentRemove};
 use rusqlite::OptionalExtension;
 
+#[cfg(test)]
+#[path = "attachment_command_tests.rs"]
+mod command_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentImageCache {
     pub blob_hash: BlobHash,
@@ -207,38 +211,88 @@ pub async fn create_attachment_with_ops(
     mime: String,
     size: u64,
 ) -> Result<AppliedMutation<Attachment>> {
-    let owner_exists = match owner {
-        AttachmentOwner::Page(uuid) => get_page(conn, uuid).await?.is_some(),
-        AttachmentOwner::Block(uuid) => get_block(conn, uuid).await?.is_some(),
-    };
-    if !owner_exists {
-        return Err(crate::CoreError::not_found("attachment owner was not found").into());
-    }
-    let operations = apply_local(
-        conn,
-        vec![OpKind::AttachmentAdd(AttachmentAdd {
-            owner,
-            blob_hash,
-            filename,
-            mime,
-            size,
-        })],
-    )
-    .await?;
-    let value = conn
-        .call(move |database| {
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .create_attachment(owner, blob_hash, filename, mime, size)
+        .await?;
+    Ok(AppliedMutation {
+        value: committed.value,
+        operations: committed.operations,
+    })
+}
+
+impl crate::store::NotesStore {
+    /// The host installs/verifies the immutable blob before this metadata write.
+    /// Owner validation, operation emission and the returned row share one snapshot.
+    pub async fn create_attachment(
+        &self,
+        owner: AttachmentOwner,
+        blob_hash: BlobHash,
+        filename: String,
+        mime: String,
+        size: u64,
+    ) -> Result<crate::store::Committed<Attachment>> {
+        self.write(move |write| -> crate::CoreResult<Attachment> {
+            let table = match owner {
+                AttachmentOwner::Page(_) => "pages",
+                AttachmentOwner::Block(_) => "blocks",
+            };
+            let exists: bool = write.sql().query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE uuid = ?1)"),
+                [owner.uuid()],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(crate::CoreError::not_found(
+                    "attachment owner was not found",
+                ));
+            }
+            write.apply_local(
+                vec![OpKind::AttachmentAdd(AttachmentAdd {
+                    owner,
+                    blob_hash,
+                    filename,
+                    mime,
+                    size,
+                })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
             let sql = format!(
                 "SELECT {ATTACHMENT_COLUMNS} FROM attachments
-              WHERE blob_hash = ?1 AND ((page_uuid = ?2) OR (block_uuid = ?2))"
+                  WHERE blob_hash = ?1 AND ((page_uuid = ?2) OR (block_uuid = ?2))"
             );
-            database.query_row(
+            Ok(write.sql().query_row(
                 &sql,
                 rusqlite::params![blob_hash_bytes(&blob_hash), owner.uuid()],
                 row_to_attachment,
-            )
+            )?)
         })
-        .await?;
-    Ok(AppliedMutation { value, operations })
+        .await
+    }
+
+    pub async fn delete_attachment(
+        &self,
+        uuid: uuid::Uuid,
+    ) -> Result<crate::store::Committed<Option<Attachment>>> {
+        self.write(move |write| -> crate::CoreResult<Option<Attachment>> {
+            let sql = format!("SELECT {ATTACHMENT_COLUMNS} FROM attachments WHERE uuid = ?1");
+            let attachment = write
+                .sql()
+                .query_row(&sql, [uuid], row_to_attachment)
+                .optional()?;
+            let Some(attachment) = attachment else {
+                return Ok(None);
+            };
+            write.apply_local(
+                vec![OpKind::AttachmentRemove(AttachmentRemove {
+                    owner: attachment.owner,
+                    blob_hash: attachment.blob_hash,
+                })],
+                operation::ProjectionPolicy::Immediate,
+            )?;
+            Ok(Some(attachment))
+        })
+        .await
+    }
 }
 
 pub async fn list_attachments(
@@ -319,24 +373,12 @@ pub async fn delete_attachment_with_ops(
     conn: &Connection,
     uuid: uuid::Uuid,
 ) -> Result<AppliedMutation<Option<Attachment>>> {
-    let attachment = get_attachment(conn, uuid).await?;
-    let Some(attachment) = attachment else {
-        return Ok(AppliedMutation {
-            value: None,
-            operations: Vec::new(),
-        });
-    };
-    let operations = apply_local(
-        conn,
-        vec![OpKind::AttachmentRemove(AttachmentRemove {
-            owner: attachment.owner,
-            blob_hash: attachment.blob_hash,
-        })],
-    )
-    .await?;
+    let committed = crate::store::NotesStore::new(conn.clone())
+        .delete_attachment(uuid)
+        .await?;
     Ok(AppliedMutation {
-        value: Some(attachment),
-        operations,
+        value: committed.value,
+        operations: committed.operations,
     })
 }
 

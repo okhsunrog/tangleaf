@@ -282,11 +282,6 @@ pub struct AppliedMutation<T> {
     pub operations: Vec<OpKind>,
 }
 
-async fn apply_local(conn: &Connection, kinds: Vec<OpKind>) -> Result<Vec<OpKind>> {
-    operation::apply_local_kinds(conn, kinds.clone()).await?;
-    Ok(kinds)
-}
-
 async fn apply_local_action(
     conn: &Connection,
     action: &str,

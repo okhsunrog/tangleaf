@@ -148,6 +148,13 @@
   FIFO competing saves, один revision winner, no-op, task guard, поздний SQL rollback,
   post-commit observer и совместимость adapters; ещё 25 revision/history тестов проходят.
   Tauri handler использует точный notice; structural create/move/delete ещё переносятся.
+- Добавление/удаление attachment metadata переведено на Store: существование owner,
+  Apply и результат атомарны. Host по-прежнему устанавливает blob до metadata transaction;
+  image cache и filesystem cleanup сохраняют отдельные инфраструктурные границы.
+  3 новых теста проверяют точные owner facts/no-history/no-op, invalid input и откат после
+  ошибки материализации (включая clocks/outbox). Все 8 Tauri image/protocol тестов проходят.
+  Неиспользуемый async `db::apply_local` удалён; его низкоуровневый fixture-adapter теперь
+  доступен только тестам. Общий core/Tauri all-target Clippy проходит.
 
 ## Решение и масштаб
 
