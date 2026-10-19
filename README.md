@@ -291,3 +291,5 @@ The core architecture is implemented, but this is still a pre-release project. T
 - Markdown-vault and Obsidian import, plus journal templates, properties, saved queries, and an extension model;
 - drag-and-drop block movement, cross-block selection, transclusion, richer Markdown authoring, graph filters/layouts, and larger-corpus performance work;
 - signed production packages and end-to-end UI/accessibility regression coverage on desktop and real Android hardware.
+
+NixOS packages and build instructions: [docs/nixos.md](docs/nixos.md).

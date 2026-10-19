@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Tangleaf
+Comment=Personal knowledge workspace
+Exec=tangleaf
+Icon=tangleaf
+Terminal=false
+Type=Application
+Categories=Office;
+StartupWMClass=tangleaf
