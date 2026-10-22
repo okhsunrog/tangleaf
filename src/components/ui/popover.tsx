@@ -7,6 +7,7 @@ import { useOverlayInkSuppression } from "@/app/ink-suppression";
 
 function Popover({
   onOpenChange,
+  actionsRef,
   fullRefreshOnClose = true,
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Root> & {
@@ -17,14 +18,34 @@ function Popover({
    */
   fullRefreshOnClose?: boolean;
 }) {
+  const internalActions = React.useRef<PopoverPrimitive.Root.Actions | null>(null);
+  const actions = actionsRef ?? internalActions;
+  const [reportedOpen, setReportedOpen] = React.useState(props.defaultOpen ?? false);
+  const open = props.open ?? reportedOpen;
   const overlay = useOverlayInkSuppression(props.open ?? props.defaultOpen);
   const closed = fullRefreshOnClose ? refreshPanelAfterClose(onOpenChange) : onOpenChange;
+
+  React.useEffect(() => {
+    if (!open) return;
+    // Tauri consumes titlebar mousedown and starts a native drag, so the
+    // completed click used by Base UI's outside dismissal may never arrive.
+    const dismissOnTitlebar = (event: MouseEvent) => {
+      if (event.button !== 0 || !(event.target instanceof HTMLElement)) return;
+      const region = event.target.getAttribute("data-tauri-drag-region");
+      if (region !== null && region !== "false") actions.current?.close();
+    };
+    document.addEventListener("mousedown", dismissOnTitlebar, true);
+    return () => document.removeEventListener("mousedown", dismissOnTitlebar, true);
+  }, [open, actions]);
+
   return (
     <PopoverPrimitive.Root
       data-slot="popover"
+      actionsRef={actions}
       onOpenChange={(open, ...rest) => {
         overlay(open);
         closed?.(open, ...rest);
+        if (!rest[0].isCanceled) setReportedOpen(open);
       }}
       {...props}
     />
