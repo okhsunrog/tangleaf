@@ -32,11 +32,31 @@
           src = self;
         };
       pkgs = import nixpkgs { inherit system; };
+      desktopLibraries = import ./nix/desktop-libraries.nix { inherit pkgs; };
     in
     {
       packages.${system} = {
         default = self.packages.${system}.tangleaf;
         tangleaf = mkPackage pkgs;
+        desktop-runtime = pkgs.callPackage ./nix/desktop-runtime.nix { };
+      };
+      devShells.${system}.default = pkgs.mkShell {
+        packages = with pkgs; [
+          rustup
+          just
+          pkg-config
+          cmake
+          nasm
+          shellcheck
+          desktop-file-utils
+          jq
+        ];
+        buildInputs = with pkgs; [
+          openssl
+          gtk3
+          webkitgtk_4_1
+        ];
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath desktopLibraries;
       };
       lib.mkPackage = mkPackage;
       checks.${system}.package = self.packages.${system}.tangleaf;

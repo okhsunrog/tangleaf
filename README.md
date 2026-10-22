@@ -55,6 +55,9 @@ vp dev
 
 Run the desktop client:
 
+On NixOS, first run `direnv allow` in this checkout (or enter `nix develop`).
+See [the NixOS guide](docs/nixos.md) for local builds and desktop installation.
+
 ```sh
 vp run desktop:dev
 ```

@@ -81,3 +81,10 @@ url = { version = "2.5.8", features = ["serde"] }
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+
+# Optimized local desktop builds with fast incremental rebuilds.
+[profile.desktop]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

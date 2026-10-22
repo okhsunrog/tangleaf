@@ -4,6 +4,17 @@ server_target := "x86_64-unknown-linux-musl"
 server_release_dir := "release-server"
 server_archive := "notes-server-release.tar.gz"
 
+# Run inside direnv or `nix develop`; keep normal Cargo build caches.
+build-desktop:
+    vp build
+    cargo build --locked -p tangleaf --bin tangleaf --profile desktop --features tauri/custom-protocol
+
+# Install the launcher once; later builds replace the binary it launches.
+install-desktop: build-desktop
+    bash nix/install-desktop.sh
+
+update-desktop: install-desktop
+
 # Debug APK with the dev config: optimized Rust, debug assertions, WebView inspection,
 # global Tauri API and a relaxed script-src so the MCP bridge can run scripts.
 build-android-debug:
