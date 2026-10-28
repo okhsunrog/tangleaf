@@ -264,6 +264,26 @@ pub enum ChatTurn {
 
 #[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatSourceTarget {
+    Page {
+        uuid: uuid::Uuid,
+    },
+    Block {
+        uuid: uuid::Uuid,
+        #[serde(rename = "pageUuid")]
+        page_uuid: uuid::Uuid,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
+pub struct ChatSource {
+    pub target: ChatSourceTarget,
+    pub title: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEvent {
     TextDelta {
         text: String,
@@ -280,6 +300,9 @@ pub enum ChatEvent {
     ToolEnd {
         id: String,
         result: String,
+    },
+    Sources {
+        sources: Vec<ChatSource>,
     },
     Done {
         text: String,

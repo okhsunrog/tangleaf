@@ -34,7 +34,11 @@ Workflow:
    - `find_backlinks` for "who points at this?",
    - `neighbors` for undirected graph walks,
    - `get_content` for one page or block.
-5. Cite page/block UUIDs in your final answer.
+5. Cite supporting sources immediately after each claim using [@UUID], where UUID is the
+   exact page or block UUID returned by a tool in this request. The UI turns these markers
+   into numbered links. Reuse the same UUID for repeated citations. Do not write bare UUIDs,
+   invent citation numbers, or cite items you have not retrieved. Prefer the specific block
+   supporting the claim over a whole-page citation.
 6. If nothing relevant found, say so plainly. Do not fabricate.
 
 When calling a search tool, always write a fully self-contained query that resolves any references
@@ -821,8 +825,15 @@ async fn run_chat_stream_with_model(
     query_rewriting_enabled: bool,
 ) -> Result<String, AgentError> {
     let rewriter = QueryRewriter::new(&history, query_rewriting_enabled, query_rewriter_config);
+    let notes = retrieval.notes().clone();
+    let mut sources = crate::sources::SourceRegistry::default();
     let agent = build_agent(model, retrieval, rewriter, writer, active_content_uuid)?;
     let history: Vec<Message> = history.into_iter().map(chat_turn_message).collect();
+
+    // An explicit empty registry distinguishes verified-source streams from older servers.
+    emit(ChatEvent::Sources {
+        sources: Vec::new(),
+    });
 
     let mut stream = agent.prompt(message).history(history).max_turns(8).stream();
 
@@ -866,6 +877,11 @@ async fn run_chat_stream_with_model(
                     id: tool_result.call.to_string(),
                     result,
                 });
+                match sources.register(&notes, &tool_result).await {
+                    Ok(Some(sources)) => emit(ChatEvent::Sources { sources }),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(?error, "could not resolve citation metadata"),
+                }
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 let usage = response.usage;
@@ -1016,6 +1032,14 @@ mod tests {
         let events = events.lock().unwrap();
         assert!(events.iter().any(|event| matches!(event, ChatEvent::ToolStart { id, name, .. } if id == "call_list" && name == "list_pages")));
         assert!(events.iter().any(|event| matches!(event, ChatEvent::ToolEnd { id, result } if id == "call_list" && result.contains("Migration test"))));
+        let source_position = events.iter().position(|event| matches!(event,
+            ChatEvent::Sources { sources } if sources.len() == 1 && sources[0].title == "Migration test"
+        )).expect("retrieved pages are published as structured citation sources");
+        let text_position = events
+            .iter()
+            .position(|event| matches!(event, ChatEvent::TextDelta { .. }))
+            .unwrap();
+        assert!(source_position < text_position);
         assert!(
             events.iter().any(
                 |event| matches!(event, ChatEvent::TextDelta { text } if text == "Notes ready.")

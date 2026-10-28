@@ -7,4 +7,5 @@ pub mod embed;
 pub mod extract;
 mod failure;
 pub mod retrieval;
+mod sources;
 pub mod store;

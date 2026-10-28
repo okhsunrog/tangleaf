@@ -386,7 +386,15 @@ export type ChangeSet = {
 	historyChanged: boolean,
 };
 
-export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
+export type ChatEvent = { kind: "text_delta"; text: string } | { kind: "reasoning"; text: string } | { kind: "tool_start"; id: string; name: string; args: unknown } | { kind: "tool_end"; id: string; result: string } | { kind: "sources"; sources: ChatSource[] } | { kind: "done"; text: string } | { kind: "error"; message: string } | { kind: "usage"; inputTokens: number; outputTokens: number; totalTokens: number } | { kind: "cancelled" };
+
+export type ChatSource = {
+	target: ChatSourceTarget,
+	title: string,
+	snippet: string,
+};
+
+export type ChatSourceTarget = { kind: "page"; uuid: string } | { kind: "block"; uuid: string; pageUuid: string };
 
 export type ChatTurn = { role: "user"; text: string } | { role: "assistant"; text: string };
 
