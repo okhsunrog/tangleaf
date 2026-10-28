@@ -215,6 +215,8 @@ impl HttpTransport {
         let response = self
             .client
             .post(self.endpoint("v1/chat")?)
+            // Header negotiation keeps the existing strict JSON body compatible with older servers.
+            .header("x-tangleaf-chat-sources", "1")
             .bearer_auth(&self.token)
             .timeout(std::time::Duration::from_secs(300))
             .json(&Request {
@@ -526,6 +528,61 @@ fn transport_error_from_response(status: StatusCode, body: &str) -> TransportErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn chat_negotiates_source_events_without_changing_the_legacy_request_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if request.len() < end + 4 + length {
+                        continue;
+                    }
+                    assert!(headers.contains("x-tangleaf-chat-sources: 1"));
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                    assert_eq!(
+                        body,
+                        serde_json::json!({"history": [], "message": "charging?", "allowWrites": false, "activeContentUuid": null})
+                    );
+                    break;
+                }
+            }
+            let body = "event: chat\ndata: {\"kind\":\"sources\",\"sources\":[]}\n\nevent: chat\ndata: {\"kind\":\"done\",\"text\":\"answer\"}\n\n";
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let transport = HttpTransport::new(url, "test-token").unwrap();
+        let mut events = Vec::new();
+        let answer = transport
+            .chat_stream(
+                Vec::new(),
+                "charging?".into(),
+                false,
+                None,
+                CancellationToken::new(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(answer, "answer");
+        assert!(matches!(events.first(), Some(ChatEvent::Sources { .. })));
+    }
 
     #[tokio::test]
     async fn chat_event_stream_accepts_utf8_split_between_network_chunks() {

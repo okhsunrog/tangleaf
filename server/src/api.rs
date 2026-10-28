@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -380,6 +380,7 @@ async fn search(
 async fn chat(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(request): Json<ChatRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
     let ai = state
@@ -392,9 +393,16 @@ async fn chat(
     let error_emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let error_for_emit = error_emitted.clone();
     let user_id = user.0.id.clone();
+    // Older clients reject unknown ChatEvent variants, so source events require an opt-in.
+    let include_sources = headers
+        .get("x-tangleaf-chat-sources")
+        .is_some_and(|value| value == "1");
     tokio::spawn(async move {
         let event_sender = sender.clone();
         let emit = move |event| {
+            if !include_sources && matches!(&event, ChatEvent::Sources { .. }) {
+                return;
+            }
             if matches!(&event, ChatEvent::Error { .. }) {
                 error_for_emit.store(true, std::sync::atomic::Ordering::Release);
             }
