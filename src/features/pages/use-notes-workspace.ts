@@ -364,6 +364,9 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
           }
           const page = await getPageByTitle(target.title);
           content = page ? { kind: "page", record: page } : null;
+        } else if (target.kind === "page_id") {
+          const page = await getPage(target.uuid);
+          content = page ? { kind: "page", record: page } : null;
         } else {
           const block = await getBlock(target.uuid);
           content = block ? { kind: "block", record: block } : null;
@@ -373,7 +376,9 @@ export function useNotesWorkspace(ready: boolean, showEditor: () => void) {
             "open",
             target.kind === "page"
               ? `Page “${target.title}” was not found.`
-              : `Block ${target.uuid} was not found.`,
+              : target.kind === "page_id"
+                ? "The source note is no longer available."
+                : "The source block is no longer available.",
           );
           return;
         }

@@ -14,6 +14,7 @@ import type {
   BlockContent,
   BlockStyle,
   ChatEvent,
+  ChatSource,
   CommandError,
   CompletionProtocol,
   Content,
@@ -78,6 +79,7 @@ export type {
   BlockContent,
   BlockStyle,
   ChatEvent,
+  ChatSource,
   CompletionProtocol,
   Content,
   ContentRevision,
@@ -197,6 +199,8 @@ export type ChatTurn = {
   role: "user" | "assistant";
   text: string;
   tools?: ToolCallView[];
+  /** Undefined identifies conversations from servers without structured sources. */
+  sources?: ChatSource[];
   usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 };
 

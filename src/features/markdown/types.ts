@@ -20,6 +20,10 @@ export type MarkdownOpenDisposition = "current" | "adjacent";
 
 export type MarkdownLinkTarget =
   | {
+      kind: "page_id";
+      uuid: string;
+    }
+  | {
       kind: "page";
       title: string;
     }

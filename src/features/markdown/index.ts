@@ -52,6 +52,7 @@ export {
   blockTargetHref,
   classifyMarkdownUrl,
   pageTargetHref,
+  pageIdTargetHref,
   safeMarkdownUrlTransform,
   type ClassifiedMarkdownUrl,
   type MarkdownBlockedUrlReason,

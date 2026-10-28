@@ -3,6 +3,7 @@ import {
   blockTargetHref,
   classifyMarkdownUrl,
   pageTargetHref,
+  pageIdTargetHref,
   safeMarkdownUrlTransform,
 } from "./url-policy";
 
@@ -19,6 +20,11 @@ describe("Markdown URL policy", () => {
       kind: "allowed",
       href: `notes-block:${BLOCK_UUID}`,
       target: { kind: "block", uuid: BLOCK_UUID },
+    });
+    expect(classifyMarkdownUrl(pageIdTargetHref(BLOCK_UUID.toUpperCase()))).toEqual({
+      kind: "allowed",
+      href: `notes-page-id:${BLOCK_UUID}`,
+      target: { kind: "page_id", uuid: BLOCK_UUID },
     });
   });
 
@@ -55,6 +61,7 @@ describe("Markdown URL policy", () => {
       kind: "blocked",
       reason: "invalid_internal_target",
     });
+    expect(classifyMarkdownUrl("notes-page-id:not-a-uuid").kind).toBe("blocked");
     expect(classifyMarkdownUrl("notes-page:line%0Abreak")).toEqual({
       kind: "blocked",
       reason: "invalid_internal_target",

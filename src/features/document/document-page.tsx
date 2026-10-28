@@ -27,6 +27,7 @@ import { BusyIndicator } from "@/components/ui/busy-indicator";
 import type { BlockAnchor } from "@/features/markdown/rehype-block-anchors";
 import type { DocumentRange } from "./document-codec";
 import { useSaveAcknowledgement } from "@/features/pages/save-acknowledgement";
+import { highlightNavigationTarget } from "@/lib/navigation-highlight";
 
 type Props = {
   editorSession?: DocumentEditorSession;
@@ -367,6 +368,7 @@ export function DocumentReadingSurface({
     );
     if (!element) return;
     element.scrollIntoView({ block: "center", behavior: "instant" });
+    highlightNavigationTarget(element);
     revealed.current = navigation;
   }, [navigation, markdown]);
   if (!markdown.trim()) {

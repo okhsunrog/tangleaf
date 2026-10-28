@@ -742,6 +742,13 @@ html::before {
     padding-left: 0.75rem;
   }
 
+  .navigation-target-highlight {
+    background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+    outline: 2px solid color-mix(in oklab, var(--primary) 40%, transparent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
   .assistant-markdown a {
     color: var(--primary);
     text-decoration: underline;

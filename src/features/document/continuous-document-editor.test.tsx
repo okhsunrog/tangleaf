@@ -64,6 +64,7 @@ describe("ContinuousDocumentEditor", () => {
     expect(view.state.doc.toString()).toBe("First\n\nTarget");
     expect(view.state.selection.main.from).toBe(0);
     expect(view.hasFocus).toBe(false);
+    expect(container.querySelector(".navigation-target-highlight")?.textContent).toBe("Target");
     expect(onChange).not.toHaveBeenCalled();
     const count = scroll.mock.calls.length;
     await act(async () => root.render(render(0)));

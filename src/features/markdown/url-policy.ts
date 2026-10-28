@@ -2,6 +2,7 @@ import type { MarkdownLinkTarget } from "./types";
 import { safeMarkdownImageSourceTransform } from "./image-policy";
 
 const PAGE_HREF_PREFIX = "notes-page:";
+const PAGE_ID_HREF_PREFIX = "notes-page-id:";
 const BLOCK_HREF_PREFIX = "notes-block:";
 const MAX_URL_LENGTH = 8_192;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -33,6 +34,10 @@ export function blockTargetHref(uuid: string): string {
   return `${BLOCK_HREF_PREFIX}${encodeURIComponent(uuid.toLowerCase())}`;
 }
 
+export function pageIdTargetHref(uuid: string): string {
+  return `${PAGE_ID_HREF_PREFIX}${encodeURIComponent(uuid.toLowerCase())}`;
+}
+
 export function classifyMarkdownUrl(rawUrl: string): ClassifiedMarkdownUrl {
   if (!rawUrl) return { kind: "blocked", reason: "empty" };
   if (rawUrl.length > MAX_URL_LENGTH) return { kind: "blocked", reason: "too_long" };
@@ -50,16 +55,27 @@ export function classifyMarkdownUrl(rawUrl: string): ClassifiedMarkdownUrl {
     };
   }
 
-  if (rawUrl.startsWith(BLOCK_HREF_PREFIX)) {
-    const uuid = decodeInternalTarget(rawUrl.slice(BLOCK_HREF_PREFIX.length));
+  const uuidPrefix = rawUrl.startsWith(PAGE_ID_HREF_PREFIX)
+    ? PAGE_ID_HREF_PREFIX
+    : rawUrl.startsWith(BLOCK_HREF_PREFIX)
+      ? BLOCK_HREF_PREFIX
+      : null;
+  if (uuidPrefix) {
+    const uuid = decodeInternalTarget(rawUrl.slice(uuidPrefix.length));
     if (!uuid || !UUID.test(uuid)) {
       return { kind: "blocked", reason: "invalid_internal_target" };
     }
     const normalizedUuid = uuid.toLowerCase();
     return {
       kind: "allowed",
-      href: blockTargetHref(normalizedUuid),
-      target: { kind: "block", uuid: normalizedUuid },
+      href:
+        uuidPrefix === PAGE_ID_HREF_PREFIX
+          ? pageIdTargetHref(normalizedUuid)
+          : blockTargetHref(normalizedUuid),
+      target: {
+        kind: uuidPrefix === PAGE_ID_HREF_PREFIX ? "page_id" : "block",
+        uuid: normalizedUuid,
+      },
     };
   }
 

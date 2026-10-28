@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { useConfirmation } from "@/app/confirmation";
-import { cancelChat, chatStream, type ChatEvent, type ChatTurn } from "@/lib/api";
+import { cancelChat, chatStream, type ChatEvent, type ChatSource, type ChatTurn } from "@/lib/api";
 import { DebouncedAction } from "@/lib/debounced-action";
 import {
   assistantSessionReducer,
@@ -113,11 +113,16 @@ export function useAssistantController() {
     }
   }, [confirm]);
 
+  const resolveSources = useCallback((turn: ChatTurn, sources: ChatSource[]) => {
+    dispatch({ type: "resolve_sources", turn, sources });
+  }, []);
+
   return {
     state,
     setInput: (input: string) => dispatch({ type: "set_input", input }),
     send,
     toggleAllowWrites,
+    resolveSources,
     clear: () => {
       dispatch({ type: "clear" });
       if (!stateRef.current.busy) localStorage.removeItem(CHAT_STORAGE_KEY);

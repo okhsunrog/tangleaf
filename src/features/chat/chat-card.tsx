@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
-import { ArrowUp, CheckCircle2, PencilLine, Sparkles, Square, Trash2, Wrench } from "lucide-react";
+import { ArrowUp, PencilLine, Sparkles, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { pageDisplayTitle } from "@/features/journal/journal-date";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -7,6 +7,7 @@ import type { MarkdownOpenHandler } from "@/features/markdown";
 import type { Page } from "@/lib/api";
 import { scrollBehavior } from "@/lib/motion";
 import type { AssistantController } from "./use-assistant-controller";
+import { ToolActivity } from "./tool-activity";
 const MarkdownResponse = lazy(() => import("@/features/chat/markdown-response"));
 
 export function ChatCard({
@@ -108,33 +109,21 @@ export function ChatCard({
                   <Sparkles className="size-3" /> notes assistant
                 </div>
               )}
-              {t.tools && t.tools.length > 0 && (
-                <ul className="mb-2 space-y-1">
-                  {t.tools.map((tool, j) => (
-                    <li
-                      key={j}
-                      className="flex items-start gap-2 rounded-sm bg-muted px-2 py-1 text-xs"
-                    >
-                      {tool.result ? (
-                        <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-emerald-500" />
-                      ) : (
-                        <Wrench className="mt-0.5 size-3 shrink-0 animate-pulse eink:animate-none" />
-                      )}
-                      <span className="min-w-0 break-all font-mono">
-                        {tool.name}(
-                        <span className="text-muted-foreground">{JSON.stringify(tool.args)}</span>)
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+              {t.tools && (
+                <ToolActivity tools={t.tools} busy={chatBusy && i === chatLog.length - 1} />
               )}
               {t.role === "assistant" ? (
                 <Suspense
-                  fallback={
-                    <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>
-                  }
+                  fallback={<p className="text-[13px] text-muted-foreground">Loading response…</p>}
                 >
-                  <MarkdownResponse onOpenLink={onOpenMarkdownLink}>{t.text}</MarkdownResponse>
+                  <MarkdownResponse
+                    onOpenLink={onOpenMarkdownLink}
+                    sources={t.sources}
+                    streaming={chatBusy && i === chatLog.length - 1}
+                    onSourcesResolved={(sources) => controller.resolveSources(t, sources)}
+                  >
+                    {t.text}
+                  </MarkdownResponse>
                 </Suspense>
               ) : (
                 <p className="whitespace-pre-wrap text-[13px] leading-relaxed">{t.text}</p>

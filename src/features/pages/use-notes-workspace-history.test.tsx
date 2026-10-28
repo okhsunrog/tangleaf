@@ -24,6 +24,8 @@ import { useNotesWorkspace } from "./use-notes-workspace";
 
 const api = vi.hoisted(() => ({
   getPage: vi.fn(),
+  getBlock: vi.fn(),
+  getContainingPage: vi.fn(),
   getHistoryStatus: vi.fn(),
   undo: vi.fn(),
   redo: vi.fn(),
@@ -68,6 +70,8 @@ beforeAll(() => {
 
 beforeEach(async () => {
   api.getPage.mockReset().mockResolvedValue(page);
+  api.getBlock.mockReset().mockResolvedValue(null);
+  api.getContainingPage.mockReset().mockResolvedValue(page);
   api.getHistoryStatus.mockReset().mockResolvedValue(initialHistory);
   api.undo.mockReset().mockResolvedValue("empty");
   api.redo.mockReset().mockResolvedValue("empty");
@@ -98,6 +102,39 @@ beforeEach(async () => {
       </QueryClientProvider>,
     );
   });
+});
+
+it("opens citation page IDs after a rename, and block IDs at their exact location, without hiding the dock", async () => {
+  useWorkspaceStore
+    .getState()
+    .dispatch({ type: "set_dock_visibility", visibility: DockVisibility.Open });
+  const dock = useWorkspaceStore.getState().assistantDock;
+  await act(async () =>
+    workspace.openMarkdownLink({
+      context: { kind: "assistant" },
+      disposition: "current",
+      target: { kind: "page_id", uuid: page.uuid },
+    }),
+  );
+  expect(api.getPage).toHaveBeenCalledWith(page.uuid);
+  expect(workspace.activePane.content).toMatchObject({
+    kind: PaneContentKind.Page,
+    pageUuid: page.uuid,
+  });
+  api.getBlock.mockResolvedValue({ uuid: "source-block", pageUuid: page.uuid });
+  await act(async () =>
+    workspace.openMarkdownLink({
+      context: { kind: "assistant" },
+      disposition: "current",
+      target: { kind: "block", uuid: "source-block" },
+    }),
+  );
+  expect(workspace.activePane.content).toMatchObject({
+    kind: PaneContentKind.Page,
+    pageUuid: page.uuid,
+    blockUuid: "source-block",
+  });
+  expect(useWorkspaceStore.getState().assistantDock).toEqual(dock);
 });
 
 it.each([

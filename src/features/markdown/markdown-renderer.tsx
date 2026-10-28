@@ -67,7 +67,7 @@ const MARKDOWN_SANITIZE_SCHEMA: MarkdownSanitizeSchema = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "notes-page", "notes-block"],
+    href: [...(defaultSchema.protocols?.href ?? []), "notes-page", "notes-page-id", "notes-block"],
     src: [...(defaultSchema.protocols?.src ?? []), "notes-attachment"],
   },
 };

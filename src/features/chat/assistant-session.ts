@@ -1,4 +1,4 @@
-import type { ChatEvent, ChatTurn } from "@/lib/api";
+import type { ChatEvent, ChatSource, ChatTurn } from "@/lib/api";
 
 export type AssistantSessionState = Readonly<{
   input: string;
@@ -15,6 +15,7 @@ export type AssistantSessionAction =
   | { readonly type: "event"; readonly event: ChatEvent }
   | { readonly type: "fail"; readonly message: string }
   | { readonly type: "finish"; readonly requestId: string }
+  | { readonly type: "resolve_sources"; readonly turn: ChatTurn; readonly sources: ChatSource[] }
   | { readonly type: "clear" };
 
 export function createAssistantSession(turns: readonly ChatTurn[] = []): AssistantSessionState {
@@ -68,6 +69,15 @@ export function assistantSessionReducer(
       };
     case "clear":
       return state.busy ? state : { ...state, turns: [] };
+    case "resolve_sources":
+      return {
+        ...state,
+        turns: state.turns.map((turn) =>
+          turn === action.turn && turn.sources === undefined
+            ? { ...turn, sources: action.sources }
+            : turn,
+        ),
+      };
   }
 }
 
@@ -101,6 +111,9 @@ function applyAssistantEvent(turns: readonly ChatTurn[], event: ChatEvent): read
       updated.tools = (updated.tools ?? []).map((tool) =>
         tool.id === event.id ? { ...tool, result: event.result } : tool,
       );
+      break;
+    case "sources":
+      updated.sources = event.sources;
       break;
     case "usage":
       updated.usage = {

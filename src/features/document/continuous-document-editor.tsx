@@ -9,9 +9,16 @@ import {
   EditorState,
   Prec,
   StateEffect,
+  StateField,
   Transaction,
 } from "@codemirror/state";
-import { drawSelection, EditorView, keymap } from "@codemirror/view";
+import {
+  Decoration,
+  type DecorationSet,
+  drawSelection,
+  EditorView,
+  keymap,
+} from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { useResolvedDisplay } from "@/app/appearance";
 import type { MarkdownOpenHandler } from "@/features/markdown";
@@ -22,6 +29,7 @@ import { resolveDocumentLinkClickDisposition } from "./document-link-navigation"
 import { notesLinkMarkdownExtension } from "./notes-link-markdown-extension";
 import { markdownFormatting } from "@/features/editor/markdown-formatting";
 import { documentLinkCompletion } from "./document-completion";
+import { NAVIGATION_HIGHLIGHT_MS } from "@/lib/navigation-highlight";
 
 export type { DocumentAuthoringMode } from "./document-live-preview";
 
@@ -47,6 +55,28 @@ type Props = {
 };
 
 const externalDocumentUpdate = Annotation.define<boolean>();
+const setNavigationHighlight = StateEffect.define<{ from: number; to: number } | null>();
+const navigationHighlight = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let next = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (effect.is(setNavigationHighlight)) {
+        next =
+          effect.value && effect.value.to > effect.value.from
+            ? Decoration.set([
+                Decoration.mark({ class: "navigation-target-highlight" }).range(
+                  effect.value.from,
+                  effect.value.to,
+                ),
+              ])
+            : Decoration.none;
+      }
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
 const MODE_RETRY_DELAYS_MS = [0, 16, 32, 64, 128, 256] as const;
 
 const documentEditorTheme = EditorView.theme({
@@ -138,6 +168,7 @@ export function ContinuousDocumentEditor({
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const revealed = useRef<{ uuid: string; request: number } | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const initialValueRef = useRef(value);
   const callbacksRef = useRef({ onChange, onCompositionEnd, onBlur, onOpenMarkdownLink, pageUuid });
   const modeCompartmentRef = useRef(new Compartment());
@@ -197,6 +228,7 @@ export function ContinuousDocumentEditor({
       }),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       history(),
+      navigationHighlight,
       markdownFormatting(),
       documentLinkCompletion,
       EditorView.lineWrapping,
@@ -305,6 +337,7 @@ export function ContinuousDocumentEditor({
     if (editorSession?.focused && !readOnly) view.focus();
     applyPendingModeRef.current = applyPendingMode;
     return () => {
+      view.dispatch({ effects: setNavigationHighlight.of(null) });
       if (editorSession) {
         editorSession.state = view.state;
         editorSession.focused = view.hasFocus;
@@ -313,6 +346,7 @@ export function ContinuousDocumentEditor({
       clearModeRetry();
       applyPendingModeRef.current = () => undefined;
       viewRef.current = null;
+      clearTimeout(highlightTimer.current);
       view.destroy();
     };
   }, []);
@@ -359,7 +393,17 @@ export function ContinuousDocumentEditor({
     )
       return;
     const from = Math.min(navigation.from, view.state.doc.length);
-    view.dispatch({ effects: EditorView.scrollIntoView(from, { y: "center" }) });
+    const to = Math.min(navigation.to, view.state.doc.length);
+    clearTimeout(highlightTimer.current);
+    view.dispatch({
+      effects: [
+        EditorView.scrollIntoView(from, { y: "center" }),
+        setNavigationHighlight.of({ from, to }),
+      ],
+    });
+    highlightTimer.current = setTimeout(() => {
+      if (viewRef.current === view) view.dispatch({ effects: setNavigationHighlight.of(null) });
+    }, NAVIGATION_HIGHLIGHT_MS);
     revealed.current = navigation;
   }, [navigation]);
 

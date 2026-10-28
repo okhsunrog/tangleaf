@@ -48,6 +48,11 @@ describe("document block navigation", () => {
       );
     render(0);
     expect(scroll.mock.instances).toEqual([container.querySelector('[data-block-uuid="second"]')]);
+    expect(
+      container
+        .querySelector('[data-block-uuid="second"]')
+        ?.classList.contains("navigation-target-highlight"),
+    ).toBe(true);
     render(0);
     expect(scroll.mock.calls).toHaveLength(1);
     render(1);

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assistantSessionReducer, createAssistantSession } from "./assistant-session";
+import {
+  assistantSessionReducer,
+  boundedAssistantHistory,
+  createAssistantSession,
+} from "./assistant-session";
 
 describe("Assistant session controller state", () => {
   it("preserves input independently from any dock host", () => {
@@ -44,5 +48,42 @@ describe("Assistant session controller state", () => {
     state = assistantSessionReducer(state, { type: "finish", requestId: "request-1" });
     expect(state.busy).toBe(false);
     expect(state.turns[state.turns.length - 1]?.text).toContain("Stopped");
+  });
+
+  it("retains source snapshots in stored turns while sending only the original text to the model", () => {
+    let state = assistantSessionReducer(createAssistantSession(), {
+      type: "start",
+      message: "charging?",
+      requestId: "r",
+    });
+    state = assistantSessionReducer(state, {
+      type: "event",
+      event: {
+        kind: "sources",
+        sources: [
+          { target: { kind: "page", uuid: "source-id" }, title: "Charging", snippet: "BQ25756" },
+        ],
+      },
+    });
+    state = assistantSessionReducer(state, {
+      type: "event",
+      event: { kind: "text_delta", text: "BQ25756 [@source-id]" },
+    });
+    const restored = createAssistantSession(JSON.parse(JSON.stringify(state.turns)));
+    expect(restored.turns[1]?.sources?.[0]?.title).toBe("Charging");
+    expect(boundedAssistantHistory(restored.turns)).toEqual([
+      { role: "user", text: "charging?" },
+      { role: "assistant", text: "BQ25756 [@source-id]" },
+    ]);
+  });
+
+  it("ignores a stale legacy resolution after clearing the conversation", () => {
+    const turn = { role: "assistant", text: "old" } as const;
+    const state = assistantSessionReducer(createAssistantSession(), {
+      type: "resolve_sources",
+      turn,
+      sources: [],
+    });
+    expect(state.turns).toEqual([]);
   });
 });

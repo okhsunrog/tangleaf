@@ -125,6 +125,12 @@ describe("outliner block navigation", () => {
       container.querySelector('[data-block-uuid="block-349"]'),
     );
     expect(container.querySelector('[data-editing]:not([data-editing=""])')).toBeNull();
+    const target = container.querySelector('[data-block-uuid="block-349"]');
+    expect(target?.classList.contains("navigation-target-highlight")).toBe(true);
+    act(() => {
+      vi.advanceTimersByTime(1_800);
+    });
+    expect(target?.classList.contains("navigation-target-highlight")).toBe(false);
     const count = scroll.mock.calls.length;
     render(blocks, "block-349", 1);
     expect(scroll.mock.calls.length).toBe(count + 1);

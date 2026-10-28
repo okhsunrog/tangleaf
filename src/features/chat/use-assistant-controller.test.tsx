@@ -57,6 +57,30 @@ afterEach(() => {
 });
 
 describe("assistant stream inactivity", () => {
+  it("persists resolved legacy source snapshots and restores their typed targets", async () => {
+    window.localStorage.setItem(
+      "tangleaf.chat.v1",
+      JSON.stringify([{ role: "assistant", text: "BQ25756 [source-id]" }]),
+    );
+    await renderController();
+    const turn = controller?.state.turns[0];
+    if (!turn) throw new Error("stored conversation missing");
+    const sources = [
+      {
+        target: { kind: "block" as const, uuid: "source-id", pageUuid: "page-id" },
+        title: "Charging",
+        snippet: "BQ25756",
+      },
+    ];
+    act(() => controller?.resolveSources(turn, sources));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    unmount?.();
+    await renderController();
+    expect(controller?.state.turns[0]?.sources).toEqual(sources);
+  });
+
   it("extends the deadline on every event and fails a silent stream", async () => {
     await renderController();
     await startRequest();

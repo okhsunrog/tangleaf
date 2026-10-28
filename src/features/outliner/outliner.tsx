@@ -20,6 +20,7 @@ import { createBlock, getPageRenderSnapshot, type Block, type Page } from "@/lib
 import { queryKeys, refreshQueries } from "@/lib/query";
 import { profileUiMethods, uiProfilePoint, uiProfileSpan } from "@/lib/ui-profile";
 import { BlockNode } from "./block-node";
+import { highlightNavigationTarget } from "@/lib/navigation-highlight";
 import { measureOutlineRow } from "./row-measurement";
 import { OutlinerProvider, useOutliner } from "./outliner-store";
 
@@ -240,6 +241,7 @@ function VirtualOutline({
     );
     if (!element) return;
     if (!virtualize) element.scrollIntoView({ block: "center", behavior: "instant" });
+    highlightNavigationTarget(element);
     revealed.current = { uuid: targetBlockUuid, request: navigationRequest };
   }, [
     targetBlockUuid,
