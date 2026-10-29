@@ -296,3 +296,9 @@ The core architecture is implemented, but this is still a pre-release project. T
 - signed production packages and end-to-end UI/accessibility regression coverage on desktop and real Android hardware.
 
 NixOS packages and build instructions: [docs/nixos.md](docs/nixos.md).
+
+The Linux Nix runtime temporarily pins WebKitGTK 2.54.2 from Nixpkgs PR #578459
+through `nixpkgs-webkit`. This fixes Skia flashes at the end of CSS opacity and
+transform animations (WebKit #321993), without disabling Skia. The same override
+is used by the development shell, packaged application and `desktop-runtime`.
+Remove the extra pin when the main `nixpkgs` input provides this fix.
