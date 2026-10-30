@@ -2,6 +2,8 @@
   description = "Tangleaf desktop application";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/fe13242281a67641c0102cdb1087f0ebe586c7df";
+    # WebKitGTK 2.54.2 fixes Skia animation-completion flashes.
+    nixpkgs-webkit.url = "github:NixOS/nixpkgs/512527cdaf7eab2f9e4c5e6e3935c1648d156621";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -12,6 +14,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-webkit,
       crane,
       rust-overlay,
     }:
@@ -31,7 +34,11 @@
           inherit craneLib;
           src = self;
         };
-      pkgs = import nixpkgs { inherit system; };
+      webkitPkgs = import nixpkgs-webkit { inherit system; };
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ (_final: _prev: { webkitgtk_4_1 = webkitPkgs.webkitgtk_4_1; }) ];
+      };
       desktopLibraries = import ./nix/desktop-libraries.nix { inherit pkgs; };
     in
     {
