@@ -31,7 +31,7 @@ export function RenderedBlock({
 }: RenderedBlockProps) {
   if (block.style.kind === "divider") return <hr className="my-4 border-border/70" />;
   if (!block.markdown && block.style.kind !== "task") {
-    return <span className="text-sm text-muted-foreground/45">Start writing…</span>;
+    return <div className="min-h-6" />;
   }
   if (block.style.kind === "code") {
     return (
@@ -69,11 +69,7 @@ export function RenderedBlock({
       resolveImage={resolveImage}
     />
   );
-  const listContent = block.markdown ? (
-    compactMarkdown
-  ) : (
-    <span className="text-muted-foreground/45">Start writing…</span>
-  );
+  const listContent = block.markdown ? compactMarkdown : null;
 
   if (block.style.kind === "heading_1") {
     return <h2 className="mt-5 mb-2 text-2xl font-semibold tracking-tight">{inlineMarkdown}</h2>;

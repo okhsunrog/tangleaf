@@ -130,10 +130,10 @@ describe("RenderedBlock Markdown integration", () => {
     expect(html).not.toContain('role="checkbox"');
   });
 
-  it("keeps task chrome for an empty task block", () => {
+  it("keeps task chrome without placeholder text for an empty task block", () => {
     const html = render("", { kind: "task", state: "todo" });
 
     expect(html).toContain('role="checkbox"');
-    expect(html).toContain("Start writing…");
+    expect(html).not.toContain("Start writing");
   });
 });
