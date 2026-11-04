@@ -24,6 +24,10 @@ profile `desktop` (no LTO, 16 codegen units, incremental compilation), then inst
 to this checkout's `target/desktop/tangleaf` (or Cargo's configured target directory).
 The app ID and existing user data locations stay the same.
 
+The build runs `vp run tauri build -- --profile desktop --locked`. Tauri invokes
+the configured `beforeBuildCommand` to build the frontend and enables its bundled
+asset protocol. Installer packages remain disabled by the default Tauri config.
+
 For subsequent changes:
 
 ```sh
