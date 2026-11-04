@@ -29,6 +29,7 @@ type Props = {
   page: Page;
   targetBlockUuid?: string | null;
   focusRequest?: number;
+  focusEdge?: "first" | "last";
   navigationRequest?: number;
   onOpenMarkdownLink: MarkdownOpenHandler;
   presentation?: PagePresentation;
@@ -48,6 +49,7 @@ export function Outliner({
   page,
   targetBlockUuid = null,
   focusRequest = 0,
+  focusEdge = "first",
   navigationRequest = 0,
   onOpenMarkdownLink,
   presentation = PagePresentation.Editing,
@@ -90,6 +92,7 @@ export function Outliner({
         targetBlockUuid={targetBlockUuid}
         navigationRequest={navigationRequest}
         focusFirstBlockRequest={focusRequest}
+        focusEdge={focusEdge}
       />
     </OutlinerProvider>
   );
@@ -99,12 +102,14 @@ function VirtualOutline({
   blocks,
   page,
   focusFirstBlockRequest,
+  focusEdge,
   targetBlockUuid,
   navigationRequest,
 }: {
   blocks: readonly Block[];
   page: Page;
   focusFirstBlockRequest: number;
+  focusEdge: "first" | "last";
   targetBlockUuid: string | null;
   navigationRequest: number;
 }) {
@@ -265,8 +270,9 @@ function VirtualOutline({
       return;
     }
     handledFocusRequest.current = focusFirstBlockRequest;
-    store.setEditing(rows[0].block.uuid);
-  }, [focusFirstBlockRequest, rows, store]);
+    const block = rows[focusEdge === "last" ? rows.length - 1 : 0].block;
+    store.setEditing(block.uuid, focusEdge === "last" ? block.markdown.length : undefined);
+  }, [focusFirstBlockRequest, focusEdge, rows, store]);
 
   const revealedEditor = useRef<string | null>(null);
   useLayoutEffect(() => {

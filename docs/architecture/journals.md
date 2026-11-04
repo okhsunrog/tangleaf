@@ -137,6 +137,15 @@ It is a projection over Journal pages, not a durable page and not a `PageLayout`
 rendered days stay lightweight and only the currently edited block mounts CodeMirror. Clicking a
 date heading opens that ordinary Journal page in the current or adjacent pane.
 
+The Today editor and a date opened from the calendar honor the page's stored layout: Outline uses
+the ordinary block editor, and an explicitly selected Document layout uses the continuous editor.
+They share find, writer leases, autosave and keyboard behavior with normal notes. In Outline,
+Enter creates a block and Shift+Enter inserts a line inside the current block. Opening an absent
+date stays read-only until the user activates Start writing. That explicit action ensures the day
+and its first ordinary block before accepting text, avoiding a temporary document draft and an
+editor replacement on the first autosave. An existing day resumes at the end of its last visible
+block.
+
 Journal naturally participates in the general workspace architecture:
 
 ```text
