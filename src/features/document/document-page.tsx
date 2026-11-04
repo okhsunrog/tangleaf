@@ -227,7 +227,7 @@ function LoadedDocumentPage({
   // autosave never fires then. A process-level drain reaches this draft here.
   const flushRef = useRef(flush);
   flushRef.current = flush;
-  useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
+  useEffect(() => sessions.registerFlush(() => flushRef.current(), pageUuid), [sessions, pageUuid]);
 
   const scheduleSave = useCallback(() => {
     if (!canEdit) return;

@@ -98,7 +98,7 @@ const EMPTY_SESSION: PageSessionSnapshot = Object.freeze({
 export class PageSessionRegistry {
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #listeners = new Map<string, Set<() => void>>();
-  readonly #flushes = new Set<() => Promise<unknown>>();
+  readonly #flushes = new Map<() => Promise<unknown>, string | null>();
   #nextAttemptId = 1;
 
   /**
@@ -106,8 +106,8 @@ export class PageSessionRegistry {
    * a document. The registry holds the unsaved text but not the commands that
    * persist it, so a process-wide drain has to go back through the owners.
    */
-  registerFlush(flush: () => Promise<unknown>): () => void {
-    this.#flushes.add(flush);
+  registerFlush(flush: () => Promise<unknown>, pageUuid: string | null = null): () => void {
+    this.#flushes.set(flush, pageUuid);
     return () => {
       this.#flushes.delete(flush);
     };
@@ -119,14 +119,25 @@ export class PageSessionRegistry {
    * stop the others from being stored.
    */
   async flushAll(): Promise<boolean> {
+    return this.#flushMatching(null);
+  }
+
+  /** Drain a structural edit's page without touching another pane's drafts. */
+  async flushPage(pageUuid: string): Promise<boolean> {
+    return this.#flushMatching(pageUuid);
+  }
+
+  async #flushMatching(pageUuid: string | null): Promise<boolean> {
     const results = await Promise.allSettled(
-      [...this.#flushes].map((flush) => {
-        try {
-          return Promise.resolve(flush());
-        } catch (error) {
-          return Promise.reject(error);
-        }
-      }),
+      [...this.#flushes]
+        .filter(([, owner]) => pageUuid === null || owner === null || owner === pageUuid)
+        .map(([flush]) => {
+          try {
+            return Promise.resolve(flush());
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        }),
     );
     if (results.some((result) => result.status === "rejected" || result.value === false)) {
       return false;
@@ -134,8 +145,12 @@ export class PageSessionRegistry {
     // A view can unmount after a failed save, leaving a retained draft without
     // a registered owner. Success requires acknowledgements, not just settled
     // flush callbacks, before backup or workspace replacement may continue.
-    return [...this.#sessions.values()].every(
-      ({ snapshot }) =>
+    const snapshots =
+      pageUuid === null
+        ? [...this.#sessions.values()].map(({ snapshot }) => snapshot)
+        : [this.getSnapshot(pageUuid)];
+    return snapshots.every(
+      (snapshot) =>
         snapshot.title === null &&
         snapshot.document === null &&
         Object.keys(snapshot.blocks).length === 0,

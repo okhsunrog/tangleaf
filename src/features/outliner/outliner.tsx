@@ -23,6 +23,7 @@ import { BlockNode } from "./block-node";
 import { highlightNavigationTarget } from "@/lib/navigation-highlight";
 import { measureOutlineRow } from "./row-measurement";
 import { OutlinerProvider, useOutliner } from "./outliner-store";
+import { useBlockSelection } from "./use-block-selection";
 
 type Props = {
   page: Page;
@@ -122,6 +123,7 @@ function VirtualOutline({
       ),
     [blocks, store.isCollapsed, store.layout],
   );
+  useBlockSelection(rootRef, page.uuid, blocks, rows);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -318,7 +320,9 @@ function VirtualOutline({
     <>
       <ul
         ref={rootRef}
-        className="relative"
+        tabIndex={-1}
+        aria-label="Note blocks"
+        className="relative outline-none"
         style={
           virtualize ? { height: virtualizer.getTotalSize(), contain: "layout style" } : undefined
         }
@@ -350,6 +354,9 @@ function VirtualOutline({
                 />
               ))}
       </ul>
+      <span role="status" aria-live="polite" className="sr-only">
+        {store.selectedUuids.size ? `${store.selectedUuids.size} blocks selected` : ""}
+      </span>
       {!virtualize && visibleCount < rows.length && <OutlineSkeleton />}
       {!store.readOnly && (
         <button

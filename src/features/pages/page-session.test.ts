@@ -18,6 +18,22 @@ const document = (buffer: string, revision: string) => {
 };
 
 describe("PageSessionRegistry", () => {
+  it("flushes a structural edit's page without saving or blocking on another pane", async () => {
+    const registry = new PageSessionRegistry();
+    registry.editBlock("other", "other-block", "Unsaved", persisted("Base", "r1"));
+    const other = vi.fn(async () => false);
+    registry.registerFlush(other, "other");
+    registry.editBlock("page", "block", "Mine", persisted("Base", "r1"));
+    registry.registerFlush(async () => {
+      const attempt = registry.beginBlockSave("page", "block")!;
+      registry.acknowledgeBlockSave("page", "block", attempt, persisted("Mine", "r2"));
+      return true;
+    }, "page");
+    expect(await registry.flushPage("page")).toBe(true);
+    expect(other).not.toHaveBeenCalled();
+    expect(registry.getSnapshot("other").blocks["other-block"].draft).toBe("Unsaved");
+    expect(await registry.flushAll()).toBe(false);
+  });
   it("reports failed flushes while still draining every registered owner", async () => {
     const registry = new PageSessionRegistry();
     const saved = vi.fn().mockResolvedValue(true);

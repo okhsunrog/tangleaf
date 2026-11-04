@@ -7,6 +7,7 @@ import type { Block, Page } from "@/lib/api";
 import { queryKeys } from "@/lib/query";
 import { Outliner } from "./outliner";
 import { useOutliner } from "./outliner-store";
+import { PageSessionProvider } from "@/features/pages/page-session";
 
 let editingStore: ReturnType<typeof useOutliner>;
 let nextInstance = 0;
@@ -103,13 +104,15 @@ function render(blocks: Block[], target: string | null, request = 0, readOnly = 
   act(() =>
     root.render(
       <QueryClientProvider client={client}>
-        <Outliner
-          page={page}
-          targetBlockUuid={target}
-          navigationRequest={request}
-          onOpenMarkdownLink={() => undefined}
-          readOnly={readOnly}
-        />
+        <PageSessionProvider>
+          <Outliner
+            page={page}
+            targetBlockUuid={target}
+            navigationRequest={request}
+            onOpenMarkdownLink={() => undefined}
+            readOnly={readOnly}
+          />
+        </PageSessionProvider>
       </QueryClientProvider>,
     ),
   );

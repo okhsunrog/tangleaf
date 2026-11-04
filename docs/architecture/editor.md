@@ -80,6 +80,15 @@ Outline has one primary workflow: Editing with Live Preview.
 Only the active block mounts an editor instance. Inactive blocks remain lightweight semantic React
 output; tangleaf must not mount one editor per visible block.
 
+Dragging within one block keeps native text selection. Crossing a block boundary selects a
+contiguous range of whole blocks in visible outline order. A selected parent includes its complete
+subtree, even when folded. Copy exports ordered Markdown with nesting and current local drafts;
+Escape or a new click clears the range. Backspace/Delete remove the range through the existing
+revision-guarded atomic page writer, giving one structural history action. Before that write, only
+the current page's draft owners are drained; another pane's unsaved state is left alone. Removing
+the entire range leaves one empty editable block. Selection membership uses UUIDs and the logical
+tree, so virtualization and scrolling cannot omit off-screen blocks from copy or deletion.
+
 ### Document layout
 
 Document presents the page as one continuous authoring surface even though storage remains a tree

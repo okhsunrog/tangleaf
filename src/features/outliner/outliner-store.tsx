@@ -1,12 +1,23 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MarkdownImageResolver, MarkdownOpenHandler } from "@/features/markdown";
 import type { Block, PageLayout } from "@/lib/api";
 import type { EditorState } from "@codemirror/state";
+import { expandBlockSelection } from "./block-selection-model";
 
 type Store = {
   editorStates: Map<string, EditorState>;
   editingUuid: string | null;
   setEditing: (uuid: string | null) => void;
+  selectedUuids: ReadonlySet<string>;
+  selectBlocks: (uuids: readonly string[]) => void;
   layout: PageLayout;
   readOnly: boolean;
   onOpenMarkdownLink: MarkdownOpenHandler;
@@ -49,9 +60,15 @@ export function OutlinerProvider({
   blocks: readonly Block[];
   readOnly: boolean;
 }) {
-  const [editingUuid, setEditing] = useState<string | null>(
+  const [editingUuid, setEditingUuid] = useState<string | null>(
     initialEditingRequest > 0 ? initialEditingUuid : null,
   );
+  const [selection, selectBlocks] = useState<readonly string[]>([]);
+  const selectedUuids = useMemo(() => expandBlockSelection(blocks, selection), [blocks, selection]);
+  const setEditing = useCallback((uuid: string | null) => {
+    selectBlocks([]);
+    setEditingUuid(uuid);
+  }, []);
   const [editorStates] = useState(() => new Map<string, EditorState>());
   const [collapsedUuids, setCollapsedUuids] = useState<ReadonlySet<string>>(() => {
     const collapsed = new Set<string>();
@@ -119,6 +136,8 @@ export function OutlinerProvider({
       editorStates,
       editingUuid,
       setEditing,
+      selectedUuids,
+      selectBlocks,
       layout,
       onOpenMarkdownLink,
       readOnly,
@@ -131,6 +150,8 @@ export function OutlinerProvider({
       editorStates,
       collapsedUuids,
       editingUuid,
+      setEditing,
+      selectedUuids,
       layout,
       onOpenMarkdownLink,
       parentUuids,

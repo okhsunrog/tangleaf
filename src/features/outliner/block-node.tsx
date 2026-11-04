@@ -350,7 +350,10 @@ export function BlockNode({
     if (splitPromise.current) await splitPromise.current;
     return flush();
   };
-  useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
+  useEffect(
+    () => sessions.registerFlush(() => flushRef.current(), block.pageUuid),
+    [sessions, block.pageUuid],
+  );
 
   const changeBlockStyle = async (value: string) => {
     if (!isBlockStyleKind(value) || styleBusyRef.current || readOnly) return;
@@ -813,12 +816,17 @@ export function BlockNode({
     <li
       ref={measureRef}
       style={style}
-      className="flex flex-col"
+      className={cn(
+        "flex flex-col",
+        store.selectedUuids.has(block.uuid) && "rounded-xl bg-primary/15",
+      )}
       // TanStack Virtual reads this attribute inside measureElement. Without
       // it dynamic rows keep their estimates, producing gaps or overlaps.
       data-index={virtualIndex}
       data-block-depth={depth}
       data-block-uuid={block.uuid}
+      data-block-selected={store.selectedUuids.has(block.uuid) || undefined}
+      data-block-pending={splitPreview !== null || undefined}
       data-block-style={block.style.kind}
       data-task-state={block.style.kind === "task" ? block.style.state : undefined}
     >

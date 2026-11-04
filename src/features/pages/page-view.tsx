@@ -175,7 +175,10 @@ export function PageView({
   // autosave never fires then. A process-level drain reaches this draft here.
   const flushRef = useRef(flush);
   flushRef.current = flush;
-  useEffect(() => sessions.registerFlush(() => flushRef.current()), [sessions]);
+  useEffect(
+    () => sessions.registerFlush(() => flushRef.current(), page.uuid),
+    [sessions, page.uuid],
+  );
 
   const scheduleSave = useCallback(() => {
     if (!canEdit) return;
