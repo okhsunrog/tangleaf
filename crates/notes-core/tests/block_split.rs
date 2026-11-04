@@ -65,6 +65,193 @@ async fn replay_and_compare(source: &Connection, replica: &Connection, page: uui
 }
 
 #[tokio::test]
+async fn split_into_first_child_preserves_tree_and_replays_with_history() {
+    fn assert_same_content_and_placement(actual: &db::Block, expected: &db::Block) {
+        assert_eq!(
+            (
+                actual.uuid,
+                actual.page_uuid,
+                actual.parent_uuid,
+                &actual.order_key,
+                &actual.markdown,
+                actual.style
+            ),
+            (
+                expected.uuid,
+                expected.page_uuid,
+                expected.parent_uuid,
+                &expected.order_key,
+                &expected.markdown,
+                expected.style
+            ),
+        );
+    }
+    let (_directory, connection) = database().await;
+    let store = notes_core::store::NotesStore::new(connection.clone());
+    let page = db::create_page(&connection, "Enter".into()).await.unwrap();
+    let mut original = Vec::new();
+    for (parent_uuid, markdown) in [(None, "3"), (None, "Next root")] {
+        original.push(
+            db::create_block(
+                &connection,
+                page.uuid,
+                parent_uuid,
+                None,
+                BlockStyle::Bullet,
+                markdown.into(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let source = original[0].clone();
+    for (parent_uuid, markdown) in [(source.uuid, "Tools"), (source.uuid, "Safety glasses")] {
+        original.push(
+            db::create_block(
+                &connection,
+                page.uuid,
+                Some(parent_uuid),
+                None,
+                BlockStyle::Bullet,
+                markdown.into(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let grandchild = db::create_block(
+        &connection,
+        page.uuid,
+        Some(original[2].uuid),
+        None,
+        BlockStyle::Bullet,
+        "Drill".into(),
+    )
+    .await
+    .unwrap();
+    original.push(grandchild);
+    let (_replica_directory, replica) = database().await;
+    notes_core::import_sync_snapshot(
+        &replica,
+        notes_core::export_sync_snapshot(&connection, 0)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    notes_core::configure_sync(&connection, "https://sync.example")
+        .await
+        .unwrap();
+    let history_before = db::history_status(&connection).await.unwrap().undo_count;
+
+    let split = store
+        .split_block_at(
+            source.uuid,
+            vec![
+                BlockContent {
+                    markdown: source.markdown.clone(),
+                },
+                BlockContent {
+                    markdown: String::new(),
+                },
+            ],
+            source.markdown_revision.clone(),
+            db::SplitBlockPlacement::FirstChild,
+        )
+        .await
+        .unwrap();
+    let inserted = &split.value[1];
+    assert_eq!(inserted.parent_uuid, Some(source.uuid));
+    assert!(inserted.markdown.is_empty());
+    assert_eq!(
+        db::list_block_children(&connection, page.uuid, Some(source.uuid))
+            .await
+            .unwrap()
+            .iter()
+            .map(|block| block.uuid)
+            .collect::<Vec<_>>(),
+        vec![inserted.uuid, original[2].uuid, original[3].uuid]
+    );
+    assert_eq!(
+        db::list_block_children(&connection, page.uuid, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|block| block.uuid)
+            .collect::<Vec<_>>(),
+        vec![source.uuid, original[1].uuid]
+    );
+    for block in &original {
+        let actual = db::get_block(&connection, block.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_same_content_and_placement(&actual, block);
+    }
+    assert_eq!(
+        db::history_status(&connection).await.unwrap().undo_count,
+        history_before + 1
+    );
+    replay_and_compare(&connection, &replica, page.uuid).await;
+
+    assert_eq!(
+        db::undo_history(&connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    assert!(
+        db::get_block(&connection, inserted.uuid)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for block in &original {
+        let actual = db::get_block(&connection, block.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_same_content_and_placement(&actual, block);
+    }
+    replay_and_compare(&connection, &replica, page.uuid).await;
+    assert_eq!(
+        db::redo_history(&connection).await.unwrap(),
+        db::HistoryMoveResult::Applied
+    );
+    let redone = db::get_block(&connection, inserted.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_same_content_and_placement(&redone, inserted);
+    replay_and_compare(&connection, &replica, page.uuid).await;
+
+    // Retrying an Enter against the old revision must not create another child.
+    assert!(
+        store
+            .split_block_at(
+                source.uuid,
+                vec![
+                    BlockContent {
+                        markdown: "3".into()
+                    },
+                    BlockContent {
+                        markdown: String::new()
+                    }
+                ],
+                source.markdown_revision,
+                db::SplitBlockPlacement::FirstChild
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        db::list_block_children(&connection, page.uuid, Some(source.uuid))
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn split_preserves_neighbors_and_children_and_replays_with_history() {
     let (_directory, connection) = database().await;
     let page = db::create_page(&connection, "Split".into()).await.unwrap();

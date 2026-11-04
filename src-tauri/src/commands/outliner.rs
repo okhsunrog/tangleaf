@@ -95,9 +95,15 @@ pub async fn split_block(
     uuid: uuid::Uuid,
     parts: Vec<db::BlockContent>,
     expected_revision: ContentRevision,
+    placement: Option<db::SplitBlockPlacement>,
 ) -> CommandResult<Vec<db::Block>> {
     let committed = observed_store(&app, &state)
-        .split_block(uuid, parts, expected_revision)
+        .split_block_at(
+            uuid,
+            parts,
+            expected_revision,
+            placement.unwrap_or_default(),
+        )
         .await
         .map_err(err)?;
     Ok(committed.value)

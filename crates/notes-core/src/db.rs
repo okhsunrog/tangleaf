@@ -36,13 +36,13 @@ pub use attachments::{
     get_attachment, get_attachment_image_cache, list_attachments, upsert_attachment_image_cache,
 };
 pub use blocks::{
-    BlockContent, create_block, create_block_with_ops, delete_block, delete_block_with_ops,
-    get_block, get_blocks, indent_block, indent_block_with_ops, list_block_children, move_block,
-    move_block_in_direction, move_block_in_direction_with_ops, move_block_with_ops, outdent_block,
-    outdent_block_with_ops, reorder_block, reorder_block_with_ops, set_block_content,
-    set_block_content_if_revision, set_block_content_if_revision_with_ops, set_block_style,
-    set_block_style_with_ops, set_task_state, set_task_state_with_ops, split_block,
-    split_block_with_ops,
+    BlockContent, SplitBlockPlacement, create_block, create_block_with_ops, delete_block,
+    delete_block_with_ops, get_block, get_blocks, indent_block, indent_block_with_ops,
+    list_block_children, move_block, move_block_in_direction, move_block_in_direction_with_ops,
+    move_block_with_ops, outdent_block, outdent_block_with_ops, reorder_block,
+    reorder_block_with_ops, set_block_content, set_block_content_if_revision,
+    set_block_content_if_revision_with_ops, set_block_style, set_block_style_with_ops,
+    set_task_state, set_task_state_with_ops, split_block, split_block_with_ops,
 };
 pub use document::{
     DocumentUnitDraft, MAX_DOCUMENT_DEPTH, MAX_DOCUMENT_MARKDOWN_BYTES, MAX_DOCUMENT_UNITS,

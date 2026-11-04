@@ -134,7 +134,7 @@ export const commands = {
 	setBlockContent: (uuid: string, content: BlockContent, expectedRevision: ContentRevision) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_content", { uuid, content, expectedRevision })),
 	setBlockStyle: (uuid: string, style: BlockStyle) => typedError<Block, CommandError>(__TAURI_INVOKE("set_block_style", { uuid, style })),
 	setTaskState: (uuid: string, taskState: TaskState) => typedError<Block, CommandError>(__TAURI_INVOKE("set_task_state", { uuid, taskState })),
-	splitBlock: (uuid: string, parts: BlockContent[], expectedRevision: ContentRevision) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts, expectedRevision })),
+	splitBlock: (uuid: string, parts: BlockContent[], expectedRevision: ContentRevision, placement: "siblings" | "first_child" | null) => typedError<Block[], CommandError>(__TAURI_INVOKE("split_block", { uuid, parts, expectedRevision, placement })),
 	getContainingPage: (blockUuid: string) => typedError<{
 	uuid: string,
 	kind: PageKind,
@@ -891,6 +891,8 @@ export type SourceRange = {
 	start: SourcePosition,
 	end: SourcePosition,
 };
+
+export type SplitBlockPlacement = "siblings" | "first_child";
 
 export type StartupErrorEvent = {
 	message: string,

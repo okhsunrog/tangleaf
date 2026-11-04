@@ -594,6 +594,14 @@ export function BlockNode({
     clearTimer();
     closeAutocomplete();
     const [before, after] = splitEditorContent(draftRef.current, selectionStart, selectionEnd);
+    const placement =
+      outline &&
+      selectionStart === selectionEnd &&
+      selectionEnd === draftRef.current.length &&
+      store.hasChildren(block.uuid) &&
+      !collapsed
+        ? "first_child"
+        : "siblings";
     const pending = { before, after };
     pendingSplit.current = pending;
     setSplitPreview(before);
@@ -611,6 +619,7 @@ export function BlockNode({
         block.uuid,
         [before, pending.after].map(blockContent),
         splitExpectedRevision(),
+        placement,
       );
       let next = changed.find((candidate) => candidate.uuid !== block.uuid);
       if (!next) throw new Error("Split returned no new block");

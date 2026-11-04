@@ -8,6 +8,14 @@ pub struct BlockContent {
     pub markdown: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitBlockPlacement {
+    #[default]
+    Siblings,
+    FirstChild,
+}
+
 pub(crate) fn next_append_order_key(last: Option<&OrderKey>) -> crate::CoreResult<OrderKey> {
     let Some(last) = last else {
         return Ok(OrderKey::first());
@@ -102,6 +110,7 @@ struct SiblingPosition {
 
 #[derive(Clone, Copy)]
 enum SiblingInsertion {
+    Start,
     End,
     Before(uuid::Uuid),
     After(uuid::Uuid),
@@ -196,6 +205,17 @@ fn sibling_placement(
         return Ok((Vec::new(), Vec::new()));
     }
     let (lower, upper) = match insertion {
+        SiblingInsertion::Start => (
+            None,
+            sibling_neighbor(
+                transaction,
+                page_uuid,
+                parent_uuid,
+                None,
+                false,
+                excluded_uuid,
+            )?,
+        ),
         SiblingInsertion::End => (
             sibling_neighbor(
                 transaction,
@@ -260,6 +280,7 @@ fn sibling_placement(
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let insertion_index = match insertion {
+        SiblingInsertion::Start => 0,
         SiblingInsertion::End => siblings.len(),
         SiblingInsertion::Before(uuid) | SiblingInsertion::After(uuid) => {
             siblings
@@ -829,12 +850,17 @@ fn split_placement(
     transaction: &rusqlite::Transaction<'_>,
     source: &Block,
     count: usize,
+    placement: SplitBlockPlacement,
 ) -> crate::CoreResult<(Vec<OrderKey>, Vec<OpKind>)> {
+    let (parent_uuid, insertion) = match placement {
+        SplitBlockPlacement::Siblings => (source.parent_uuid, SiblingInsertion::After(source.uuid)),
+        SplitBlockPlacement::FirstChild => (Some(source.uuid), SiblingInsertion::Start),
+    };
     sibling_placement(
         transaction,
         source.page_uuid,
-        source.parent_uuid,
-        SiblingInsertion::After(source.uuid),
+        parent_uuid,
+        insertion,
         None,
         count,
         crate::CoreError::conflict("split source is absent from its siblings"),
@@ -866,6 +892,25 @@ impl crate::store::NotesStore {
         parts: Vec<BlockContent>,
         expected_revision: ContentRevision,
     ) -> Result<crate::store::Committed<Vec<Block>>> {
+        self.split_block_at(
+            uuid,
+            parts,
+            expected_revision,
+            SplitBlockPlacement::Siblings,
+        )
+        .await
+    }
+
+    /// Keep the source block's identity and descendants while atomically placing
+    /// the remaining parts after it or before its existing children.
+    #[tracing::instrument(level = "debug", skip_all, fields(parts = parts.len(), ?placement))]
+    pub async fn split_block_at(
+        &self,
+        uuid: uuid::Uuid,
+        parts: Vec<BlockContent>,
+        expected_revision: ContentRevision,
+        placement: SplitBlockPlacement,
+    ) -> Result<crate::store::Committed<Vec<Block>>> {
         if parts.is_empty() {
             return Err(crate::CoreError::invalid("split requires at least one part").into());
         }
@@ -886,7 +931,11 @@ impl crate::store::NotesStore {
                     "block content changed since split began",
                 ));
             }
-            let (keys, moves) = split_placement(transaction, &source, parts.len() - 1)?;
+            let (keys, moves) = split_placement(transaction, &source, parts.len() - 1, placement)?;
+            let parent_uuid = match placement {
+                SplitBlockPlacement::Siblings => source.parent_uuid,
+                SplitBlockPlacement::FirstChild => Some(source.uuid),
+            };
             let now = chrono::Utc::now().timestamp();
             let mut result_uuids = vec![uuid];
             let mut kinds = vec![OpKind::BlockSetMarkdown(BlockSetMarkdown {
@@ -899,7 +948,7 @@ impl crate::store::NotesStore {
                 kinds.push(OpKind::BlockCreate(BlockCreate {
                     uuid: block_uuid,
                     page_uuid: source.page_uuid,
-                    parent_uuid: source.parent_uuid,
+                    parent_uuid,
                     order_key,
                     style: source.style,
                     markdown: part.markdown,

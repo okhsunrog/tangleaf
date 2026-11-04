@@ -13,6 +13,7 @@ import type {
   Block,
   BlockContent,
   BlockStyle,
+  SplitBlockPlacement,
   ChatEvent,
   ChatSource,
   CommandError,
@@ -228,7 +229,15 @@ export const createNote = checkedCommand(commands.createNote);
 export const ensureJournal = checkedCommand(commands.ensureJournal);
 export const getJournal = checkedCommand(commands.getJournal);
 export const appendToJournal = checkedCommand(commands.appendToJournal);
-export const splitBlock = checkedCommand(commands.splitBlock);
+const splitBlockCommand = checkedCommand(commands.splitBlock);
+export function splitBlock(
+  uuid: string,
+  parts: BlockContent[],
+  expectedRevision: ContentRevision,
+  placement: SplitBlockPlacement = "siblings",
+) {
+  return splitBlockCommand(uuid, parts, expectedRevision, placement);
+}
 export const isReady = commands.isReady;
 export const getStartupStatus = commands.startupStatus;
 export const getMobileSystemInfo = checkedCommand(commands.mobileSystemInfo);
