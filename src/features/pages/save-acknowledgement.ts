@@ -4,7 +4,7 @@ type VersionedSnapshot = Readonly<{ revision: string }>;
 type Receipt<T> = Readonly<{ identity: string; baseRevisions: ReadonlySet<string>; persisted: T }>;
 
 /** One clean acknowledgement while Query's deferred React props catch up. */
-class SaveAcknowledgement<T extends VersionedSnapshot> {
+export class SaveAcknowledgement<T extends VersionedSnapshot> {
   #receipt: Receipt<T> | null = null;
   readonly #listeners = new Set<() => void>();
 
@@ -18,11 +18,17 @@ class SaveAcknowledgement<T extends VersionedSnapshot> {
     };
   };
   acknowledge = (baseRevision: string, persisted: T) => {
+    this.acknowledgeMany([baseRevision], persisted);
+  };
+  acknowledgeMany = (baseRevisions: Iterable<string>, persisted: T) => {
+    const knownBases = new Set(baseRevisions);
     const bases =
-      this.#receipt?.persisted.revision === baseRevision ? this.#receipt.baseRevisions : [];
+      this.#receipt && knownBases.has(this.#receipt.persisted.revision)
+        ? this.#receipt.baseRevisions
+        : [];
     this.#receipt = {
       identity: this.identity,
-      baseRevisions: new Set([...bases, baseRevision]),
+      baseRevisions: new Set([...bases, ...knownBases]),
       persisted,
     };
     this.#listeners.forEach((listener) => listener());
@@ -42,8 +48,12 @@ class SaveAcknowledgement<T extends VersionedSnapshot> {
  * A matching or different incoming revision wins, then retires this receipt.
  * This is separate from dirty overlays, save ownership and CodeMirror history.
  */
-export function useSaveAcknowledgement<T extends VersionedSnapshot>(identity: string, incoming: T) {
-  const handoff = useMemo(() => new SaveAcknowledgement<T>(identity), [identity]);
+export function useSaveAcknowledgement<T extends VersionedSnapshot>(
+  identity: string,
+  incoming: T,
+  shared?: SaveAcknowledgement<T>,
+) {
+  const handoff = useMemo(() => shared ?? new SaveAcknowledgement<T>(identity), [identity, shared]);
   const receipt = useSyncExternalStore(handoff.subscribe, handoff.getSnapshot, handoff.getSnapshot);
   const superseded =
     receipt?.identity === identity &&

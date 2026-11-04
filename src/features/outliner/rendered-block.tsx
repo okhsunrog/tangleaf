@@ -57,6 +57,7 @@ export function RenderedBlock({
   );
   const compactMarkdown = (
     <MarkdownRenderer
+      className={layout === "outline" ? "outline-block-text" : undefined}
       context={{
         kind: "note",
         presentation: readOnly ? "reading" : "live_preview",
@@ -116,7 +117,11 @@ export function RenderedBlock({
 
   return (
     <MarkdownRenderer
-      className="whitespace-pre-wrap break-words text-sm leading-relaxed"
+      className={
+        layout === "outline"
+          ? "outline-block-text"
+          : "whitespace-pre-wrap break-words text-sm leading-relaxed"
+      }
       context={{
         kind: "note",
         presentation: readOnly ? "reading" : "live_preview",

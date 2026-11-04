@@ -14,7 +14,7 @@ import {
   type PageRenderSnapshot,
 } from "@/lib/api";
 import { notifyError } from "@/lib/notify";
-import { queryKeys } from "@/lib/query";
+import { queryKeys, refreshQueries } from "@/lib/query";
 import { PageSessionProvider, PageSessionRegistry } from "@/features/pages/page-session";
 import { Outliner } from "./outliner";
 
@@ -505,4 +505,37 @@ it("restores the current block and all typing if the merge fails", async () => {
   expect(snapshot.document.blocks).toHaveLength(4);
   expect(sessions.getSnapshot(page.uuid).blocks.b2.draft).toBe("XText 2");
   expect(notifyError).toHaveBeenCalled();
+});
+
+it("mounts the merged target from its acknowledgement while Query still has old props", async () => {
+  await render();
+  let finishRead!: () => void;
+  vi.mocked(getPageRenderSnapshot).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finishRead = () => resolve(snapshot);
+      }),
+  );
+  const apply = vi.mocked(replacePageDocument).getMockImplementation()!;
+  vi.mocked(replacePageDocument).mockImplementation(async (...args) => {
+    const result = await apply(...args);
+    // A mutation event retires the command's cache publication and starts a
+    // fresh read whose React props have not arrived when focus is transferred.
+    void refreshQueries(client, { queryKey: queryKeys.pageRender(page.uuid) });
+    return result;
+  });
+  await backspaceAtStart(2);
+  const cached = client.getQueryData<PageRenderSnapshot>(queryKeys.pageRender(page.uuid))!;
+  expect(cached.document.blocks.find((block) => block.uuid === "b1")!.markdown).toBe("Text 1");
+  const editor = row(1).querySelector<HTMLElement>(".cm-editor")!;
+  const view = EditorView.findFromDOM(editor)!;
+  expect(view.state.doc.toString()).toBe("Text 1Text 2");
+  expect(view.state.selection.main.head).toBe("Text 1".length);
+  await act(async () => {
+    finishRead();
+    await tick();
+    await tick();
+  });
+  expect(row(1).querySelector(".cm-editor")).toBe(editor);
+  expect(view.state.selection.main.head).toBe("Text 1".length);
 });

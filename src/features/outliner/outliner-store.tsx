@@ -12,9 +12,12 @@ import type { Block, PageLayout } from "@/lib/api";
 import type { EditorState } from "@codemirror/state";
 import { expandBlockSelection } from "./block-selection-model";
 import { flattenBlocks } from "./outliner-tree";
+import { SaveAcknowledgement } from "@/features/pages/save-acknowledgement";
+import type { PersistedTextSnapshot } from "@/features/pages/page-session";
 
 type Store = {
   editorStates: Map<string, EditorState>;
+  blockAcknowledgement: (uuid: string) => SaveAcknowledgement<PersistedTextSnapshot>;
   editingUuid: string | null;
   setEditing: (uuid: string | null, caret?: number) => void;
   editingCaret: number | undefined;
@@ -78,6 +81,25 @@ export function OutlinerProvider({
     setEditingUuid(uuid);
   }, []);
   const [editorStates] = useState(() => new Map<string, EditorState>());
+  const [acknowledgements] = useState(
+    () => new Map<string, SaveAcknowledgement<PersistedTextSnapshot>>(),
+  );
+  const blockAcknowledgement = useCallback(
+    (uuid: string) => {
+      let handoff = acknowledgements.get(uuid);
+      if (!handoff) {
+        handoff = new SaveAcknowledgement<PersistedTextSnapshot>(uuid);
+        acknowledgements.set(uuid, handoff);
+      }
+      return handoff;
+    },
+    [acknowledgements],
+  );
+  useEffect(() => {
+    const existing = new Set(blocks.map((block) => block.uuid));
+    for (const uuid of acknowledgements.keys())
+      if (!existing.has(uuid)) acknowledgements.delete(uuid);
+  }, [acknowledgements, blocks]);
   const [collapsedUuids, setCollapsedUuids] = useState<ReadonlySet<string>>(() => {
     const collapsed = new Set<string>();
     for (const block of blocks) {
@@ -146,6 +168,7 @@ export function OutlinerProvider({
   const store = useMemo(
     () => ({
       editorStates,
+      blockAcknowledgement,
       editingUuid,
       setEditing,
       editingCaret,
@@ -167,6 +190,7 @@ export function OutlinerProvider({
     }),
     [
       editorStates,
+      blockAcknowledgement,
       collapsedUuids,
       editingUuid,
       setEditing,

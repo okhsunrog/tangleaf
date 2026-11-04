@@ -773,6 +773,17 @@ html::before {
     overflow-wrap: anywhere;
   }
 
+  /* Plain outline text and CodeMirror share metrics and preserve authored
+     spacing. Collapsing spaces only in preview changes its wrapping on focus. */
+  .outline-block-text {
+    font-size: 0.875rem;
+    line-height: 1.625;
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    tab-size: 4;
+  }
+
   /* Notes use the same semantic Markdown tree in document and outline views.
      Block chrome chooses the density; prose rules never flatten the content. */
   .note-prose > :first-child {

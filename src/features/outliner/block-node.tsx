@@ -117,11 +117,16 @@ export function BlockNode({
   virtualIndex,
   style,
 }: Props) {
+  const store = useOutliner();
   const incomingText = useMemo(
     () => ({ text: incomingBlock.markdown, revision: incomingBlock.markdownRevision }),
     [incomingBlock.markdown, incomingBlock.markdownRevision],
   );
-  const [persistedText, acknowledgeSave] = useSaveAcknowledgement(incomingBlock.uuid, incomingText);
+  const [persistedText, acknowledgeSave] = useSaveAcknowledgement(
+    incomingBlock.uuid,
+    incomingText,
+    store.blockAcknowledgement(incomingBlock.uuid),
+  );
   const block = useMemo(
     () =>
       persistedText === incomingText
@@ -133,7 +138,6 @@ export function BlockNode({
           },
     [incomingBlock, incomingText, persistedText],
   );
-  const store = useOutliner();
   const queryClient = useQueryClient();
   const sessions = usePageSessionRegistry();
   const overlay = useBlockDraftOverlay(block.pageUuid, block.uuid);
@@ -710,6 +714,7 @@ export function BlockNode({
         throw new Error("The blocks changed before they could be merged");
       }
       const pending = { prefix: target.markdown, text: target.markdown + draft };
+      const targetBaseRevision = target.markdownRevision;
       pendingMerge.current = pending;
       clearTimer();
       editRef.current?.beginBuffer(pending.text, pending.prefix.length);
@@ -735,6 +740,15 @@ export function BlockNode({
         committedTarget = target;
       }
       const finalTarget = target;
+      // The existing destination may mount before Query delivers its refreshed
+      // props. Seed the same clean receipt used for ordinary saves so WebKit
+      // never focuses the old document and then resets its native caret.
+      store
+        .blockAcknowledgement(finalTarget.uuid)
+        .acknowledgeMany([previous.markdownRevision, targetBaseRevision], {
+          text: finalTarget.markdown,
+          revision: finalTarget.markdownRevision,
+        });
       sessions.discardBlock(block.pageUuid, block.uuid);
       publishQuerySnapshot<PageRenderSnapshot>(queryClient, publication, (snapshot) =>
         snapshot
@@ -756,7 +770,7 @@ export function BlockNode({
       pendingMerge.current = null;
       if (editingRef.current)
         store.setEditing(finalTarget.uuid, state?.selection.main.head ?? pending.prefix.length);
-      void refreshQueries(queryClient, { queryKey: queryKeys.pageRender(block.pageUuid) });
+      await refreshQueries(queryClient, { queryKey: queryKeys.pageRender(block.pageUuid) });
     } catch (error) {
       const pending = pendingMerge.current;
       pendingMerge.current = null;
@@ -829,7 +843,7 @@ export function BlockNode({
   const onKeyDown = (event: BlockEditKeyEvent) => {
     // Text/IME input remains available during persistence. Structural operations
     // must not race the pending split; Enter here remains a normal newline.
-    if (pendingSplit.current || mergePromise.current)
+    if (pendingSplit.current || mergePromise.current || store.merging)
       return event.key === "Tab" || event.key === "Escape";
     const resolution = resolveBlockEditKey(event, {
       autocompleteOpen: trigger !== null,
@@ -961,7 +975,7 @@ export function BlockNode({
           </button>
         )}
         <div
-          className="relative min-w-0 flex-1"
+          className="outline-block-text relative min-w-0 flex-1"
           onClick={(event) => {
             if (!editing && !readOnly && !store.merging) {
               initialPointer.current = { x: event.clientX, y: event.clientY };

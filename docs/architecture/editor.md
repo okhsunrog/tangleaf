@@ -79,6 +79,9 @@ Outline has one primary workflow: Editing with Live Preview.
 
 Only the active block mounts an editor instance. Inactive blocks remain lightweight semantic React
 output; tangleaf must not mount one editor per visible block.
+Plain outline text shares font, line height, tab width and preserved whitespace with the editor,
+so activating a block does not reflow ordinary text. Markdown decorations can change its rendered
+appearance as their source markers become editable.
 
 Dragging within one block keeps native text selection. Crossing a block boundary selects a
 contiguous range of whole blocks in visible outline order. A selected parent includes its complete

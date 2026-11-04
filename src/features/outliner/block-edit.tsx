@@ -54,7 +54,7 @@ const editorTheme = EditorView.theme({
     minHeight: "1.5rem",
     color: "var(--foreground)",
     backgroundColor: "transparent",
-    fontSize: "0.875rem",
+    fontSize: "inherit",
   },
   "&.cm-focused": {
     outline: "none",
@@ -62,7 +62,7 @@ const editorTheme = EditorView.theme({
   ".cm-scroller": {
     overflow: "visible",
     fontFamily: "inherit",
-    lineHeight: "1.625",
+    lineHeight: "inherit",
   },
   ".cm-content": {
     minHeight: "1.5rem",

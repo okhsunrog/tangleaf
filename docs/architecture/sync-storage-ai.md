@@ -186,13 +186,16 @@ before/after `ChangeSet` facts, including old and new containers; they do not in
 input operations. Observer failure cannot turn an already committed write into a reported failure.
 
 Text editors keep dirty session overlays separate from the clean save acknowledgement.
-A shared component-local handoff exposes the acknowledged snapshot synchronously while Query
+A clean handoff exposes the acknowledged snapshot synchronously while Query
 observer props catch up. It masks only explicitly superseded local base revisions; another
 incoming revision wins immediately. Consecutive own acknowledgements preserve their known
 unobserved base chain, then retire it on catch-up or a different snapshot. Block text keeps
 incoming placement/style metadata; document buffer, source map and revision travel together.
 This prevents stale text echoes from corrupting CodeMirror Undo without resetting its history
 or treating acknowledged text as another dirty write.
+Outline blocks share these receipts through their page provider, allowing a structural merge to
+seed the destination before it mounts an editor. Known destination base revisions are superseded
+together, so delayed Query props cannot focus an old document and reset the native caret.
 
 Each SQLite worker admits at most 64 outstanding jobs. Admission is cancelable before acceptance;
 an accepted write remains owned by the worker when its waiting frontend future disappears.
