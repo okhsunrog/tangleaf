@@ -23,7 +23,7 @@ export type BlockEditKeyAction =
   | "accept-autocomplete"
   | "close-autocomplete"
   | "collapse"
-  | "delete-empty"
+  | "merge-previous"
   | "indent"
   | "move-next"
   | "move-previous"
@@ -101,8 +101,8 @@ export function resolveBlockEditKey(
   if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
     return { action: "split", closeAutocomplete };
   }
-  if (event.key === "Backspace" && context.draftEmpty) {
-    return { action: "delete-empty", closeAutocomplete };
+  if (event.key === "Backspace" && event.selectionStart === 0 && event.selectionEnd === 0) {
+    return { action: "merge-previous", closeAutocomplete };
   }
   if (event.key === "Tab") {
     return {

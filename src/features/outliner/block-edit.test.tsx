@@ -110,6 +110,25 @@ it("uses the activation click for caret placement instead of jumping to the end"
   expect(view().state.selection.main.anchor).toBe(2);
 });
 
+it("places an explicit structural caret before applying an old activation click", async () => {
+  const { root, view } = mount();
+  const position = vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(0);
+  await act(async () =>
+    root.render(
+      <BlockEdit
+        initial="ABCDEF"
+        initialCaret={3}
+        initialPointer={{ x: 0, y: 0 }}
+        autoFocus
+        onChange={() => {}}
+        onBlur={() => {}}
+      />,
+    ),
+  );
+  expect(view().state.selection.main.head).toBe(3);
+  expect(position).not.toHaveBeenCalled();
+});
+
 it("updates an acknowledged block without replacing its editor or losing focus", async () => {
   const { root, view } = mount();
   const onChange = vi.fn();

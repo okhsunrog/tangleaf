@@ -64,6 +64,28 @@ describe("active block editor model", () => {
     expect(splitEditorContent("left selected right", 5, 13)).toEqual(["left ", " right"]);
     expect(splitEditorContent("abcdef", 4, 2)).toEqual(["ab", "ef"]);
   });
+  it("merges only a collapsed Backspace at offset zero, including empty blocks", () => {
+    expect(
+      resolveBlockEditKey(key("Backspace", { selectionStart: 0, selectionEnd: 0 }), idleContext)
+        .action,
+    ).toBe("merge-previous");
+    expect(
+      resolveBlockEditKey(key("Backspace", { value: "", selectionStart: 0, selectionEnd: 0 }), {
+        ...idleContext,
+        draftEmpty: true,
+      }).action,
+    ).toBe("merge-previous");
+    expect(
+      resolveBlockEditKey(key("Backspace", { selectionStart: 0, selectionEnd: 3 }), idleContext)
+        .action,
+    ).toBe("native");
+    expect(
+      resolveBlockEditKey(
+        key("Backspace", { selectionStart: 0, selectionEnd: 0, isComposing: true }),
+        idleContext,
+      ).action,
+    ).toBe("native");
+  });
 
   it("flushes immediate typing before Enter splits against the acknowledged revision", async () => {
     let revision = "r1";

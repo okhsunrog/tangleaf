@@ -89,6 +89,13 @@ the current page's draft owners are drained; another pane's unsaved state is lef
 the entire range leaves one empty editable block. Selection membership uses UUIDs and the logical
 tree, so virtualization and scrolling cannot omit off-screen blocks from copy or deletion.
 
+Backspace with a collapsed caret at offset zero appends the current text to the previous visible
+block and places the caret at the join. The destination keeps its UUID and style; the source's
+children move under it in their existing order. A folded destination retains its hidden children.
+The page writer commits the merge as one structural history action. Pending typing has its own
+buffer until acknowledgement and remains recoverable on failure. The first block has no merge
+target, and ordinary text selections and IME composition remain editor operations.
+
 ### Document layout
 
 Document presents the page as one continuous authoring surface even though storage remains a tree

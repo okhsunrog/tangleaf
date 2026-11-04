@@ -11,11 +11,16 @@ import type { MarkdownImageResolver, MarkdownOpenHandler } from "@/features/mark
 import type { Block, PageLayout } from "@/lib/api";
 import type { EditorState } from "@codemirror/state";
 import { expandBlockSelection } from "./block-selection-model";
+import { flattenBlocks } from "./outliner-tree";
 
 type Store = {
   editorStates: Map<string, EditorState>;
   editingUuid: string | null;
-  setEditing: (uuid: string | null) => void;
+  setEditing: (uuid: string | null, caret?: number) => void;
+  editingCaret: number | undefined;
+  previousVisibleBlock: (uuid: string) => Block | null;
+  merging: boolean;
+  setMerging: (merging: boolean) => void;
   selectedUuids: ReadonlySet<string>;
   selectBlocks: (uuids: readonly string[]) => void;
   layout: PageLayout;
@@ -64,9 +69,12 @@ export function OutlinerProvider({
     initialEditingRequest > 0 ? initialEditingUuid : null,
   );
   const [selection, selectBlocks] = useState<readonly string[]>([]);
+  const [editingCaret, setEditingCaret] = useState<number>();
+  const [merging, setMerging] = useState(false);
   const selectedUuids = useMemo(() => expandBlockSelection(blocks, selection), [blocks, selection]);
-  const setEditing = useCallback((uuid: string | null) => {
+  const setEditing = useCallback((uuid: string | null, caret?: number) => {
     selectBlocks([]);
+    setEditingCaret(caret);
     setEditingUuid(uuid);
   }, []);
   const [editorStates] = useState(() => new Map<string, EditorState>());
@@ -82,6 +90,10 @@ export function OutlinerProvider({
   const parentUuids = useMemo(
     () => new Set(blocks.flatMap((block) => (block.parentUuid ? [block.parentUuid] : []))),
     [blocks],
+  );
+  const visibleBlocks = useMemo(
+    () => flattenBlocks(blocks, (uuid) => collapsedUuids.has(uuid)).map(({ block }) => block),
+    [blocks, collapsedUuids],
   );
 
   const revealed = useRef<{ uuid: string | null; request: number } | null>(null);
@@ -136,6 +148,13 @@ export function OutlinerProvider({
       editorStates,
       editingUuid,
       setEditing,
+      editingCaret,
+      merging,
+      setMerging,
+      previousVisibleBlock: (uuid: string) => {
+        const index = visibleBlocks.findIndex((block) => block.uuid === uuid);
+        return index > 0 ? visibleBlocks[index - 1] : null;
+      },
       selectedUuids,
       selectBlocks,
       layout,
@@ -151,6 +170,9 @@ export function OutlinerProvider({
       collapsedUuids,
       editingUuid,
       setEditing,
+      editingCaret,
+      merging,
+      visibleBlocks,
       selectedUuids,
       layout,
       onOpenMarkdownLink,

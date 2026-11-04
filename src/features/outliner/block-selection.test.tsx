@@ -397,3 +397,112 @@ it("leaves another page's unsaved conflict alone when deleting this selection", 
   expect(other).not.toHaveBeenCalled();
   expect(sessions.getSnapshot("other").blocks["other-block"].draft).toBe("Unsaved");
 });
+
+async function backspaceAtStart(index: number) {
+  await act(async () => row(index).querySelector<HTMLElement>(".cursor-text")!.click());
+  const view = EditorView.findFromDOM(row(index).querySelector<HTMLElement>(".cm-editor")!)!;
+  act(() => view.dispatch({ selection: { anchor: 0 } }));
+  await act(async () => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+    );
+    await tick();
+    await tick();
+  });
+  return view;
+}
+
+it("joins a nonempty block into the previous visible block at the exact text boundary", async () => {
+  await render();
+  await backspaceAtStart(2);
+  expect(replacePageDocument).toHaveBeenCalledTimes(1);
+  expect(snapshot.document.blocks.map((block) => block.markdown)).toEqual([
+    "Text 0",
+    "Text 1Text 2",
+    "Text 3",
+  ]);
+  const view = EditorView.findFromDOM(row(1).querySelector<HTMLElement>(".cm-editor")!)!;
+  expect(view.state.selection.main.head).toBe("Text 1".length);
+  expect(view.hasFocus).toBe(true);
+});
+
+it("joins empty blocks and preserves children when merging across outline levels", async () => {
+  await render([block(0), block(1, "b0"), { ...block(2), markdown: "" }, block(3, "b2")]);
+  await backspaceAtStart(2);
+  expect(snapshot.document.blocks.map((block) => [block.uuid, block.parentUuid])).toEqual([
+    ["b0", null],
+    ["b1", "b0"],
+    ["b3", "b1"],
+  ]);
+  expect(snapshot.document.blocks[1].markdown).toBe("Text 1");
+});
+
+it("uses a folded previous parent as the target while preserving its hidden descendants", async () => {
+  localStorage.setItem("outliner.collapsed.b0", "1");
+  await render([block(0), block(1, "b0"), block(2)]);
+  await backspaceAtStart(2);
+  expect(
+    snapshot.document.blocks.map((block) => [block.uuid, block.parentUuid, block.markdown]),
+  ).toEqual([
+    ["b0", null, "Text 0Text 2"],
+    ["b1", "b0", "Text 1"],
+  ]);
+});
+
+it("does nothing at the first block boundary", async () => {
+  await render();
+  await backspaceAtStart(0);
+  expect(getPageDocument).not.toHaveBeenCalled();
+  expect(replacePageDocument).not.toHaveBeenCalled();
+});
+
+it("retains typing at the join while the atomic merge is in flight", async () => {
+  await render();
+  const apply = vi.mocked(replacePageDocument).getMockImplementation()!;
+  let finish!: () => void;
+  vi.mocked(replacePageDocument).mockImplementation(async (...args) => {
+    const document = await apply(...args);
+    return new Promise((resolve) => {
+      finish = () => resolve(document);
+    });
+  });
+  const view = await backspaceAtStart(2);
+  expect(view.state.doc.toString()).toBe("Text 1Text 2");
+  act(() =>
+    view.dispatch({
+      changes: { from: "Text 1".length, insert: "X" },
+      selection: { anchor: "Text 1X".length },
+    }),
+  );
+  await act(async () => {
+    finish();
+    await tick();
+    await tick();
+  });
+  expect(setBlockContent).toHaveBeenCalledWith("b1", { markdown: "Text 1XText 2" }, "r2");
+  const targetView = EditorView.findFromDOM(row(1).querySelector<HTMLElement>(".cm-editor")!)!;
+  expect(targetView.state.doc.toString()).toBe("Text 1XText 2");
+  expect(targetView.state.selection.main.head).toBe("Text 1X".length);
+});
+
+it("restores the current block and all typing if the merge fails", async () => {
+  await render();
+  let fail!: () => void;
+  vi.mocked(replacePageDocument).mockImplementation(
+    () =>
+      new Promise((_resolve, reject) => {
+        fail = () => reject(new Error("offline"));
+      }),
+  );
+  const view = await backspaceAtStart(2);
+  act(() => view.dispatch({ changes: { from: "Text 1".length, insert: "X" } }));
+  await act(async () => {
+    fail();
+    await tick();
+    await tick();
+  });
+  expect(view.state.doc.toString()).toBe("XText 2");
+  expect(snapshot.document.blocks).toHaveLength(4);
+  expect(sessions.getSnapshot(page.uuid).blocks.b2.draft).toBe("XText 2");
+  expect(notifyError).toHaveBeenCalled();
+});

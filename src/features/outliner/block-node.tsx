@@ -21,8 +21,8 @@ import { notifyError, notifyInfo } from "@/lib/notify";
 import { uiProfilePoint, uiProfileSpan } from "@/lib/ui-profile";
 import {
   CommandFailure,
-  deleteBlock,
   getBlock,
+  getPageDocument,
   indentBlock,
   moveBlockDown,
   moveBlockUp,
@@ -33,6 +33,7 @@ import {
   setBlockContent,
   setBlockStyle,
   setTaskState,
+  replacePageDocument,
   type Block,
   type BlockContent,
   type BlockStyle,
@@ -80,6 +81,7 @@ import {
   replaceCachedBlock,
   type BlockStyleIcon,
 } from "./block-style";
+import { mergedBlockDocument, mergeSourceMatches } from "./block-merge-model";
 
 type Props = {
   block: Block;
@@ -155,6 +157,8 @@ export function BlockNode({
   const initialPointer = useRef<{ x: number; y: number } | null>(null);
   const pendingSplit = useRef<{ before: string; after: string } | null>(null);
   const splitPromise = useRef<Promise<void> | null>(null);
+  const mergePromise = useRef<Promise<void> | null>(null);
+  const pendingMerge = useRef<{ text: string; prefix: string } | null>(null);
   const [splitPreview, setSplitPreview] = useState<string | null>(null);
   const [draftLen, setDraftLen] = useState(effectiveMarkdown.length);
   const longBlock = (editing ? draftLen : effectiveMarkdown.length) >= LONG_BLOCK_CHARS;
@@ -348,6 +352,7 @@ export function BlockNode({
   const flushRef = useRef(flush);
   flushRef.current = async () => {
     if (splitPromise.current) await splitPromise.current;
+    if (mergePromise.current) await mergePromise.current;
     return flush();
   };
   useEffect(
@@ -436,6 +441,10 @@ export function BlockNode({
   }, [trigger]);
 
   const onDraftChange = (value: string, caret: number) => {
+    if (pendingMerge.current) {
+      pendingMerge.current.text = value;
+      return;
+    }
     if (pendingSplit.current) {
       pendingSplit.current.after = value;
       return;
@@ -506,7 +515,7 @@ export function BlockNode({
   };
 
   const onPaste = (event: BlockEditPasteEvent) => {
-    if (pendingSplit.current) return false;
+    if (pendingSplit.current || mergePromise.current) return false;
     if (event.isComposing || !event.text) return false;
     const paragraphs = event.text
       .split(/\n[ \t]*(?:\n[ \t]*)+/)
@@ -683,26 +692,93 @@ export function BlockNode({
     }
   };
 
-  const onBackspaceEmpty = async () => {
-    if (draftRef.current.length > 0) return false;
-    const prev = prevSibling(siblings(), block.uuid);
+  const onMergePrevious = async (saved: Promise<boolean>, previous: Block) => {
+    let committedTarget: Block | undefined;
     try {
+      if (!(await saved)) throw new Error("Resolve unsaved changes before merging blocks");
+      const document = await getPageDocument(block.pageUuid);
+      if (!document) throw new Error("This page no longer exists");
+      const source = document.blocks.find((candidate) => candidate.uuid === block.uuid);
+      let target = document.blocks.find((candidate) => candidate.uuid === previous.uuid);
+      const draft = draftRef.current;
+      const overlay = sessions.getSnapshot(block.pageUuid).blocks[block.uuid];
+      const expected = {
+        ...blockRef.current,
+        markdownRevision: overlay?.baseRevision ?? blockRef.current.markdownRevision,
+      };
+      if (!source || !target || !mergeSourceMatches(source, expected, draft)) {
+        throw new Error("The blocks changed before they could be merged");
+      }
+      const pending = { prefix: target.markdown, text: target.markdown + draft };
+      pendingMerge.current = pending;
+      clearTimer();
+      editRef.current?.beginBuffer(pending.text, pending.prefix.length);
       const publication = captureSnapshotPublication(
         queryClient,
-        queryKeys.children(containerUuid),
+        queryKeys.pageRender(block.pageUuid),
       );
-      const ok = await deleteBlock(block.uuid);
-      if (!ok) return false;
+      const updated = await replacePageDocument(
+        block.pageUuid,
+        document.revision,
+        mergedBlockDocument(document, block.uuid, target.uuid, pending.text),
+      );
+      target = updated.blocks.find((candidate) => candidate.uuid === previous.uuid);
+      if (!target) throw new Error("Merge returned no target block");
+      committedTarget = target;
+      // Keep characters typed at the join while the atomic command is pending.
+      while (target.markdown !== pending.text) {
+        target = await setBlockContent(
+          target.uuid,
+          blockContent(pending.text),
+          target.markdownRevision,
+        );
+        committedTarget = target;
+      }
+      const finalTarget = target;
       sessions.discardBlock(block.pageUuid, block.uuid);
-      publishQuerySnapshot<Block[]>(queryClient, publication, (rows) =>
-        rows?.filter((row) => row.uuid !== block.uuid),
+      publishQuerySnapshot<PageRenderSnapshot>(queryClient, publication, (snapshot) =>
+        snapshot
+          ? {
+              ...snapshot,
+              document: {
+                ...updated,
+                blocks: updated.blocks.map((candidate) =>
+                  candidate.uuid === finalTarget.uuid ? finalTarget : candidate,
+                ),
+              },
+            }
+          : snapshot,
       );
-      if (prev) store.setEditing(prev.uuid);
-      else store.setEditing(null);
-      return true;
-    } catch (e) {
-      console.error("backspace delete failed", e);
-      return false;
+      store.editorStates.delete(block.uuid);
+      store.editorStates.delete(finalTarget.uuid);
+      const state = editRef.current?.getState();
+      if (state) store.editorStates.set(finalTarget.uuid, state);
+      pendingMerge.current = null;
+      if (editingRef.current)
+        store.setEditing(finalTarget.uuid, state?.selection.main.head ?? pending.prefix.length);
+      void refreshQueries(queryClient, { queryKey: queryKeys.pageRender(block.pageUuid) });
+    } catch (error) {
+      const pending = pendingMerge.current;
+      pendingMerge.current = null;
+      if (pending && committedTarget) {
+        sessions.discardBlock(block.pageUuid, block.uuid);
+        sessions.editBlock(block.pageUuid, committedTarget.uuid, pending.text, {
+          text: committedTarget.markdown,
+          revision: committedTarget.markdownRevision,
+        });
+        await refreshQueries(queryClient, { queryKey: queryKeys.pageRender(block.pageUuid) });
+        if (editingRef.current) store.setEditing(committedTarget.uuid);
+      } else if (pending) {
+        // Strip an untouched prefix; if it was edited, retain the complete
+        // buffer so a failed command cannot silently drop any typed text.
+        const restored = pending.text.startsWith(pending.prefix)
+          ? pending.text.slice(pending.prefix.length)
+          : pending.text;
+        onDraftChange(restored, restored.length);
+        editRef.current?.beginBuffer(restored, 0);
+      }
+      setSaveState("error");
+      notifyError("merge blocks", error);
     }
   };
 
@@ -753,7 +829,8 @@ export function BlockNode({
   const onKeyDown = (event: BlockEditKeyEvent) => {
     // Text/IME input remains available during persistence. Structural operations
     // must not race the pending split; Enter here remains a normal newline.
-    if (pendingSplit.current) return event.key === "Tab" || event.key === "Escape";
+    if (pendingSplit.current || mergePromise.current)
+      return event.key === "Tab" || event.key === "Escape";
     const resolution = resolveBlockEditKey(event, {
       autocompleteOpen: trigger !== null,
       autocompleteHasItems: acItems.length > 0,
@@ -790,9 +867,21 @@ export function BlockNode({
           splitPromise.current = null;
         });
         return true;
-      case "delete-empty":
-        void onBackspaceEmpty();
+      case "merge-previous": {
+        const previous = store.previousVisibleBlock(block.uuid);
+        if (!previous) return true;
+        clearTimer();
+        closeAutocomplete();
+        store.setMerging(true);
+        // Start draining synchronously before registering the merge promise:
+        // this node's flush owner must not await its own structural action.
+        const saved = sessions.flushPage(block.pageUuid);
+        mergePromise.current = onMergePrevious(saved, previous).finally(() => {
+          mergePromise.current = null;
+          store.setMerging(false);
+        });
         return true;
+      }
       case "indent":
         void onTab();
         return true;
@@ -826,7 +915,7 @@ export function BlockNode({
       data-block-depth={depth}
       data-block-uuid={block.uuid}
       data-block-selected={store.selectedUuids.has(block.uuid) || undefined}
-      data-block-pending={splitPreview !== null || undefined}
+      data-block-pending={splitPreview !== null || (editing && store.merging) || undefined}
       data-block-style={block.style.kind}
       data-task-state={block.style.kind === "task" ? block.style.state : undefined}
     >
@@ -874,7 +963,7 @@ export function BlockNode({
         <div
           className="relative min-w-0 flex-1"
           onClick={(event) => {
-            if (!editing && !readOnly) {
+            if (!editing && !readOnly && !store.merging) {
               initialPointer.current = { x: event.clientX, y: event.clientY };
               draftRef.current = effectiveMarkdown;
               store.setEditing(block.uuid);
@@ -893,8 +982,9 @@ export function BlockNode({
                 stateCache={store.editorStates}
                 blockUuid={block.uuid}
                 initialPointer={initialPointer.current}
+                initialCaret={store.editingCaret}
                 initial={effectiveMarkdown}
-                syncExternal={pendingSplit.current === null}
+                syncExternal={pendingSplit.current === null && pendingMerge.current === null}
                 onChange={onDraftChange}
                 onBlur={() => {
                   initialPointer.current = null;
@@ -958,7 +1048,7 @@ export function BlockNode({
                 readOnly={readOnly}
                 onOpenLink={store.onOpenMarkdownLink}
                 resolveImage={store.resolveImage}
-                taskBusy={styleBusy}
+                taskBusy={styleBusy || store.merging}
                 onTaskStateChange={(state) => void changeTaskState(state)}
               />
             </div>
@@ -968,7 +1058,7 @@ export function BlockNode({
           <TaskStatePicker
             state={block.style.state}
             editing={editing}
-            busy={styleBusy}
+            busy={styleBusy || store.merging}
             onChange={(value) => void changeTaskState(value)}
             onRestoreEditorFocus={() => editRef.current?.focus()}
           />
@@ -977,7 +1067,7 @@ export function BlockNode({
           <BlockStylePicker
             style={block.style}
             editing={editing}
-            busy={styleBusy}
+            busy={styleBusy || store.merging}
             onChange={(value) => void changeBlockStyle(value)}
             onRestoreEditorFocus={() => editRef.current?.focus()}
           />

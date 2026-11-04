@@ -24,7 +24,7 @@ import {
 } from "./block-edit-model";
 
 export type BlockEditHandle = {
-  beginBuffer: (value: string) => void;
+  beginBuffer: (value: string, caret?: number) => void;
   getState: () => EditorState | undefined;
   /** Replace text and selection in one CodeMirror transaction. */
   replaceRange: (start: number, end: number, replacement: string, caret?: number) => void;
@@ -37,6 +37,7 @@ type Props = {
   stateCache?: Map<string, EditorState>;
   blockUuid?: string;
   initialPointer?: { x: number; y: number } | null;
+  initialCaret?: number;
   initial: string;
   onChange: (value: string, caret: number) => void;
   onBlur: () => void;
@@ -94,6 +95,7 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
     stateCache,
     blockUuid,
     initialPointer,
+    initialCaret,
     syncExternal = true,
   },
   ref,
@@ -109,9 +111,13 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
   useImperativeHandle(
     ref,
     () => ({
-      beginBuffer(value) {
+      beginBuffer(value, caret = 0) {
         viewRef.current?.setState(
-          EditorState.create({ doc: value, extensions: extensionsRef.current }),
+          EditorState.create({
+            doc: value,
+            selection: { anchor: Math.max(0, Math.min(caret, value.length)) },
+            extensions: extensionsRef.current,
+          }),
         );
         viewRef.current?.focus();
       },
@@ -243,7 +249,11 @@ export const BlockEdit = forwardRef<BlockEditHandle, Props>(function BlockEdit(
       "requestMeasure",
     ]);
     viewRef.current = view;
-    if (initialPointer) {
+    if (initialCaret !== undefined) {
+      view.dispatch({
+        selection: { anchor: Math.max(0, Math.min(initialCaret, state.doc.length)) },
+      });
+    } else if (initialPointer) {
       const anchor = view.posAtCoords(initialPointer);
       if (anchor !== null) view.dispatch({ selection: { anchor } });
     }
